@@ -82,6 +82,63 @@ func typeExprMangle(te ast.TypeExpr) string {
 	return "t"
 }
 
+// typeExprMangleDeep is a richer variant of typeExprMangle that fully
+// expands FuncType signatures.  Used by appendGenericFuncOverload to
+// keep two same-arity generic decls coexisting in the overload registry
+// when only their return-fn shape differs (e.g. `fn map[t,u](f) fn([t]) [u]`
+// vs `fn map[t,u](f) fn(*Seq[t]) *Seq[u]`).  Kept separate from the
+// shallow mangle so existing IR-name layouts stay untouched.
+func typeExprMangleDeep(te ast.TypeExpr) string {
+	if te == nil {
+		return "void"
+	}
+
+	switch t := te.(type) {
+	case *ast.FuncType:
+		parts := []string{"fn"}
+		for _, p := range t.Params {
+			parts = append(parts, typeExprMangleDeep(p))
+		}
+
+		parts = append(parts, "to_"+typeExprMangleDeep(t.RetType))
+
+		return strings.Join(parts, "_")
+	case *ast.PointerType:
+		if t.IsConst {
+			return "cptr_" + typeExprMangleDeep(t.Elem)
+		}
+
+		return "ptr_" + typeExprMangleDeep(t.Elem)
+	case *ast.ArrayType:
+		return "arr_" + typeExprMangleDeep(t.Elem)
+	case *ast.GenericType:
+		parts := []string{t.Name}
+		for _, tp := range t.TypeParams {
+			parts = append(parts, typeExprMangleDeep(tp))
+		}
+
+		return strings.Join(parts, "_")
+	}
+
+	return typeExprMangle(te)
+}
+
+// funcParamSigDeep returns funcParamSig but with FuncType params expanded
+// recursively.  See typeExprMangleDeep.
+func funcParamSigDeep(params []ast.Param) string {
+	var parts []string
+
+	for _, p := range params {
+		if p.IsVarArgs {
+			continue
+		}
+
+		parts = append(parts, typeExprMangleDeep(p.Type))
+	}
+
+	return strings.Join(parts, "__")
+}
+
 // funcParamSig returns the mangled parameter-type signature for a function
 // declaration, e.g. "i64__string" for (n i64, s string).
 // Vararg parameters are excluded.
@@ -141,13 +198,32 @@ func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*a
 		return overloads
 	}
 
-	sig := funcParamSig(fd.Params)
+	sig := funcParamSigDeep(fd.Params)
+	retSig := ""
+
+	if fd.RetType != nil {
+		retSig = typeExprMangleDeep(fd.RetType)
+	}
+
 	for i, existing := range overloads {
 		if existing == fd {
 			return overloads
 		}
 
-		if funcParamSig(existing.Params) == sig && len(existing.TypeParams) == len(fd.TypeParams) {
+		existingRetSig := ""
+		if existing.RetType != nil {
+			existingRetSig = typeExprMangleDeep(existing.RetType)
+		}
+		// Only collapse re-registrations of the SAME template (matching
+		// param sig + return sig + arity).  Two overloads sharing a
+		// param shape but differing in return type (e.g. eager
+		// `fn map[t,u](f) fn([t]) [u]` vs lazy
+		// `fn map[t,u](f) fn(*Seq[t]) *Seq[u]`) MUST both stay in the
+		// registry so pickGenericFuncOverloadHinted can pick between
+		// them by pipe-LHS shape.
+		if funcParamSigDeep(existing.Params) == sig &&
+			existingRetSig == retSig &&
+			len(existing.TypeParams) == len(fd.TypeParams) {
 			overloads[i] = fd
 
 			return overloads
@@ -157,12 +233,29 @@ func appendGenericFuncOverload(overloads []*ast.FuncDecl, fd *ast.FuncDecl) []*a
 	return append(overloads, fd)
 }
 
-// pickGenericFuncOverload returns the entry from overloads whose declared
+// pickGenericFuncOverloadHinted returns the entry from overloads whose declared
 // param arity matches argCount.  Returns nil when no overload matches or
 // when the choice would be ambiguous (multiple matches of the same arity).
 // The single-entry case short-circuits so the common non-overloaded path
 // stays a single pointer read.
-func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int) *ast.FuncDecl {
+//
+// When argTypes is non-nil (and every entry is a resolved LLVM type), the
+// resolver also scores each candidate's first-param "shape" against the
+// matching arg's LLVM type and prefers the higher-scoring candidate among
+// arity ties.  This is what lets `fn poke[t](xs [t])` and
+// `fn poke[t](p *Pingable[t])` coexist: the array vs trait-iface shape
+// disambiguates even though both templates have arity 1 and the bare-name
+// overload table can't tell them apart from arity alone.
+//
+// curriedRetHint covers the pipe case: when the call site is the RHS of
+// `xs |> f(args)`, callers pass the LHS's LLVM type so candidates whose
+// declared return is `fn(<head>) <ret>` and whose `<head>` matches the
+// hint get a tie-breaking score bump.  Lets two arity-1 generic
+// overloads differing only in the SHAPE of the closure they return
+// (e.g. `fn map[t,u](f) fn([t]) [u]` vs
+// `fn map[t,u](f) fn(Seq[t]) Seq[u]`) coexist under the same bare name
+// and resolve by what's piped into them.
+func pickGenericFuncOverloadHinted(overloads []*ast.FuncDecl, argCount int, argTypes []irtypes.Type, curriedRetHint irtypes.Type) *ast.FuncDecl {
 	if len(overloads) == 0 {
 		return nil
 	}
@@ -176,6 +269,46 @@ func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int) *ast.FuncD
 		hits   int
 		strict int
 	)
+
+	// Arity-1 multi-candidate path: prefer the entry whose param shape best
+	// matches the resolved arg types.  Falls back to arity-only when args
+	// are unknown (callers can pass nil during early resolution passes).
+	if argTypes != nil && len(argTypes) == argCount {
+		var (
+			bestScore int
+			best      *ast.FuncDecl
+			bestTies  int
+		)
+
+		for _, fd := range overloads {
+			fixed := 0
+
+			for _, p := range fd.Params {
+				if !p.IsVarArgs {
+					fixed++
+				}
+			}
+
+			if fixed != argCount {
+				continue
+			}
+
+			score := scoreGenericTemplate(fd, argTypes)
+			score += scoreCurriedReturn(fd, curriedRetHint)
+
+			if score > bestScore {
+				bestScore = score
+				best = fd
+				bestTies = 1
+			} else if score == bestScore && score > 0 {
+				bestTies++
+			}
+		}
+
+		if best != nil && bestTies == 1 {
+			return best
+		}
+	}
 
 	for _, fd := range overloads {
 		fixed := 0
@@ -215,6 +348,136 @@ func pickGenericFuncOverload(overloads []*ast.FuncDecl, argCount int) *ast.FuncD
 	}
 
 	return nil
+}
+
+// scoreGenericTemplate ranks how well a generic-function template's
+// parameter list matches a concrete argument-type list.  Higher is better;
+// 0 means no shape can be matched.  Used by pickGenericFuncOverload to
+// disambiguate generic overloads that share an arity but differ in the
+// "head shape" of their parameters (e.g. `[t]` vs `*Trait[t]` vs `T`).
+//
+// Scoring is per-arg, summed across all positions:
+//   - concrete-type-arg agreement (i64 param + i64 arg): +100
+//   - head-shape match with unbound type param (`[t]` + array arg,
+//     `*Trait[t]` + trait-iface ptr arg): +50
+//   - bare unbound type param (`t`): +10 (matches anything but loses
+//     to any structural match)
+//   - mismatch: contributes 0; if any arg position fully mismatches a
+//     non-unbound concrete head, the template scores 0 overall.
+func scoreGenericTemplate(fd *ast.FuncDecl, argTypes []irtypes.Type) int {
+	tps := map[string]bool{}
+	for _, tp := range fd.TypeParams {
+		tps[tp] = true
+	}
+
+	total := 0
+	idx := 0
+
+	for _, p := range fd.Params {
+		if p.IsVarArgs {
+			continue
+		}
+
+		if idx >= len(argTypes) {
+			break
+		}
+
+		s := paramShapeScore(p.Type, argTypes[idx], tps)
+		if s == 0 {
+			return 0
+		}
+
+		total += s
+		idx++
+	}
+
+	return total
+}
+
+// scoreCurriedReturn scores how well fd's declared return-fn first-param
+// shape matches the piped LHS type.  Returns 0 when fd's return isn't a
+// `fn(...)` head or hint is nil.  See pickGenericFuncOverloadHinted.
+func scoreCurriedReturn(fd *ast.FuncDecl, hint irtypes.Type) int {
+	if hint == nil || fd.RetType == nil {
+		return 0
+	}
+
+	ft, ok := fd.RetType.(*ast.FuncType)
+	if !ok || len(ft.Params) == 0 {
+		return 0
+	}
+
+	tps := map[string]bool{}
+	for _, tp := range fd.TypeParams {
+		tps[tp] = true
+	}
+
+	return paramShapeScore(ft.Params[0], hint, tps)
+}
+
+// paramShapeScore matches a single parameter's declared TypeExpr against
+// the caller's actual LLVM argument type.  See scoreGenericTemplate for
+// the score schedule.
+func paramShapeScore(param ast.TypeExpr, arg irtypes.Type, typeParams map[string]bool) int {
+	if param == nil || arg == nil {
+		return 10 // unknown -> treat as bare param match
+	}
+
+	switch p := param.(type) {
+	case *ast.SimpleType:
+		if typeParams[p.Name] {
+			return 10
+		}
+		// Concrete primitive head match.  Conservative: only match int /
+		// float / bool head shapes.  Mismatched concrete heads return 0
+		// (the template can't accept this arg without a coercion the
+		// overload path doesn't model).
+		switch p.Name {
+		case "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8", "byte", "char", "bool":
+			if irtypes.IsInt(arg) {
+				return 100
+			}
+
+			return 0
+		case "f64", "f32":
+			if irtypes.IsFloat(arg) {
+				return 100
+			}
+
+			return 0
+		case "string":
+			if isStringType(arg) {
+				return 100
+			}
+
+			return 0
+		}
+		// Unknown concrete name: don't claim a match.
+		return 0
+	case *ast.ArrayType:
+		// `[T]` -- fat slice or string fat-ptr.
+		if isStringType(arg) || isFatArrayPtr(arg) {
+			return 50
+		}
+
+		return 0
+	case *ast.PointerType:
+		_, isPtr := arg.(*irtypes.PointerType)
+		if isPtr {
+			return 50
+		}
+
+		return 0
+	case *ast.GenericType:
+		// `Trait[T]` as a by-value iface fat-ptr param.
+		if isTraitFatPtrShape(arg) {
+			return 50
+		}
+
+		return 0
+	}
+
+	return 10
 }
 
 // overloadMangledName returns the mangled IR name for a function/method when

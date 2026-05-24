@@ -13,9 +13,9 @@ import (
 // subprocesses (so Go map iteration randomization fires anew each run)
 // and asserting the output is byte-identical.
 //
-// The mono cache (incremental-compilation Phase 5 / decision D2) is
-// content-addressed, so any non-deterministic IR emission would silently
-// blow the cache hit rate. Lock the property in here.
+// The mono cache for incremental compilation is content-addressed, so
+// any non-deterministic IR emission would silently blow the cache hit
+// rate.  Lock the property in here.
 //
 // Skipped if the tin binary isn't present at the repo root - go test ./...
 // runs in CI where main.go has been built into ./tin already.

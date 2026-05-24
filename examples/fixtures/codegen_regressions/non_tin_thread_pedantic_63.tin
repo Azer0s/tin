@@ -1,0 +1,9 @@
+// -Wnon-tin-thread (pedantic) fires on `#interop`-tagged fns whose
+// body transitively reaches `await` or `spawn`.  Calling from a
+// non-Tin OS thread executes against scheduler state owned by the
+// Tin worker pool, which has undefined behaviour.
+fn{#async} bg_work() i64 = return 7
+
+fn{#interop} c_entry(arg *void) =
+  let _ = arg
+  let _ = await spawn bg_work()

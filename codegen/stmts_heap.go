@@ -655,7 +655,17 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 		// already skips isEarlyHeap vars at scope exit.
 		if entry.isEarlyHeap {
 			stackVal := block.NewLoad(elemType, entry.val)
-			cg.emitRetain(block, stackVal)
+			// Retain preserves inner RC fields across the return.
+			// SKIP for raw primitive pointer values (`*i64`, `*u8`,
+			// ...): the caller's chain release decrements the inner
+			// block exactly once, so a retain here would leave a +1
+			// the chain release cannot match.  Multi-level pointer
+			// chains (`alloc_nested() **i64` /
+			// `alloc_triple_deref() ***i64`) were leaking the innermost
+			// block on every call before this exemption.
+			if !isPrimitivePtr(elemType) {
+				cg.emitRetain(block, stackVal)
+			}
 
 			if cg.curFn != nil && cg.fnReturnsOwningIface[cg.curFn.Name()] {
 				heapI8 := block.NewBitCast(entry.val, irtypes.I8Ptr)
@@ -697,7 +707,7 @@ func (cg *CodeGen) emitChainedHeapPromotion(block *ir.Block, rootVar string) (va
 
 		if isCLayout {
 			// Load c_data_ptr from the just-copied wrapper.
-			tinSt := cg.structTypes[sName]
+			tinSt := cg.structTypeFor(CanonKey(sName))
 			cDataIdx := int64(cg.cDataPtrIndex(sName))
 			cDataGep := block.NewGetElementPtr(tinSt, heapPtr,
 				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, cDataIdx))
@@ -801,9 +811,7 @@ func (cg *CodeGen) fieldIsKnownStructPointer(structName string, fieldIdx int) bo
 		return false
 	}
 
-	_, isTinStruct := cg.structTypes[innerSt.Name()]
-
-	return isTinStruct
+	return cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 }
 
 // mergeFieldIndices unions two []int field-index lists, preserving
@@ -874,4 +882,681 @@ func promotedTupleElemVar(elem ast.Node, aliases map[string]string, promoted map
 	}
 
 	return ""
+}
+
+// cLayoutBindingEscapesForType reports whether `name` appears in any
+// position other than `name.field` / `name[idx]` receiver, or
+// `name = newval` assignment target, within body.  Conservative: any
+// node type the walker doesn't explicitly understand is treated as
+// escape, since the binding's name might appear inside it.  Used by
+// genVarDecl to decide whether the hidden out_native buffer for a
+// cLayoutStruct extern wrapper return can be stack-allocated
+// (non-escape) or must be _tin_rc_alloc'd (escape).
+//
+// When structTypeName is non-empty AND its fields include cLayoutStruct
+// values, `name.<cLayoutField>` reads are treated as escape sites: the
+// field-access result is a cLayoutStruct value whose c_data_ptr points
+// into name's storage, so consuming the value in any context (let-bind,
+// return, call-arg, struct-lit field, ...) propagates that storage
+// reference past name's intended scope.  Scalar-typed fields stay in
+// receiver position because their values don't carry storage refs.
+//
+// For CallExpr-RHS bindings (where the binding type IS the cLayoutStruct
+// itself) pass structTypeName="" -- cLayoutStructs only carry primitive
+// fields in current Tin code, so the simpler receiver-treat-all-fields
+// rule applies.
+func (cg *CodeGen) cLayoutBindingEscapesForType(name, structTypeName string, body ast.Node) bool {
+	if body == nil {
+		return false
+	}
+
+	// Build a set of cLayoutStruct-typed field names on the binding's
+	// struct type, if known.  Field accesses into these fields propagate
+	// the binding's storage (the field value carries c_data_ptr into the
+	// binding's composite), so they must be treated as escape when the
+	// value is read into an escape position.  Unresolved field types
+	// (generic type parameters, forward refs) are conservatively marked
+	// as cLayout so a Holder[T] whose T monomorphizes to a cLayoutStruct
+	// can't silently slip past the check.
+	var cLayoutFields map[string]bool
+
+	if structTypeName != "" {
+		fieldNames := cg.structFields[structTypeName]
+		fieldTypes := cg.structFieldTinTypes[structTypeName]
+
+		if len(fieldNames) > 0 && len(fieldTypes) == len(fieldNames) {
+			cLayoutFields = make(map[string]bool, len(fieldNames))
+
+			for i, fn := range fieldNames {
+				if cg.fieldTypeCarriesCLayoutStorage(fieldTypes[i]) {
+					cLayoutFields[fn] = true
+				}
+			}
+		}
+	}
+
+	var found bool
+
+	var walk func(n ast.Node)
+
+	var receiverWalk func(n ast.Node)
+
+	// receiverWalk is the receiver-position variant of walk: a chain like
+	// `name.f1.f2.f3` ends in three nested FieldAccess nodes whose
+	// innermost Expr is the binding identifier; every level is a receiver
+	// of its parent and none of them consume the binding's value, so
+	// `name` and `name.cLayoutField` are BOTH allowed here without
+	// triggering escape.  The cLayoutField rule only escapes when the
+	// FieldAccess sits in escape position (walk's FieldAccess branch) --
+	// i.e. its result is the value of a let-decl, return, call arg,
+	// struct-lit field initializer, etc.  Calling receiverWalk on
+	// anything other than an Identifier / FieldAccess / IndexExpr falls
+	// back to the general walk and triggers normal escape semantics.
+	receiverWalk = func(n ast.Node) {
+		if n == nil {
+			return
+		}
+
+		switch r := n.(type) {
+		case *ast.Identifier:
+			if r == nil || r.Name == name {
+				return
+			}
+
+			walk(r)
+		case *ast.FieldAccess:
+			if r == nil {
+				return
+			}
+
+			receiverWalk(r.Expr)
+		case *ast.IndexExpr:
+			if r == nil {
+				return
+			}
+
+			receiverWalk(r.Expr)
+			walk(r.Index)
+		default:
+			walk(n)
+		}
+	}
+
+	walk = func(n ast.Node) {
+		if n == nil || found {
+			return
+		}
+
+		switch v := n.(type) {
+		case *ast.Identifier:
+			if v == nil {
+				return
+			}
+
+			if v.Name == name {
+				found = true
+			}
+		case *ast.FieldAccess:
+			if v == nil {
+				return
+			}
+
+			// `name.cLayoutField` reads the inner cLayout struct value
+			// out of the binding -- the resulting value's c_data_ptr is
+			// still pointing into name's storage.  Consuming it anywhere
+			// (let-bind, return, call-arg, ...) propagates the storage
+			// reference past name's stack-bound frame, so this is an
+			// escape regardless of context.  Scalar / non-cLayout fields
+			// stay in receiver position (their values don't carry the
+			// storage ref).
+			if id, ok := v.Expr.(*ast.Identifier); ok && id.Name == name {
+				if cLayoutFields[v.Field] {
+					found = true
+
+					return
+				}
+
+				return
+			}
+
+			receiverWalk(v.Expr)
+		case *ast.IndexExpr:
+			if v == nil {
+				return
+			}
+
+			receiverWalk(v.Expr)
+			walk(v.Index)
+		case *ast.AssignStmt:
+			if v == nil {
+				return
+			}
+
+			receiverWalk(v.Target)
+			walk(v.Value)
+		case *ast.AugAssignStmt:
+			if v == nil {
+				return
+			}
+
+			receiverWalk(v.Target)
+			walk(v.Value)
+		case *ast.PostfixStmt:
+			if v == nil {
+				return
+			}
+
+			receiverWalk(v.Expr)
+		case *ast.Block:
+			if v == nil {
+				return
+			}
+
+			for _, s := range v.Stmts {
+				walk(s)
+			}
+		case *ast.ExprStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.VarDecl:
+			if v == nil {
+				return
+			}
+
+			walk(v.Value)
+		case *ast.ReturnStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Value)
+		case *ast.DeferStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Call)
+		case *ast.IfStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Cond)
+			walk(v.Then)
+
+			for _, ei := range v.ElseIfs {
+				walk(ei.Cond)
+				walk(ei.Body)
+			}
+
+			walk(v.Else)
+		case *ast.ForStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Init)
+			walk(v.Cond)
+			walk(v.Post)
+			walk(v.Iter)
+			walk(v.Body)
+		case *ast.MatchStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+
+			for _, c := range v.Cases {
+				walk(c.Pattern)
+				walk(c.Guard)
+				walk(c.Body)
+			}
+
+			walk(v.Default)
+		case *ast.EchoStmt:
+			if v == nil {
+				return
+			}
+
+			walk(v.Value)
+		case *ast.CallExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Func)
+
+			for _, a := range v.Args {
+				walk(a)
+			}
+		case *ast.BinExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.TernaryExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Cond)
+			walk(v.Then)
+			walk(v.Else)
+		case *ast.PipeExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.LambdaExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Body)
+		case *ast.AddressOfExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.DerefExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.AsExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.IsExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.TypeAssertExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Expr)
+		case *ast.AwaitExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Future)
+		case *ast.SpawnExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Call)
+			walk(v.DoBlock)
+		case *ast.StructLit:
+			if v == nil {
+				return
+			}
+
+			for _, f := range v.Fields {
+				walk(f.Value)
+			}
+
+			for _, p := range v.Positional {
+				walk(p)
+			}
+		case *ast.ArrayLit:
+			if v == nil {
+				return
+			}
+
+			for _, e := range v.Elems {
+				walk(e)
+			}
+		case *ast.ArrayFillLit:
+			if v == nil {
+				return
+			}
+
+			walk(v.Value)
+		case *ast.TupleLit:
+			if v == nil {
+				return
+			}
+
+			for _, e := range v.Elems {
+				walk(e)
+			}
+		case *ast.RangeExpr:
+			if v == nil {
+				return
+			}
+
+			walk(v.Start)
+			walk(v.End)
+		case *ast.TaggedBlock:
+			if v == nil {
+				return
+			}
+
+			walk(v.Body)
+		case *ast.InterpolatedString:
+			if v == nil {
+				return
+			}
+
+			for _, p := range v.Parts {
+				if p.IsExpr {
+					walk(p.Expr)
+				}
+			}
+		case *ast.WhereList:
+			if v == nil {
+				return
+			}
+
+			for _, c := range v.Clauses {
+				walk(c.Pattern)
+				walk(c.Body)
+			}
+		case *ast.IntLit, *ast.FloatLit, *ast.StringLit, *ast.BoolLit,
+			*ast.NilLit, *ast.AtomLit, *ast.CharLit, *ast.BacktickLit,
+			*ast.BreakStmt, *ast.ScopeAccess, *ast.TypeRefNode,
+			*ast.SizeofExpr, *ast.IsRCExpr, *ast.TypeofExpr,
+			*ast.TraitofExpr, *ast.FieldnamesExpr, *ast.FieldtypesExpr,
+			*ast.FieldtagExpr:
+			// Leaf or type-introspection nodes -- no identifier escape route.
+		default:
+			// Unknown node type -- conservative: assume the binding might
+			// be reachable through it.
+			found = true
+		}
+	}
+
+	walk(body)
+
+	return found
+}
+
+// structHasPointerReceiverMethod reports whether any method bound to
+// structName -- either declared directly on the struct or inherited via
+// a trait it implements -- takes a pointer receiver (`fn ::m(this *S)` or
+// `fn ::m(this *Trait)`).  Such a method, when called on a binding,
+// materializes `&binding` to satisfy the receiver, so the binding's
+// storage must outlive the callee.  Stack-binding such a value would let
+// the callee write through a dangling pointer once the caller's frame
+// ends, so escape analysis conservatively heap-allocates.
+//
+// Looks in two places:
+//  1. funcDecls, for own methods and for explicit trait-impl methods
+//     (those carry `this *S` after monomorphization).
+//  2. structImpls, for traits the struct claims to implement -- their
+//     TraitDecl.Methods describe the virtual / default-implemented
+//     signature with `this *Trait`, which is the shape the caller sees
+//     at the call site regardless of whether the struct supplied an
+//     override or inherits the default.
+//
+// Considers any receiver whose pointee canonicalizes to structName, so
+// generic instantiations (`Matrix[f64]` -> `Matrix__f64`) match through
+// CanonKey.
+func (cg *CodeGen) structHasPointerReceiverMethod(structName string) bool {
+	// Flush stale cache entries when any input has changed shape since
+	// the cache was last populated.  The three signals together catch:
+	//   - len(funcDecls)        : new methods registered (adds).
+	//   - len(structImpls)      : new structs registered as trait impls.
+	//   - sum-of-impl-slice-len : new trait added to an existing
+	//                             struct's impl slice (mutation of the
+	//                             same key -- outer len unchanged but
+	//                             surface grew).
+	// Pure overwrites (same key, swapped value) aren't caught by any
+	// of these and require an explicit InvalidateStructPtrReceiverCache
+	// call (REPL flow).
+	implsSumLen := 0
+	for _, impls := range cg.structImpls {
+		implsSumLen += len(impls)
+	}
+
+	if cg.structPtrReceiverCache != nil &&
+		(cg.structPtrReceiverCacheFuncDeclsLen != len(cg.funcDecls) ||
+			cg.structPtrReceiverCacheStructImplsN != len(cg.structImpls) ||
+			cg.structPtrReceiverCacheStructImplsSumLen != implsSumLen) {
+		cg.structPtrReceiverCache = nil
+	}
+
+	if cg.structPtrReceiverCache != nil {
+		if hit, ok := cg.structPtrReceiverCache[structName]; ok {
+			return hit
+		}
+	} else {
+		cg.structPtrReceiverCache = make(map[string]bool)
+		cg.structPtrReceiverCacheFuncDeclsLen = len(cg.funcDecls)
+		cg.structPtrReceiverCacheStructImplsN = len(cg.structImpls)
+		cg.structPtrReceiverCacheStructImplsSumLen = implsSumLen
+	}
+
+	result := cg.structHasPointerReceiverMethodUncached(structName)
+	cg.structPtrReceiverCache[structName] = result
+
+	return result
+}
+
+// InvalidateStructPtrReceiverCache drops the cached struct -> has-*this
+// answers.  Callers that swap a funcDecl in place (same key, different
+// receiver -- e.g. REPL cell re-evaluation) must call this so the next
+// read sees the new shape; the size-based invalidation above doesn't
+// notice value swaps that leave the map's len untouched.
+func (cg *CodeGen) InvalidateStructPtrReceiverCache() {
+	cg.structPtrReceiverCache = nil
+}
+
+func (cg *CodeGen) structHasPointerReceiverMethodUncached(structName string) bool {
+	canonStruct := CanonKey(structName)
+
+	receiverMatches := func(receiverElem string) bool {
+		return receiverElem == structName || CanonKey(receiverElem) == canonStruct
+	}
+
+	for _, decl := range cg.funcDecls {
+		if decl == nil || len(decl.Params) == 0 {
+			continue
+		}
+
+		first := decl.Params[0]
+		if first.Name != "this" {
+			continue
+		}
+
+		pt, ok := first.Type.(*ast.PointerType)
+		if !ok {
+			continue
+		}
+
+		elem, ok2 := pt.Elem.(*ast.SimpleType)
+		if !ok2 {
+			continue
+		}
+
+		if receiverMatches(elem.Name) {
+			return true
+		}
+	}
+
+	// Trait-inherited *this methods: every trait the struct implements
+	// contributes its method signatures to the struct's surface.  A
+	// trait-declared `fn ::m(this *Trait)` becomes `&binding`-call on
+	// the binding regardless of whether the struct provided an override
+	// (a override's FuncDecl is already covered by the loop above; the
+	// no-override / virtual / default-impl case lives in TraitDecl).
+	for _, traitName := range cg.structImpls[structName] {
+		traitRec, ok := cg.types[CanonKey(traitName)]
+		if !ok || traitRec == nil || traitRec.Trait == nil {
+			continue
+		}
+
+		for _, m := range traitRec.Trait.Methods {
+			if m == nil || len(m.Params) == 0 {
+				continue
+			}
+
+			first := m.Params[0]
+			if first.Name != "this" {
+				continue
+			}
+
+			if pt, ok := first.Type.(*ast.PointerType); ok {
+				if _, isSimple := pt.Elem.(*ast.SimpleType); isSimple {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// currentFnAstBody returns the AST body of the function or test being
+// codegen'd, or nil at module scope / synthetic helpers.  Prefers the
+// explicitly-tracked curFnAstBody (set for both regular fns and tests),
+// falls back to funcDecls lookup by IR name for legacy contexts.
+func (cg *CodeGen) currentFnAstBody() ast.Node {
+	if cg.curFnAstBody != nil {
+		return cg.curFnAstBody
+	}
+
+	if cg.curFn == nil {
+		return nil
+	}
+
+	if decl, ok := cg.funcDecls[cg.curFn.Name()]; ok && decl != nil {
+		return decl.Body
+	}
+
+	return nil
+}
+
+// fieldTypeCarriesCLayoutStorage reports whether reading a field of this
+// type from a stack-bound binding yields a value that carries a
+// c_data_ptr referencing the binding's storage.  Returns true for known
+// cLayoutStructs (including those reached transitively through type
+// aliases or via a nested non-cLayout struct that itself carries a
+// cLayout field), and conservatively true for unresolved SimpleTypes
+// (likely generic type parameters that may monomorphize to a
+// cLayoutStruct).  Primitives, strings, pointers, fat-arrays, and other
+// named-but-non-cLayout types return false -- their values don't share
+// storage with the holder.
+func (cg *CodeGen) fieldTypeCarriesCLayoutStorage(t ast.TypeExpr) bool {
+	return cg.fieldTypeCarriesCLayoutStorageRec(t, nil)
+}
+
+func (cg *CodeGen) fieldTypeCarriesCLayoutStorageRec(t ast.TypeExpr, visiting map[string]bool) bool {
+	switch ty := t.(type) {
+	case *ast.SimpleType:
+		if ty == nil {
+			return true
+		}
+
+		if cg.cLayoutStructs[ty.Name] {
+			return true
+		}
+
+		if cg.isPrimitiveTypeName(ty.Name) {
+			return false
+		}
+		// Resolve type aliases: `type MyDyad = dyad` stores the target
+		// AST under cg.types[Canon(MyDyad)].Alias.  Follow one step and
+		// re-classify so an alias to a cLayoutStruct doesn't slip past.
+		// Share `visiting` with the struct branch so a pathological
+		// `type A = B; type B = A` cycle terminates instead of
+		// blowing the stack -- the same map serves both alias and
+		// struct nodes since either kind keys by name.
+		if r, ok := cg.types[CanonKey(ty.Name)]; ok && r != nil && r.Alias != nil {
+			if visiting[ty.Name] {
+				return false
+			}
+
+			if visiting == nil {
+				visiting = make(map[string]bool)
+			}
+
+			visiting[ty.Name] = true
+
+			defer delete(visiting, ty.Name)
+
+			return cg.fieldTypeCarriesCLayoutStorageRec(r.Alias, visiting)
+		}
+		// Known concrete Tin struct: walk its fields once, transitively
+		// flagging if any of them carries cLayout storage.  A struct
+		// like `sub { d dyad }` is non-cLayout but extracting `outer.s`
+		// would still yield a value whose embedded d carries h's
+		// storage; the recursive check makes the FieldAccess rule
+		// pick up that case.  Cycle protection via `visiting` so a
+		// self-referential struct (`node { next *node }`) doesn't
+		// infinite-loop.
+		if _, isStruct := cg.structFields[ty.Name]; isStruct {
+			if visiting[ty.Name] {
+				return false
+			}
+
+			if visiting == nil {
+				visiting = make(map[string]bool)
+			}
+
+			visiting[ty.Name] = true
+
+			defer delete(visiting, ty.Name)
+
+			fieldTypes := cg.structFieldTinTypes[ty.Name]
+			for _, ft := range fieldTypes {
+				if cg.fieldTypeCarriesCLayoutStorageRec(ft, visiting) {
+					return true
+				}
+			}
+
+			return false
+		}
+		// Anything else -- type parameter, forward ref, alias not yet
+		// resolved -- could conceivably monomorphize to a cLayoutStruct.
+		// Be conservative.
+		return true
+	default:
+		// Pointer / Array / Generic / Wildcard / FnType fields don't
+		// embed the holder's storage by-value, so reads of them don't
+		// leak the holder's stack composite.  (A Generic[T] inst that
+		// monomorphizes to a cLayout struct is handled when the
+		// monomorph is the binding type itself, not nested as a field.)
+		return false
+	}
+}
+
+// isPrimitiveTypeName returns true for Tin's built-in scalar / fat-ptr
+// type names.  Used by escape analysis to short-circuit field-type
+// classification on known-non-cLayout shapes.
+func (cg *CodeGen) isPrimitiveTypeName(name string) bool {
+	switch name {
+	case "i8", "i16", "i32", "i64", "i128",
+		"u8", "u16", "u32", "u64", "u128",
+		"f16", "f32", "f64", "f128",
+		"bool", "char", "byte", "rune",
+		"string", "atom", "any":
+		return true
+	}
+
+	return false
 }

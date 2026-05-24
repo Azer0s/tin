@@ -1,0 +1,8 @@
+// -Wbare-parking-async-call must NOT fire on a fn{#async} whose body
+// is pure compute -- the may-park analysis classifies it as
+// non-parking, so the safety warning stays silent.  The pedantic
+// -Wbare-async-call still flags it, but only under -Wpedantic.
+fn{#async} pure_double(n i64) i64 = return n * 2
+
+fn main() =
+  let _ = pure_double(5)

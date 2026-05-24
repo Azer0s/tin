@@ -49,9 +49,7 @@ fn{#async} sum_array(arr [i64]) i64 =
 fn make_work_item(id i64) work_item =
   return work_item{id: id, factor: id * 2, label: "item_{id}"}
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "spawn with struct literal argument" =
   let f = spawn process_item(work_item{id: 5, factor: 3, label: "x"})
@@ -146,13 +144,17 @@ test "spawn do: block captures many locals" =
 
   assert::equals(result, 150)
 
-test "spawn in generic function" =
-  fn{#async} spawn_transform[t](arr [t], f fn(t) i64, ch sync::Channel[i64]) =
-    for let v t in arr:
-      let fib = spawn do:
-        await ch.send(f(v))
+// Hoisted to module scope: generic `fn{#async}` cannot be a lambda
+// because lambdas don't carry their own type-param list.  The test
+// below calls this as a normal package-level fn.
+fn{#async} spawn_transform[t](arr [t], f fn(t) i64, ch sync::Channel[i64]) =
+  for let v t in arr:
+    let fib = spawn do:
+      await ch.send(f(v))
 
-      await fib
+    await fib
+
+test "spawn in generic function" =
   let ch = sync::Channel[i64].make(3)
   let f = spawn spawn_transform(
     ["a", "bb", "ccc"],

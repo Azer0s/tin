@@ -1,0 +1,12 @@
+// Regression negative: `[_; 3]` must reject `[i64; 4]`.  The
+// wildcard binds the element type only; the size is part of the
+// shape and must match exactly.  Without the Size check on
+// ArrayType in typeExprStructuralMatch, any fixed-size array
+// would have satisfied any `[_; N]` bound.
+
+fn three[t](xs t) i64 where t is [_; 3] =
+  return 1
+
+fn main() i64 =
+  let xs [i64; 4] = [10, 20, 30, 40]
+  return three(xs)

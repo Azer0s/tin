@@ -1,0 +1,20 @@
+// Regression (A): `let r = first(xs); r.show()` on `xs : [*Trait]`
+// used to leak the iface fat-pointer block returned by `first()`.
+// `*Trait_iface` pointers are not classified as RC-tracked by
+// isRCTrackedType (the leading-ptr classification matches the iface
+// STRUCT, not the pointer to it), so the auto-deref-and-method-call
+// path in genIndexExpr / fn-call genmethod-dispatch skipped the
+// post-call release on the fresh iface temporary.
+
+trait Show =
+  fn show(this Show) string = virtual
+
+struct N(Show) =
+  fn Show::show(this N) string = return "N"
+
+fn first(xs [*Show]) *Show = return xs[0]
+
+fn main() i64 =
+  let xs [*Show] = [&N{}]
+  echo first(xs).show()
+  return 0

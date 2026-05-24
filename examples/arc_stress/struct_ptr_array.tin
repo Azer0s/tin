@@ -20,7 +20,7 @@ fn main() =
   let i i64 = 0
 
   for i < 10:
-    items ++= make_item(i)
+    items ++= [make_item(i)]
     i = i + 1
 
   // (a) check field values

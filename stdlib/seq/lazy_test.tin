@@ -1,0 +1,81 @@
+use assert
+use seq
+
+test "range count" =
+  assert::equals(seq::range(1, 6) |> seq::count, 5)
+
+test "range sum" =
+  assert::equals(seq::range(1, 6) |> seq::sum, 15)
+
+test "iter then sum" =
+  assert::equals(seq::iter([10, 20, 30]) |> seq::sum, 60)
+
+test "map lazy" =
+  let r = seq::range(1, 4)
+            |> seq::map(fn(x i64) i64 = return x * 10)
+            |> seq::to_array
+  assert::equals(len(r), 3)
+  assert::equals(r[0], 10)
+  assert::equals(r[2], 30)
+
+test "filter + map + take + sum" =
+  let r = seq::range(1, 1000)
+            |> seq::filter(fn(x i64) bool = return x % 2 == 0)
+            |> seq::map(fn(x i64) i64 = return x * x)
+            |> seq::take(3)
+            |> seq::sum
+  assert::equals(r, 4 + 16 + 36)
+
+test "skip lazy" =
+  let r = seq::range(0, 10)
+            |> seq::skip(7)
+            |> seq::sum
+  assert::equals(r, 7 + 8 + 9)
+
+test "take_while lazy" =
+  let r = seq::range(1, 100)
+            |> seq::take_while(fn(x i64) bool = return x < 5)
+            |> seq::to_array
+  assert::equals(len(r), 4)
+
+test "skip_while lazy" =
+  let r = seq::range(0, 6)
+            |> seq::skip_while(fn(x i64) bool = return x < 3)
+            |> seq::to_array
+  assert::equals(len(r), 3)
+  assert::equals(r[0], 3)
+
+test "chain lazy" =
+  let r = seq::range(1, 4)
+            |> seq::chain(seq::range(10, 12))
+            |> seq::to_array
+  assert::equals(len(r), 5)
+  assert::equals(r[3], 10)
+  assert::equals(r[4], 11)
+
+test "step_by lazy" =
+  let r = seq::range(0, 10)
+            |> seq::step_by(3)
+            |> seq::to_array
+  assert::equals(len(r), 4)
+  assert::equals(r[0], 0)
+  assert::equals(r[1], 3)
+
+test "fold lazy" =
+  let r = seq::range(1, 5)
+            |> seq::fold(100, fn(acc i64, x i64) i64 = return acc + x)
+  assert::equals(r, 100 + 1 + 2 + 3 + 4)
+
+test "find lazy" =
+  let r = seq::range(1, 100) |> seq::find(fn(x i64) bool = return x > 5)
+  match r:
+    case Some(v): assert::equals(v, 6)
+    case None:    assert::ok(false)
+
+test "first / nth lazy" =
+  match seq::range(10, 20) |> seq::first:
+    case Some(v): assert::equals(v, 10)
+    case None:    assert::ok(false)
+  match seq::range(0, 100) |> seq::nth(7):
+    case Some(v): assert::equals(v, 7)
+    case None:    assert::ok(false)

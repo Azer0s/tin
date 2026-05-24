@@ -70,8 +70,7 @@ test "nested struct deinit order" =
 test "returned struct deinit deferred to caller scope" =
   // Returning a struct passes ownership to the caller.
   // deinit is NOT called inside make_res; it is called when r4 exits scope.
-  fn make_res(id i64) resource =
-    return resource{id: id}
+  let make_res = fn(id i64) resource = return resource{id: id}
   let r4 = make_res(30)
 
   assert::equals(r4.id, 30)

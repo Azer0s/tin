@@ -1,0 +1,266 @@
+// libs/blas/flat - Flat-buffer Array / Matrix wrapper types for the
+// high-level BLAS routines, gated to real-valued precisions.
+//
+// `[T]` and `[[T]]` are the ergonomic input shapes; the Level 2 / 3
+// per-call cost is the flatten / unflatten pass needed to materialise
+// CBLAS's contiguous row-major layout.  `Array[T]` and `Matrix[T]`
+// ARE that contiguous layout -- routines accepting them skip the
+// conversion entirely.
+//
+// T is gated to `f32` or `f64`.  Complex storage lives in its own
+// `ComplexArray` / `ComplexMatrix` types (libs/blas/complex.tin),
+// backed by an interleaved `[f64]` so the z* routines can hand the
+// raw pointer straight to CBLAS without per-element header overhead.
+//
+//   let a = blas::matrix(N, N)              // zero-init NxN f64
+//   let b = blas::matrix_from(N, N, vals)   // wrap a flat [f64]
+//   let v = a[(i, j)]                       // (T, bool) tuple
+//   a[(i, j)] = 3.14                        // mutating index
+//   blas::dgemm(a, b, c)                    // no per-call copies
+
+use math::complex
+
+// Matrix[T]: 2D row-major flat matrix.  `data` is a single
+// `[T]` of length rows*cols; element (i, j) lives at
+// `data[i*cols + j]`.  Exactly the CBLAS row-major contiguous
+// layout, no per-call conversion.
+struct Matrix[T](
+  index[(i64, i64), T],
+  index_set[(i64, i64), T],
+  print
+) where T is f32 || f64 =
+  data [T]
+  rows i64
+  cols i64
+
+  // Element read: `m[(i, j)]` returns (value, in_bounds).
+  fn ::index(this Matrix[T], k (i64, i64)) (T, bool) =
+    let (i, j) = k
+    if i < 0 || i >= this.rows || j < 0 || j >= this.cols:
+      return (default(T), false)
+    return (this.data[i * this.cols + j], true)
+
+  // Element write: `m[(i, j)] = v`.  Out-of-bounds writes are
+  // silently dropped (matches the read side's bounds gating).
+  fn ::index_set(this *Matrix[T], k (i64, i64), v T) =
+    let (i, j) = k
+    if i < 0 || i >= this.rows || j < 0 || j >= this.cols: return
+    this.data[i * this.cols + j] = v
+
+  // print: short header + first few elements.  Full pretty-printing
+  // is left to a caller that wants it; this is the trace-friendly
+  // form so `echo m` doesn't dump 10000 numbers.
+  fn ::print(this Matrix[T]) string =
+    let preview = ""
+    let cap i64 = this.rows * this.cols
+
+    if cap > 6:
+      cap = 6
+    for let k i64 = 0; k < cap; k++:
+      if k > 0:
+        preview = preview ++ ", "
+      preview = preview ++ "{this.data[k]}"
+    if this.rows * this.cols > 6:
+      preview = preview ++ ", ..."
+    return "Matrix[{this.rows}x{this.cols}] [{preview}]"
+
+// matrix(rows, cols) builds a zero-initialised Matrix[T].  T is
+// inferred from the call-site expectation (`let m Matrix[f64] = ...`)
+// or pinned explicitly (`matrix[f32](N, N)`).
+fn matrix[T](rows i64, cols i64) Matrix[T] where T is f32 || f64 =
+  return Matrix[T]{data: [default(T)] * (rows * cols), rows: rows, cols: cols}
+
+// matrix_from(rows, cols, vals) wraps an existing flat row-major
+// `[T]` as a Matrix.  Panics if the length doesn't match.
+fn matrix_from[T](rows i64, cols i64, vals [T]) Matrix[T] where T is f32 || f64 =
+  if len(vals) != rows * cols:
+    panic("blas::matrix_from: len(vals)={len(vals)} but {rows}*{cols}={rows * cols}")
+  return Matrix[T]{data: vals, rows: rows, cols: cols}
+
+// Array[T]: 1D flat array.  Same role as Matrix[T] for the Level 1
+// routines.  For T = f32 / f64 the `data` field is already CBLAS-
+// compatible -- a `[T]` is contiguous heap storage with no per-element
+// header.
+struct Array[T](
+  index[i64, T],
+  index_set[i64, T],
+  print
+) where T is f32 || f64 =
+  data [T]
+  len  i64
+
+  fn ::index(this Array[T], i i64) (T, bool) =
+    if i < 0 || i >= this.len:
+      return (default(T), false)
+    return (this.data[i], true)
+
+  fn ::index_set(this *Array[T], i i64, v T) =
+    if i < 0 || i >= this.len: return
+    this.data[i] = v
+
+  fn ::print(this Array[T]) string =
+    let preview = ""
+    let cap i64 = this.len
+
+    if cap > 6:
+      cap = 6
+    for let k i64 = 0; k < cap; k++:
+      if k > 0:
+        preview = preview ++ ", "
+      preview = preview ++ "{this.data[k]}"
+    if this.len > 6:
+      preview = preview ++ ", ..."
+    return "Array[{this.len}] [{preview}]"
+
+// array(n) builds a zero-initialised Array[T].
+fn array[T](n i64) Array[T] where T is f32 || f64 =
+  return Array[T]{data: [default(T)] * n, len: n}
+
+// array_from(vals) wraps a `[T]` as an Array.
+fn array_from[T](vals [T]) Array[T] where T is f32 || f64 =
+  return Array[T]{data: vals, len: len(vals)}
+
+// ===== Complex flat types =====
+//
+// ComplexArray and ComplexMatrix store interleaved {re, im, re, ...}
+// f64 pairs in a single `[f64]` buffer of length 2*N (or 2*rows*cols).
+// That's exactly what the CBLAS z* routines want, so `&data[0]` goes
+// straight to the extern -- no per-call pack like the [[Complex]]
+// or Matrix[complex::Value]-equivalent paths would need.
+//
+// Single-precision complex (`c*` family) isn't surfaced; the BLAS
+// complex bindings are double-precision only today.
+
+// ComplexArray: 1D flat complex vector.  Logical length `len`,
+// underlying `[f64]` of length 2*len with re at even indices and
+// im at odd.
+struct ComplexArray(
+  index[i64, complex::Value],
+  index_set[i64, complex::Value],
+  print
+) =
+  data [f64]
+  len  i64
+
+  fn ::index(this ComplexArray, i i64) (complex::Value, bool) =
+    if i < 0 || i >= this.len:
+      return (complex::Value{re: 0.0, im: 0.0}, false)
+    let base = i * 2
+    return (complex::Value{re: this.data[base], im: this.data[base + 1]}, true)
+
+  fn ::index_set(this *ComplexArray, i i64, v complex::Value) =
+    if i < 0 || i >= this.len: return
+    let base = i * 2
+    this.data[base]     = v.re
+    this.data[base + 1] = v.im
+
+  fn ::print(this ComplexArray) string =
+    let preview = ""
+    let cap i64 = this.len
+
+    if cap > 4:
+      cap = 4
+    for let k i64 = 0; k < cap; k++:
+      if k > 0:
+        preview = preview ++ ", "
+      let z = complex::Value{re: this.data[k * 2], im: this.data[k * 2 + 1]}
+      preview = preview ++ "{z}"
+    if this.len > 4:
+      preview = preview ++ ", ..."
+    return "ComplexArray[{this.len}] [{preview}]"
+
+// complex_array(n) builds a zero-initialised ComplexArray of length n.
+fn complex_array(n i64) ComplexArray =
+  return ComplexArray{data: [0.0] * (n * 2), len: n}
+
+// complex_array_from(vals) packs a `[Complex]` into a fresh
+// ComplexArray.  Each element's re / im are stored as the next two
+// f64 slots of the underlying buffer.
+fn complex_array_from(vals [complex::Value]) ComplexArray =
+  let n = len(vals)
+  let buf [f64] = [0.0] * (n * 2)
+
+  for let i i64 = 0; i < n; i++:
+    buf[i * 2]     = vals[i].re
+    buf[i * 2 + 1] = vals[i].im
+  return ComplexArray{data: buf, len: n}
+
+// complex_array_from_flat(vals) wraps an interleaved `[f64]` directly
+// (for callers that already have the flat representation, e.g. from
+// reading binary data).  Length must be even.
+fn complex_array_from_flat(vals [f64]) ComplexArray =
+  if len(vals) % 2 != 0:
+    panic("blas::complex_array_from_flat: len(vals)={len(vals)} must be even")
+  return ComplexArray{data: vals, len: len(vals) / 2}
+
+// ComplexMatrix: 2D row-major flat complex matrix.  Logical shape
+// rows-by-cols, underlying `[f64]` of length 2*rows*cols, element
+// (i, j) at base = (i*cols + j) * 2.
+struct ComplexMatrix(
+  index[(i64, i64), complex::Value],
+  index_set[(i64, i64), complex::Value],
+  print
+) =
+  data [f64]
+  rows i64
+  cols i64
+
+  fn ::index(this ComplexMatrix, k (i64, i64)) (complex::Value, bool) =
+    let (i, j) = k
+    if i < 0 || i >= this.rows || j < 0 || j >= this.cols:
+      return (complex::Value{re: 0.0, im: 0.0}, false)
+    let base = (i * this.cols + j) * 2
+    return (complex::Value{re: this.data[base], im: this.data[base + 1]}, true)
+
+  fn ::index_set(this *ComplexMatrix, k (i64, i64), v complex::Value) =
+    let (i, j) = k
+    if i < 0 || i >= this.rows || j < 0 || j >= this.cols: return
+    let base = (i * this.cols + j) * 2
+    this.data[base]     = v.re
+    this.data[base + 1] = v.im
+
+  fn ::print(this ComplexMatrix) string =
+    let preview = ""
+    let total = this.rows * this.cols
+    let cap i64 = total
+
+    if cap > 4:
+      cap = 4
+    for let k i64 = 0; k < cap; k++:
+      if k > 0:
+        preview = preview ++ ", "
+      let z = complex::Value{re: this.data[k * 2], im: this.data[k * 2 + 1]}
+      preview = preview ++ "{z}"
+    if total > 4:
+      preview = preview ++ ", ..."
+    return "ComplexMatrix[{this.rows}x{this.cols}] [{preview}]"
+
+// complex_matrix(rows, cols) builds a zero-initialised matrix.
+fn complex_matrix(rows i64, cols i64) ComplexMatrix =
+  return ComplexMatrix{data: [0.0] * (rows * cols * 2), rows: rows, cols: cols}
+
+// complex_matrix_from(m) packs a `[[Complex]]` into a fresh flat
+// matrix.  Panics if the input is ragged.
+fn complex_matrix_from(m [[complex::Value]]) ComplexMatrix =
+  if !nrect(m):
+    panic("blas::complex_matrix_from: input is not rectangular")
+  let rows = len(m)
+
+  if rows == 0:
+    return ComplexMatrix{data: [] as [f64], rows: 0, cols: 0}
+  let cols = len(m[0])
+  let buf [f64] = [0.0] * (rows * cols * 2)
+
+  for let i i64 = 0; i < rows; i++:
+    for let j i64 = 0; j < cols; j++:
+      let base = (i * cols + j) * 2
+      buf[base]     = m[i][j].re
+      buf[base + 1] = m[i][j].im
+  return ComplexMatrix{data: buf, rows: rows, cols: cols}
+
+// complex_matrix_from_flat wraps an interleaved row-major `[f64]`
+// directly.  Length must equal 2*rows*cols.
+fn complex_matrix_from_flat(rows i64, cols i64, vals [f64]) ComplexMatrix =
+  if len(vals) != rows * cols * 2:
+    panic("blas::complex_matrix_from_flat: len(vals)={len(vals)} but 2*{rows}*{cols}={rows * cols * 2}")
+  return ComplexMatrix{data: vals, rows: rows, cols: cols}

@@ -16,9 +16,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Builder pattern: each method returns a copy with one field updated
-// ---------------------------------------------------------------------------
 
 struct query_builder =
   table_name  string
@@ -97,9 +95,7 @@ struct query_builder =
 
     return s
 
-// ---------------------------------------------------------------------------
 // 2. Generic chain: methods on a generic wrapper
-// ---------------------------------------------------------------------------
 
 struct pipeline[t] =
   data [t]
@@ -109,8 +105,7 @@ struct pipeline[t] =
 
   fn push(this pipeline[t], item t) pipeline[t] =
     let d [t] = this.data
-    d ++= item
-
+    d ++= [item]
     return pipeline[t]{data: d}
 
   fn len_p(this pipeline[t]) i64 =
@@ -119,9 +114,7 @@ struct pipeline[t] =
   fn get_p(this pipeline[t], i i64) t =
     return this.data[i]
 
-// ---------------------------------------------------------------------------
 // 3. String methods (via stdlib strings pattern) simulated here
-// ---------------------------------------------------------------------------
 
 struct str_builder =
   buf string
@@ -144,9 +137,7 @@ struct str_builder =
   fn len_sb(this str_builder) i64 =
     return len(this.buf)
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "query builder chain: all options" =
   let q = query_builder::new("users")

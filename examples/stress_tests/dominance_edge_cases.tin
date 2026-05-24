@@ -21,9 +21,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Value defined before if, used after both branches merge
-// ---------------------------------------------------------------------------
 
 fn val_before_if(n i64) i64 =
   let base i64 = n * 3          // defined here
@@ -50,9 +48,7 @@ fn val_before_if_used_after(n i64) i64 =
   // Both branches define bonus; base must still be live here
   return base + bonus            // uses base (pre-if) and bonus (post-merge)
 
-// ---------------------------------------------------------------------------
 // 2. Loop-carried dependency: value updated in loop, used after
-// ---------------------------------------------------------------------------
 
 fn loop_carried(n i64) i64 =
   let acc i64 = 0               // initial value
@@ -68,9 +64,7 @@ fn loop_carried(n i64) i64 =
 
   return prev                   // uses prev after loop exits
 
-// ---------------------------------------------------------------------------
 // 3. Value defined before match, used in every case and after
-// ---------------------------------------------------------------------------
 
 enum i32 kind =
   a_kind: 0
@@ -91,9 +85,7 @@ fn val_before_match(k kind, n i64) i64 =
 
   return factor + delta         // uses pre-match `factor` and post-match `delta`
 
-// ---------------------------------------------------------------------------
 // 4. Nested loops: inner loop carries value to outer
-// ---------------------------------------------------------------------------
 
 fn nested_loop_live(rows i64, cols i64) i64 =
   let total i64 = 0
@@ -113,9 +105,7 @@ fn nested_loop_live(rows i64, cols i64) i64 =
 
   return total
 
-// ---------------------------------------------------------------------------
 // 5. async: value defined before await, used after resume
-// ---------------------------------------------------------------------------
 
 fn{#async} val_across_await(n i64) i64 =
   let pre_val i64 = n * 5       // defined before first yield point
@@ -126,10 +116,8 @@ fn{#async} val_across_await(n i64) i64 =
 
   return pre_val + 1            // pre_val must be live after resume
 
-// ---------------------------------------------------------------------------
 // 6. async: value defined in if-branch, then await outside branch
 //    The value from the if-branch must be available after the await.
-// ---------------------------------------------------------------------------
 
 fn{#async} conditional_then_await(n i64) i64 =
   let result i64 = 0
@@ -147,9 +135,7 @@ fn{#async} conditional_then_await(n i64) i64 =
 
   return result   // must be the phi value, live after resume
 
-// ---------------------------------------------------------------------------
 // 7. async loop: accumulator live across multiple awaits
-// ---------------------------------------------------------------------------
 
 fn{#async} loop_across_awaits(n i64) i64 =
   let acc i64 = 0
@@ -165,9 +151,7 @@ fn{#async} loop_across_awaits(n i64) i64 =
 
   return acc
 
-// ---------------------------------------------------------------------------
 // 8. Many branches all feeding the same post-merge variable
-// ---------------------------------------------------------------------------
 
 fn fan_in_branches(n i64) i64 =
   let pre i64 = n * 2           // pre-branch
@@ -190,9 +174,7 @@ fn fan_in_branches(n i64) i64 =
   // All branches feed branch_result; pre must still be live
   return pre + branch_result
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "val before if used in both branches" =
   assert::equals(val_before_if(5), 14)   // base=15, reduced=14

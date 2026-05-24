@@ -42,6 +42,14 @@ func (p *Parser) parseTypeUnion() (ast.TypeExpr, error) {
 }
 
 func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
+	// volatile *T -- raw/bare-metal pointer escape hatch (skips rc retain/release).
+	// Pairs with `volatile const *T` if user wants both qualifiers.
+	isVolatile := false
+	if p.check(lexer.KW_VOLATILE) {
+		isVolatile = true
+
+		p.advance()
+	}
 	// const *T
 	isConst := false
 	if p.check(lexer.KW_CONST) {
@@ -58,7 +66,11 @@ func (p *Parser) parseTypeSingle() (ast.TypeExpr, error) {
 			return nil, err
 		}
 
-		return &ast.PointerType{Elem: elem, IsConst: isConst}, nil
+		return &ast.PointerType{Elem: elem, IsConst: isConst, IsVolatile: isVolatile}, nil
+	}
+
+	if isVolatile {
+		return nil, fmt.Errorf("`volatile` qualifier only applies to pointer types (`volatile *T`)")
 	}
 	// @[T1, T2, ...] - TupleArrayType (typed per-slot destructuring annotation)
 	if p.check(lexer.AT) {
@@ -257,9 +269,9 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
 		// Optional param name (ignored in type). The lookahead picks
 		// up two cases:
-		//   1. IDENT followed by a builtin/sigil type token (`*`, `[`,
+		//   1. IDENT followed by a builtin/sigil type token (`*`,
 		//      `const`, `(`, or a builtin keyword like `i64`) - covered
-		//      by isTypeToken.
+		//      by isTypeToken minus LBRACKET.
 		//   2. IDENT followed by another IDENT - the second IDENT must
 		//      be the type, since two unnamed adjacent type names
 		//      without a comma would be a syntax error anyway. This
@@ -271,7 +283,18 @@ func (p *Parser) parseFuncType() (ast.TypeExpr, error) {
 		//      unresolved (`@filter__t` stays generic, slice element
 		//      stride defaults to i64, atom/i32 element arrays read
 		//      OOB).
-		if p.check(lexer.IDENT) && (isTypeToken(p.peekAt(1)) || p.peekAt(1).Type == lexer.IDENT) {
+		//
+		// LBRACKET is deliberately NOT treated as a leading sigil
+		// here: `IDENT [` is ambiguous between `<name> [arr_type]` and
+		// `<generic_name>[type_args...]`, and fn-type signatures never
+		// expose param names, so the generic-type reading is the right
+		// one (`fn(Seq[i64]) i64` is a fn taking Seq[i64], not a fn
+		// taking `[i64]` with param name "Seq").
+		nextTok := p.peekAt(1)
+		identFollowedByNonBracketTypeStart := isTypeToken(nextTok) && nextTok.Type != lexer.LBRACKET
+		identFollowedByIdent := nextTok.Type == lexer.IDENT
+
+		if p.check(lexer.IDENT) && (identFollowedByNonBracketTypeStart || identFollowedByIdent) {
 			p.advance() // skip name
 		}
 

@@ -12,14 +12,77 @@
 
 // -- Core types
 
-// Fat-pointer string: { i8* ptr, i64 len }
-typedef struct { const char *ptr; int64_t len; } TinString;
+// Fat-pointer string: { i8* ptr, i64 len, i64 cap }.  Matches the
+// `[byte]` fat-array layout so strings and byte slices stay
+// interchangeable.  cap < 0 marks immortal / borrowed storage; see
+// the TinSlice comment below for the encoding.
+typedef struct { const char *ptr; int64_t len; int64_t cap; } TinString;
 
-// Dynamic array: { T* ptr, i64 len }
-typedef struct { void *ptr; int64_t len; } TinSlice;
+// Dynamic array fat-pointer layout: { T* ptr, i64 len, i64 cap }.
+//   ptr  - data pointer (RC-managed when cap >= 0; borrowed otherwise)
+//   len  - element count currently in use
+//   cap  - allocated element count.  cap < 0 marks a borrowed view:
+//          `++=` panics and the drop path skips RC release.  This is
+//          what slicing a buffer (arr[3..7]), reflection's immortal
+//          atom arrays, and FFI returns produce.
+typedef struct { void *ptr; int64_t len; int64_t cap; } TinSlice;
 
-// ARC header prepended before every heap-managed block
-typedef struct { int64_t rc; int64_t _pad; } TinRCHdr;  // 16 bytes for 128-bit SIMD alignment
+// ARC header prepended before every heap-managed block.
+//
+// Layout:
+//   u32 rc      - reference count (4G refs is enough for any real workload).
+//   u32 flags   - bitmask, see TIN_RC_* constants below.
+//   u64 _pad    - padding to keep header 16 bytes so the public data
+//                 pointer (hdr+1) inherits malloc's 16-byte alignment.
+//                 Required because Tin emits SIMD ops (<2 x f64>, ...)
+//                 on heap-backed arrays and unaligned vector access
+//                 either faults (some arches) or slow-paths on x86_64.
+//
+// Flag bits (see TIN_RC_* below):
+//   IMMORTAL    - retain/release short-circuit (static literals, atoms).
+//   SHARED      - biased RC bit: 1 means use atomic ops (block has
+//                 escaped its origin fiber); 0 means non-atomic fast path.
+//   UNIQUE      - "rc currently equals 1 AND no concurrent writer"
+//                 cache.  Tracked on the non-atomic path only;
+//                 codegen consults this for copy-on-write elision
+//                 (in-place ++=, push, etc).
+//   ARENA       - the block's backing storage is owned by an external
+//                 arena/pool; _tin_release decrements but does NOT call
+//                 free().  Reserved for a future per-fiber arena pass.
+//   STATIC_DTOR - the block has no inner ARC fields; release path can
+//                 skip the per-type dtor walk and free directly.
+//                 Codegen-side hint; runtime ignores for now.
+typedef struct { uint32_t rc; uint32_t flags; uint64_t _pad; } TinRCHdr;
+
+#define TIN_RC_IMMORTAL    ((uint32_t)0x1)
+#define TIN_RC_SHARED      ((uint32_t)0x2)
+#define TIN_RC_UNIQUE      ((uint32_t)0x4)
+#define TIN_RC_ARENA       ((uint32_t)0x8)
+#define TIN_RC_STATIC_DTOR ((uint32_t)0x10)
+
+// Stamped into _pad on every heap-allocated rc-block (_tin_rc_alloc,
+// _tin_rc_alloc_local, the handover paths).  _tin_is_managed reads
+// the would-be header at `ptr - sizeof(TinRCHdr)` and rejects the
+// pointer when _pad does not match -- that's how the runtime tells a
+// genuine block-start pointer from an interior pointer that happens
+// to land inside one of our blocks.  A 64-bit nonce collides with
+// random data at one chance in 2^64, which is effectively never.
+// Static immortal sentinels (rodata strings, atom blocks, stack
+// composites for cLayoutStructs) live outside the arena, so
+// _tin_is_managed rejects them on the range check before ever
+// reading _pad -- they keep _pad = 0 without trouble.
+#define TIN_RC_HDR_MAGIC   ((uint64_t)0xC1F5C0DEEDC0DE15)
+
+// Pin the header size so Tin's codegen (which hardcodes a [2 x i64] RCHdr
+// slot in cLayoutStruct stack composites and in genCLayoutStructLit's
+// immortal-sentinel layout) breaks at C-compile time if TinRCHdr ever
+// gains a field.  Without this guard, growing the header would silently
+// drift the sentinel offset and corrupt stack frames at every cLayout
+// release site.
+_Static_assert(sizeof(TinRCHdr) == 16,
+               "Tin cLayoutStruct codegen pins sizeof(TinRCHdr) at 16; "
+               "update genCLayoutStructLit and allocCLayoutReturnBuffer "
+               "to match if you change this");
 
 // Defer chain node - allocated on the registering frame's stack
 typedef struct TinDeferEntry {
@@ -30,18 +93,45 @@ typedef struct TinDeferEntry {
 } TinDeferEntry;
 
 // Array of TinStrings returned by _tin_reflect_fn_params (legacy, [string] variant)
-typedef struct { TinString *ptr; int64_t len; } TinStringArray;
+// Same triple-slot layout as TinSlice.
+typedef struct { TinString *ptr; int64_t len; int64_t cap; } TinStringArray;
 
 // Single atom value { i32 code } - matches %__atom LLVM type
 typedef struct { int32_t code; } TinAtom;
 
 // Array of TinAtoms returned by _tin_reflect_fn_params ([atom] variant)
-typedef struct { TinAtom *ptr; int64_t len; } TinAtomArray;
+// Same triple-slot layout as TinSlice.
+typedef struct { TinAtom *ptr; int64_t len; int64_t cap; } TinAtomArray;
 
 // -- ARC
 void *_tin_rc_alloc(int64_t size);
+// Allocate with the biased "this never escapes its origin fiber" bit
+// clear so retain/release stay non-atomic.  Compiler emits a call to
+// this variant only when the escape analysis has proved the block
+// never crosses a spawn / channel send / global store / extern call.
+// Falls back to atomic ops the moment _tin_make_shared flips the bit.
+void *_tin_rc_alloc_local(int64_t size);
 void  _tin_retain(void *ptr);
 void  _tin_release(void *ptr);
+// Pointer-typed retain/release.  Same semantics as _tin_retain /
+// _tin_release but with a provenance check first: pointers outside
+// Tin's arena (C-allocated, static data, stack) short-circuit to a
+// no-op so codegen can emit ARC ops uniformly on every *T value
+// without risking corruption on foreign pointers.
+void  _tin_retain_ptr(void *ptr);
+void  _tin_release_ptr(void *ptr);
+// Arena init -- call once from main's prologue before any user code.
+void  _tin_heap_init(void);
+// Returns 1 when ptr was allocated by Tin's arena allocator, 0
+// otherwise.  Backs the _tin_retain_ptr / _tin_release_ptr provenance
+// check.  See runtime/heap_arena.c for the range-check rationale.
+int   _tin_is_managed(void *ptr);
+// Mark an ARC-managed block as shared across fiber/thread boundaries.
+// After this call, every retain/release on the block uses atomic
+// memory ops.  Idempotent and uses release ordering so the bit-set
+// happens-before the block becomes visible to the receiving thread.
+// Safe to call on NULL and on immortal-RC blocks (both no-ops).
+void  _tin_make_shared(void *ptr);
 
 // -- Echo / print
 void _tin_echo_i64(int64_t v);
@@ -87,9 +177,10 @@ const char      *_tin_f128_to_cstr(tin_fp128_t v);
 // -- Strings
 TinString _tin_str_concat(TinString a, TinString b);
 TinString _tin_str_from_cstr(const char *s);
+int64_t   _tin_extern_cstr_len(const char *s);
 int32_t   _tin_str_eq(TinString a, TinString b);
 TinString _tin_string_from_bytes(const char *ptr, int64_t len);
-const char *_tin_string_data(TinString s);
+const char *_tin_string_data(const char *ptr);
 char *_tin_buf_alloc(int64_t n);
 char *_tin_buf_realloc(char *p, int64_t n);
 void  _tin_buf_free(char *p);
@@ -118,7 +209,8 @@ void      _tin_defer_pop(int64_t n);
 void      _tin_panic(const char *msg);
 void      _tin_main_err_exit(const char *msg, int64_t len);
 void      _tin_assert(int32_t cond, const char *msg);
-TinString _tin_recover(void);
+void         _tin_recover(TinString *out);
+void         _tin_recover_trace_atoms(TinAtomArray *out);
 // Fiber-level panic interception (called by worker loop around _coro_resume).
 void        _tin_panic_catch_begin(void);
 const char *_tin_panic_catch_end(void);
@@ -136,7 +228,7 @@ void    _tin_assert_abort(const char *msg);
 void    _tin_fiber_init(void);
 int64_t _tin_fiber_spawn(void *hdl);
 int64_t _tin_fiber_spawn_joinable(void *hdl);
-// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+// Stacktrace-aware spawn variants (see docs/plans/stacktrace-libunwind.md).
 // caller_ip is the spawn-site llvm.returnaddress(0); the runtime captures
 // the current fiber's pid+generation as the new fiber's parent for safe
 // chain walks. Programs without stacktrace() never call these.

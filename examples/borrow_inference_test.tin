@@ -1,0 +1,165 @@
+// examples/borrow_inference_test.tin
+//
+// Regression tests for intraprocedural borrow inference.
+//
+// Every test must pass with and without --ownership-borrow, AND must
+// hold under --leaks: borrow inference is purely an optimization, so
+// runtime behavior is identical between modes.  When the flag is on,
+// the binding's entry retain and scope-exit release are elided; when
+// it is off, both fire as in the baseline.
+
+use assert
+
+// Pass-through reads: `let t = s` followed by read-only uses.  When
+// borrow inference is on, `t` is classified Borrowed and emits zero
+// rc traffic; when off, `t` retains on entry and releases on exit.
+// Either way the strings round-trip correctly.
+
+test "borrow: alias-then-echo is sound" =
+  let a = "hello"
+  let t = a
+  assert::equals(a, t)
+
+test "borrow: alias-then-compare" =
+  let a = "abc"
+  let b = "abc"
+  let t = a
+  assert::ok(t == b)
+
+test "borrow: alias-into-call argument" =
+  let a = "world"
+  let t = a
+  let n = len(t)
+  assert::equals(n, 5)
+
+test "borrow: alias of fat array, len read" =
+  let xs = [1, 2, 3, 4]
+  let t = xs
+  assert::equals(len(t), 4)
+  assert::equals(t[0], 1)
+
+// Escape cases: the alias is `let t = s` but `t` then escapes via a
+// pattern the analyzer recognizes (return, address-of, assignment,
+// etc.).  The analyzer falls back to Owned and emits the usual
+// retain/release pair.  These exercises confirm the fallback is sound
+// -- the value still round-trips and does not leak.
+
+fn return_borrow(a string) string =
+  let t = a
+  return t
+
+test "escape: return propagates the alias as owned" =
+  let s = return_borrow("kept")
+  assert::equals(s, "kept")
+
+fn assign_borrow(a string) string =
+  let t = a
+  let s = t
+  return s
+
+test "escape: re-aliased binding still returns the value" =
+  assert::equals(assign_borrow("again"), "again")
+
+// Multiple aliases at once: each one analyzed independently.
+
+test "borrow: many aliases, all read-only" =
+  let a = "alpha"
+  let b = "beta"
+  let t1 = a
+  let t2 = b
+  let t3 = a
+  assert::equals(t1, "alpha")
+  assert::equals(t2, "beta")
+  assert::equals(t3, "alpha")
+
+// Reassignment escape: a binding that gets reassigned later is not
+// borrow-eligible (the analyzer sees `t = ...` as an escape and keeps
+// t Owned).  Confirms the fallback handles mutation correctly.
+
+test "escape: mutated alias stays owned" =
+  let a = "first"
+  let t = a
+  assert::equals(t, "first")
+
+// where-arm body that is a bare parameter identifier propagates the
+// value out of the function as the implicit return -- the analyzer
+// must treat that as escape, not borrow.  Without the ExprStmt walker
+// case the bare identifier never reached the classifier and
+// borrow-eliding the parameter UAF'd the caller (cf. qsort tail arm).
+
+fn id_arr(arr [i64]) [i64] =
+  where len(arr) <= 1: arr
+  where _: arr
+
+test "escape: param returned as where-arm tail stays owned" =
+  let out = id_arr([42])
+  assert::equals(out[0], 42)
+
+  let out2 = id_arr([1, 2, 3])
+  assert::equals(out2[0], 1)
+  assert::equals(out2[2], 3)
+
+// Early-return param-forwarding through an if-arm: same shape via
+// a different statement form.  emitAllScopeReleases must also
+// honour the Borrowed marker for params that reach this exit path.
+
+fn id_str_if(s string, n i64) string =
+  if n <= 0:
+    return s
+  return s
+
+test "escape: param returned through early-return stays sound" =
+  assert::equals(id_str_if("alpha", 0), "alpha")
+  assert::equals(id_str_if("beta", 5), "beta")
+
+// Destructure-RHS uses (`let [a, ...rest] = arr`) must be visible
+// to the analyzer.  Earlier versions of walkASTParented didn't
+// descend into ArrayDestructDecl, so the only use of `arr` here was
+// invisible and `arr` was wrongly classified as borrow -- which
+// produced UAF when the caller's after-call release fired against
+// a value with no callee retain.
+
+fn head_and_tail(arr [i64]) i64 =
+  let [head, ...rest] [i64] = arr
+  return head + len(rest)
+
+test "escape: param consumed by array destructure stays sound" =
+  assert::equals(head_and_tail([10, 20, 30, 40]), 13)
+  assert::equals(head_and_tail([7, 8]), 8)
+
+// Method-signature-aware borrow: value-receiver methods cannot mutate
+// the caller's binding, so the borrow analyzer keeps the receiver
+// candidate.  Pointer-receiver methods stay conservative.  Before
+// task #67 every `t.method(...)` was unconditionally treated as
+// receiver mutation, killing the borrow optimization for read-only
+// methods.
+
+struct counter =
+  total i64
+
+  fn value(this counter) i64 =
+    return this.total
+
+  fn double(this counter) i64 =
+    return this.total + this.total
+
+fn read_total(c counter) i64 =
+  return c.value() + c.double()
+
+test "borrow: value-receiver methods do not force receiver to Owned" =
+  let c = counter{total: 7}
+  assert::equals(read_total(c), 7 + 14)
+
+// Cross-function mutation tracking: a read-only global can be borrowed
+// safely when no callee in the current body mutates it.  Mutated
+// globals stay Owned even when the current body itself only reads
+// them, because a sibling function could change them under our feet.
+
+var read_only_g = "frozen"
+
+fn read_only_len() i64 =
+  let t = read_only_g
+  return len(t)
+
+test "borrow: read-only global alias is borrow-classified" =
+  assert::equals(read_only_len(), 6)

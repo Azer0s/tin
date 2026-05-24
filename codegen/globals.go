@@ -19,6 +19,19 @@ import (
 // reference it. When `name` is in exportedNames, the parent scope also
 // gets `pkg::name` / `pkg.name` aliases.
 func (cg *CodeGen) preregisterPkgTopLevelVar(tv *ast.TopLevelVar, pkgName string, exportedNames map[string]bool, parentScope *scope) error {
+	// Mirror the entry-program path: when no explicit type annotation is
+	// given, infer from a literal-form initializer (struct lit, int lit,
+	// etc.).  Without this, `const RED = Color{...}` in a package would
+	// register as a void* global and panic at the first store.
+	if tv.Type == nil && tv.Value != nil {
+		tv.Type = cg.inferTopLevelVarType(tv.Value)
+	}
+
+	if tv.Type == nil {
+		return cg.nodeErr(tv, "top-level %s requires either a type annotation or an initializer with an obvious type",
+			topLevelVarKindWord(tv))
+	}
+
 	lt, err := cg.tinTypeToLLVM(tv.Type)
 	if err != nil {
 		return err
@@ -406,8 +419,12 @@ func (cg *CodeGen) tryConstantFold(n ast.Node, targetType irtypes.Type) constant
 		raw := cg.newGlobalString(v.Value).(constant.Constant)
 		strType := stringFatPtrType()
 		lenVal := constant.NewInt(irtypes.I64, int64(len(v.Value)))
+		// Constant strings live in `.rodata`; cap = -1 marks the
+		// buffer as a borrowed view (`++=` panics, drop skips
+		// release).  Matches buildStringFatPtr's runtime emission.
+		borrowed := constant.NewInt(irtypes.I64, -1)
 
-		s := constant.NewStruct(strType, raw, lenVal)
+		s := constant.NewStruct(strType, raw, lenVal, borrowed)
 		if targetType.Equal(strType) {
 			return s
 		}
@@ -459,7 +476,7 @@ func (cg *CodeGen) tryConstantFoldStructLit(v *ast.StructLit, targetType irtypes
 	}
 
 	concreteName := v.TypeName
-	if _, has := cg.structTypes[concreteName]; !has {
+	if cg.structTypeFor(CanonKey(concreteName)) == nil {
 		return nil
 	}
 	// Refuse to fold structs whose runtime construction does more than
@@ -704,9 +721,23 @@ func (cg *CodeGen) zeroConstant(t irtypes.Type) constant.Constant {
 
 // emitTopLevelVarInits emits the runtime initializers for top-level vars into
 // the provided block. Returns the (possibly advanced) current block.
+//
+// Each init expression is evaluated with cg.currentPkg restored to the
+// package that owns the var, so bare-name struct refs in the init body
+// (e.g. complex.tin's `const I = Complex{...}`) still resolve through
+// the package's bare alias even though the main module's emission
+// context has currentPkg unset.  Without this push/pop, the bare-name
+// visibility gate in genStructLit rejects every cross-package const
+// whose initializer mentions a struct type unqualified.
 func (cg *CodeGen) emitTopLevelVarInits(block *ir.Block) (*ir.Block, error) {
 	for _, vi := range cg.topLevelVarInits {
+		prevPkg := cg.currentPkg
+		cg.currentPkg = vi.pkgName
+
 		val, err := cg.genExpr(block, vi.initExpr)
+
+		cg.currentPkg = prevPkg
+
 		if err != nil {
 			return block, err
 		}

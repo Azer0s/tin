@@ -5,10 +5,16 @@
 
 use assert
 use os
+use sync
 
-fn{#async} write_string_to(f os::File, s string) i64 =
+// Test-local helpers: sync forwarders that return Future-shaped values so
+// call sites can `await write_string_to(...)` without an explicit spawn.
+// `write_string_to` forwards a single Future[i64] from f.write; the read
+// helper needs to await internally (it has to peek at n to slice the
+// buffer) so it stays fn{#async} and is reached via `await spawn`.
+fn write_string_to(f os::File, s string) Future[i64] =
   let buf = s as [byte]
-  return await f.write(&buf[0], len(buf))
+  return f.write(&buf[0], len(buf))
 
 fn{#async} read_chunk(f os::File, max i64) (i64, string) =
   let buf [byte; 4096]
@@ -36,7 +42,7 @@ test "File.seek to start + read after write" =
   let _  = f.flush()
   let _  = f.seek(0, 0)
 
-  let (n, got) = await read_chunk(f, 64)
+  let (n, got) = await spawn read_chunk(f, 64)
 
   assert::equals(9 as i64, n)
   assert::equals("data-line", got)
@@ -48,7 +54,7 @@ test "pipe write end -> read end carries bytes verbatim" =
   let pp = os::pipe().unwrap()
   let _  = await write_string_to(pp.writer, "carry-me")
 
-  let (n, got) = await read_chunk(pp.reader, 64)
+  let (n, got) = await spawn read_chunk(pp.reader, 64)
 
   assert::equals(8 as i64, n)
   assert::equals("carry-me", got)
@@ -99,7 +105,7 @@ test "spawn child with stdout pipe captures bytes" =
 
   match p.stdout:
     case Some(f):
-      let (m, s) = await read_chunk(f, 64)
+      let (m, s) = await spawn read_chunk(f, 64)
       n   = m
       got = s
       f.close()

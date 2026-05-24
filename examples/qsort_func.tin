@@ -4,8 +4,7 @@ fn filter[t](f fn(i t) bool) fn([t]) [t] =
 
     for let i t in list:
       if f(i):
-        res ++= i
-
+        res ++= [i]
     return res
 
 fn qsort[t](xs [t]) [t] where t is ord =

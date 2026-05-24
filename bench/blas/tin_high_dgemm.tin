@@ -1,0 +1,56 @@
+// bench/blas/tin_high_dgemm - Tin dgemm via the high-level wrapper.
+//
+// Matrices are [[f64]] (row-of-rows).  Each iteration the wrapper
+// flattens A and B into contiguous buffers, allocates a fresh C
+// buffer, calls cblas_dgemm, and unflattens the result back into the
+// caller's [[f64]] C.  This measures the wrapper's per-call cost
+// against the pure-FFI raw version.
+//
+// Usage: ./tin_high_dgemm N ITERS
+
+use blas
+use strings
+use measure
+
+fn main(args [string]) =
+  if len(args) < 3:
+    echo "usage: tin_high_dgemm N ITERS"
+    return
+
+  let n     = strings::atol(args[1])
+  let iters = strings::atol(args[2])
+  let t0    = measure::now_us()
+
+  let a [[f64]] = []
+  let b [[f64]] = []
+  let c [[f64]] = []
+
+  for let i i64 = 0; i < n; i++:
+    let ra [f64] = []
+    let rb [f64] = []
+    let rc [f64] = []
+
+    for let j i64 = 0; j < n; j++:
+      let idx = i * n + j
+      ra ++= [((idx % 7) + 1) as f64]
+      rb ++= [((idx % 5) + 1) as f64]
+      rc ++= [0.0]
+    a ++= [ra]
+    b ++= [rb]
+    c ++= [rc]
+
+  let t1 = measure::now_us()
+
+  for let it i64 = 0; it < iters; it++:
+    blas::dgemm(a, b, c)
+
+  let t2 = measure::now_us()
+  let sum = 0.0
+
+  for let i i64 = 0; i < n; i++:
+    for let j i64 = 0; j < n; j++:
+      sum = sum + c[i][j]
+
+  let t3 = measure::now_us()
+  echo "sum: {sum}"
+  echo "init_us={t1 - t0} gemm_us={t2 - t1} sum_us={t3 - t2}"

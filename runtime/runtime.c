@@ -16,6 +16,39 @@
 #include <stdio.h>
 #include <signal.h>
 
+// Pull in every system header that declares the allocator family
+// BEFORE the mimalloc macro shim activates below.  Otherwise our
+// #define malloc mi_malloc-style substitutions would textually
+// rewrite the system declarations themselves (e.g. <malloc/_malloc.h>'s
+// `void *malloc(size_t)` becomes `void *mi_malloc(...)` which collides
+// with the real prototype).  These includes are guarded internally so
+// the order is purely about declaration visibility.
+#include <stdlib.h>
+#include <string.h>
+
+// mimalloc is linked unconditionally (the build path errors loudly
+// when libmimalloc cannot be located -- there is no silent libc
+// fallback).  The header has to be available for arc.c's
+// _tin_arena_alloc / mi_free calls and for heap_arena.c's arena
+// reservation.
+//
+// We deliberately do NOT macro-substitute the generic malloc/free/...
+// calls in this translation unit anymore.  Earlier sessions ran with
+// a blanket #define malloc mi_malloc that routed every runtime
+// allocation through Tin's arena -- including channel slots, fiber
+// records, fastmutex slabs.  That broke the invariant
+// _tin_is_managed depends on: with non-rc allocations sharing the
+// arena range, the provenance check could not distinguish rc-blocks
+// from anything else, and `*T` retain/release through
+// _tin_retain_ptr would happily dereference the bytes above a pipe
+// buffer as a fake TinRCHdr.  Today arc.c calls mi_heap_malloc /
+// mi_free directly for rc-blocks (via _tin_arena_alloc /
+// _tin_arena_free) and every other runtime allocation uses libc
+// malloc/free as it appears in source.
+#if TIN_USE_MIMALLOC
+#  include <mimalloc.h>
+#endif
+
 // Make stdout line-buffered so echo output appears immediately even when
 // stdout is connected to a pipe.  Line-buffering flushes on every '\n',
 // which is how tin's echo statement terminates every value.
@@ -36,6 +69,7 @@ __attribute__((constructor)) static void _tin_sigpipe_init(void) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGPIPE, &sa, NULL);
 }
+#include "heap_arena.c" // initializes Tin arena; exposes _tin_managed_heap
 #include "arc.c"
 #include "strings.c"   // uses _tin_rc_alloc (arc)
 #include "slice.c"     // uses _tin_rc_alloc (arc)

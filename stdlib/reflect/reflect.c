@@ -7,13 +7,17 @@
 #include <string.h>
 #include <stdlib.h>
 
-// Immortal string literals for kind() return values
-static struct { int64_t rc; char data[12]; } _rk_ptr       = {TIN_IMMORTAL_RC, "ptr"};
-static struct { int64_t rc; char data[12]; } _rk_array      = {TIN_IMMORTAL_RC, "array"};
-static struct { int64_t rc; char data[12]; } _rk_fn         = {TIN_IMMORTAL_RC, "fn"};
-static struct { int64_t rc; char data[12]; } _rk_primitive  = {TIN_IMMORTAL_RC, "primitive"};
-static struct { int64_t rc; char data[12]; } _rk_struct     = {TIN_IMMORTAL_RC, "struct"};
-static struct { int64_t rc; char data[4];  } _rk_empty      = {TIN_IMMORTAL_RC, ""};
+// Immortal string literals for kind() return values.  Layout matches
+// TinRCHdr (16 bytes: u32 rc + u32 flags + u64 _pad) so _tin_release
+// reading {rc, flags} at offset -16 sees TIN_RC_IMMORTAL in flags.
+#define _RK_HDR 0u, TIN_RC_IMMORTAL, 0ull
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[12]; } _rk_ptr       = {_RK_HDR, "ptr"};
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[12]; } _rk_array     = {_RK_HDR, "array"};
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[12]; } _rk_fn        = {_RK_HDR, "fn"};
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[12]; } _rk_primitive = {_RK_HDR, "primitive"};
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[12]; } _rk_struct    = {_RK_HDR, "struct"};
+static struct { uint32_t rc; uint32_t flags; uint64_t _pad; char data[4];  } _rk_empty     = {_RK_HDR, ""};
+#undef _RK_HDR
 
 static const char *_tin_primitives[] = {
     "i8","i16","i32","i64","i128",
@@ -290,8 +294,9 @@ TinAtomArray _tin_reflect_fn_params(const char *atom) {
     size_t arr_size = (size_t)arity * sizeof(TinAtom);
     TinRCHdr *hdr = (TinRCHdr *)malloc(sizeof(TinRCHdr) + arr_size);
     if (!hdr) return empty;
-    hdr->rc   = TIN_IMMORTAL_RC;
-    hdr->_pad = 0;
+    hdr->rc    = 0;
+    hdr->flags = TIN_RC_IMMORTAL;
+    hdr->_pad  = 0;
     TinAtom *arr = (TinAtom *)(hdr + 1);
 
     for (int64_t i = 0; i < arity; i++) {

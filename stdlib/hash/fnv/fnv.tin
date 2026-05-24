@@ -27,10 +27,10 @@ fn fnv1a_64(data *u8, len i64) u64 =
 
 // Overloads: fnv1a_32(string) and fnv1a_64(string) - accept string directly.
 fn fnv1a_32(s string) u32 =
-  return fnv1a_32(addr(s[0]), len(s))
+  return fnv1a_32(&s[0], len(s))
 
 fn fnv1a_64(s string) u64 =
-  return fnv1a_64(addr(s[0]), len(s))
+  return fnv1a_64(&s[0], len(s))
 
 export {
   fnv1a_32, fnv1a_64

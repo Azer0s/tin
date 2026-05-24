@@ -101,7 +101,7 @@ fn sha1(data *u8, len i64) [u8; 20] =
   let i i64 = 0
 
   for i + 64 <= len:
-    let s [u32; 5] = sha1_process_block(addr(data[i]), h0, h1, h2, h3, h4)
+    let s [u32; 5] = sha1_process_block(&data[i], h0, h1, h2, h3, h4)
 
     h0 = s[0]
     h1 = s[1]
@@ -128,10 +128,10 @@ fn sha1(data *u8, len i64) [u8; 20] =
 
   if remaining >= 56:
     off = 120
-  sha1_write_be64(addr(buf[0]), off, bit_len)
+  sha1_write_be64(&buf[0], off, bit_len)
 
   // Process the final block(s).
-  let s [u32; 5] = sha1_process_block(addr(buf[0]), h0, h1, h2, h3, h4)
+  let s [u32; 5] = sha1_process_block(&buf[0], h0, h1, h2, h3, h4)
 
   h0 = s[0]
   h1 = s[1]
@@ -140,7 +140,7 @@ fn sha1(data *u8, len i64) [u8; 20] =
   h4 = s[4]
 
   if remaining >= 56:
-    let s2 [u32; 5] = sha1_process_block(addr(buf[64]), h0, h1, h2, h3, h4)
+    let s2 [u32; 5] = sha1_process_block(&buf[64], h0, h1, h2, h3, h4)
 
     h0 = s2[0]
     h1 = s2[1]
@@ -151,11 +151,11 @@ fn sha1(data *u8, len i64) [u8; 20] =
   // Write digest as 20 big-endian bytes.
   let digest [u8; 20]
 
-  sha1_write_be(addr(digest[0]), 0, h0)
-  sha1_write_be(addr(digest[0]), 4, h1)
-  sha1_write_be(addr(digest[0]), 8, h2)
-  sha1_write_be(addr(digest[0]), 12, h3)
-  sha1_write_be(addr(digest[0]), 16, h4)
+  sha1_write_be(&digest[0], 0, h0)
+  sha1_write_be(&digest[0], 4, h1)
+  sha1_write_be(&digest[0], 8, h2)
+  sha1_write_be(&digest[0], 12, h3)
+  sha1_write_be(&digest[0], 16, h4)
 
   return digest
 
@@ -186,7 +186,7 @@ fn sha1_hex(data *u8, len i64) string =
 
 // Overload: sha1(string) - convenience overload accepting a string directly.
 fn sha1(s string) string =
-  return sha1_hex(addr(s[0]), len(s))
+  return sha1_hex(&s[0], len(s))
 
 export {
   sha1, sha1_hex, sha1_hex_from_digest

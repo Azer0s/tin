@@ -1,35 +1,40 @@
-# Memory - ARC and Raw Allocation
+# Memory - ARC, biased RC, and the heap arena
 
 ## Overview
 
-Tin uses **Automatic Reference Counting (ARC)** for heap-managed objects. Every
-ARC block carries a small header immediately before its data. The compiler emits
-`_tin_retain` and `_tin_release` calls at every point where a reference is
-copied or goes out of scope.
+Tin manages heap memory with **automatic reference counting (ARC)**. Every
+ARC block carries a 16-byte header (`TinRCHdr`) just before its data, and
+the compiler emits `_tin_retain` and `_tin_release` calls at every point
+where a reference is copied or leaves scope.
 
-Static string literals and other immortal objects opt out of ARC via a sentinel
-value, eliminating all reference-counting overhead for compile-time data.
+Two pieces sit underneath the basic ARC story:
 
----
+- **Biased RC** lets blocks that have only ever been touched by one fiber
+  use a non-atomic retain/release fast path. A single SHARED flag picks
+  between the two paths.
+- The **heap arena** is a contiguous virtual region (default 16 GiB, set
+  via `TINMAXHEAP`) registered with mimalloc. Every Tin-managed
+  allocation lands inside that region, so the runtime can ask
+  `_tin_is_managed(ptr)` in O(1) when it needs to know whether a pointer
+  came from Tin or from foreign C code.
+
+Static string literals and similar compile-time data carry the
+`TIN_RC_IMMORTAL` flag bit and skip all bookkeeping.
 
 ## `TinRCHdr` - the ARC header
 
 ```c
-typedef struct { int64_t rc; } TinRCHdr;
-#define TIN_IMMORTAL_RC ((int64_t)-1)
+typedef struct {
+    uint32_t rc;     // reference count
+    uint32_t flags;  // TIN_RC_* bitmask
+    uint64_t _pad;   // keeps header at 16 bytes; user data inherits 16-byte alignment
+} TinRCHdr;
 ```
 
-Every ARC-managed heap block is laid out as:
-
-```
-low address
-  ┌─────────────────────────────┐
-  │  TinRCHdr  { int64_t rc }   │  <- 8 bytes
-  ├─────────────────────────────┤
-  │  user data ...              │  <- public pointer starts here
-  └─────────────────────────────┘
-high address
-```
+`runtime.h` pins `sizeof(TinRCHdr) == 16` with a `_Static_assert`. The
+codegen for cLayoutStruct stack composites and the immortal-RC sentinel
+hardcodes that size, so growing the header would silently drift those
+offsets.
 
 The **public pointer** (stored in `TinString.ptr`, `TinSlice.ptr`, struct
 fields, etc.) points to the first byte of user data, not to the header.
@@ -41,518 +46,220 @@ static inline TinRCHdr *_rc_hdr(void *ptr) {
 }
 ```
 
-### Reference count semantics
+### Flag bits
 
-| `rc` value               | Meaning                                                                                                              |
-|--------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `> 0`                    | Number of live references. `_tin_release` decrements; frees when it hits 0.                                          |
-| `0`                      | No live references - the block is freed (no pointer should hold this state).                                         |
-| `-1` (`TIN_IMMORTAL_RC`) | Immortal: never retained, never freed. Used for compile-time string literals and static data embedded in the binary. |
+| Flag                 | Status   | Meaning                                                                                                   |
+|----------------------|----------|-----------------------------------------------------------------------------------------------------------|
+| `TIN_RC_IMMORTAL`    | live     | Retain/release short-circuit. Set on static string literals, the empty-string sentinel, and atom blocks. |
+| `TIN_RC_SHARED`      | live     | Picks atomic retain/release. Set by default in `_tin_rc_alloc`; cleared in `_tin_rc_alloc_local`.        |
+| `TIN_RC_UNIQUE`      | reserved | Tracked by `_tin_rc_alloc_local` + `_tin_retain` + `_tin_release` for a future CoW-elision optimization. No consumer reads it yet. |
+| `TIN_RC_ARENA`       | reserved | Defined and defensively checked in `_tin_release` / `_tin_release_struct` so an external-arena owner could opt out of `free()`. Never set today. |
+| `TIN_RC_STATIC_DTOR` | reserved | Bit reserved for a future "no inner ARC fields" hint that lets the per-type dtor walk be skipped. Neither set nor read today. |
 
----
+The `_pad` field is stamped with `TIN_RC_HDR_MAGIC` (a 64-bit nonce)
+on every heap-allocated rc-block. `_tin_is_managed` reads `_pad`
+through the would-be header offset and rejects pointers whose `_pad`
+slot does not carry the magic -- that's how the runtime tells a
+genuine block-start pointer from an interior pointer that happens to
+land inside one of our blocks. See "The heap arena" below.
 
-## `_tin_rc_alloc` - allocate an ARC block
+### The immortal sentinel
+
+A static string literal is emitted as a `{ i64, i64, [N x i8] }` global
+where the first eight bytes are stored as `-1` (all-ones). That covers
+both `rc` (now `0xFFFFFFFF`) and `flags` (also `0xFFFFFFFF`, which
+includes the IMMORTAL bit). `_tin_retain` and `_tin_release` see the
+IMMORTAL bit and return immediately, so static data never gets touched.
+
+## Biased RC
+
+Most heap blocks live their whole life inside a single fiber and never
+get retained or released from a different worker thread. Forcing atomic
+ops on every retain/release for that common case costs roughly 3-5x on
+ARM and 10-30x on x86 versus a plain increment. Biased RC pays the
+atomic cost only after a block has provably escaped its origin fiber.
+
+### Two allocators
 
 ```c
-void *_tin_rc_alloc(int64_t size);
+void *_tin_rc_alloc(int64_t size);        // starts with rc=1, SHARED=1 (atomic path)
+void *_tin_rc_alloc_local(int64_t size);  // starts with rc=1, SHARED=0 (non-atomic), UNIQUE=1
 ```
 
-Allocates `sizeof(TinRCHdr) + size` bytes, initializes `rc = 1`, and returns
-the public pointer (past the header). The caller owns one reference.
+The compiler picks `_tin_rc_alloc_local` for allocations inside
+functions that the call-graph analyzer proved cannot publish their
+result across a fiber boundary. Allocations outside that proof
+(everything in shared packages, every generic monomorphization, every
+function transitively reachable from a `spawn`) keep using
+`_tin_rc_alloc`.
 
-`_tin_rc_alloc` aborts with `"tin: out of memory"` on allocation failure rather
-than returning NULL, so callers never need to check the return value.
+The picker lives in `codegen/runtime_ensure.go::ensureRCAlloc` and the
+underlying analysis in `codegen/coro_callgraph.go::computeSpawnerReachable`.
+`codegen/funcs.go::nameLooksCrossContext` is the conservative filter
+that keeps the optimization off for any symbol containing `__` (package
+fns, generic monos, trait-qualified methods) - those names live across
+compilation contexts the per-package call graph doesn't see.
 
----
+### `_tin_make_shared` - escape transition (defined, not yet emitted)
 
-## `_tin_retain` - increment reference count
+```c
+void _tin_make_shared(void *ptr);
+```
+
+Atomically ORs `TIN_RC_SHARED` into `flags` with release ordering.
+Designed to run at every site where a `_tin_rc_alloc_local` block
+might cross a fiber boundary (spawn capture, channel send, global
+store) so the receiving thread sees `SHARED=1` on its first retain.
+
+The compiler exposes an `ensureMakeShared` declaration but currently
+**emits no call to it**. Soundness today rests on the conservative
+allocator picker: anything that might escape uses `_tin_rc_alloc`
+(SHARED=1 from the start), so escape-transition machinery is not yet
+required. The runtime function is kept so a future tightening of the
+analyzer can switch more allocations to the non-atomic fast path
+without round-tripping through the runtime.
+
+### Retain / release dispatch
 
 ```c
 void _tin_retain(void *ptr);
-```
-
-Increments the reference count of the ARC block that `ptr` points into.
-
-Skips:
-- `NULL` - safe no-op.
-- Blocks with `rc == TIN_IMMORTAL_RC` - immortal objects are never retained.
-
-Called by the compiler whenever a reference is **copied** (assigned to a new
-variable, passed to a function, stored in a struct field, etc.).
-
----
-
-## `_tin_release` - decrement reference count and maybe free
-
-```c
 void _tin_release(void *ptr);
 ```
 
-Decrements the reference count. When `rc` reaches zero, the entire block
-(header + data) is freed with a single `free(hdr)`.
+Both functions read `flags` with acquire ordering, short-circuit on
+IMMORTAL, then branch on SHARED:
 
-Skips:
-- `NULL` - safe no-op.
-- Immortal blocks - never freed.
+- `SHARED=0`: plain `hdr->rc++` / `hdr->rc--`. Release sets UNIQUE when
+  `rc` drops back to 1 so the next CoW site can mutate in place.
+- `SHARED=1`: `__atomic_fetch_add` / `__atomic_fetch_sub` with
+  `ACQ_REL`. UNIQUE is never set on this path (it would race).
 
-Called by the compiler at every point a reference leaves scope or is
-overwritten.
+`_tin_release` calls `free(hdr)` when the post-decrement `rc` reaches
+zero, unless `TIN_RC_ARENA` is set (the storage belongs to an external
+pool).
 
----
+## The heap arena (opt-in via `--mimalloc`)
 
-## Immortal sentinel
+mimalloc is opt-in.  Default builds use libc malloc for rc-blocks and
+rely on the header magic alone to identify Tin pointers.  Passing
+`--mimalloc` adds two layers on top:
 
-String literals in tin source (e.g. `"hello"`) are compiled into the binary as
-global constants. Their memory layout mimics an ARC block:
+- **Allocator perf.** mimalloc's thread-local free lists beat glibc /
+  jemalloc on alloc-heavy workloads; per-thread mi_heaps pinned to the
+  arena eliminate cross-thread free contention.
+- **Defense-in-depth for `_tin_retain_ptr` / `_tin_release_ptr`.**
+  The arena is a contiguous virtual range that only Tin's rc-heaps
+  draw from (exclusive arena), so `_tin_is_managed` can range-check
+  the pointer *before* dereferencing the would-be header.  A foreign
+  pointer near an unmapped page boundary fails the range check
+  without ever touching `ptr - sizeof(TinRCHdr)`, eliminating the
+  rare-but-possible SIGSEGV the magic-only build can hit on a foreign
+  `*T` whose preceding 16 bytes happen to land in unmapped memory.
+  False positives via accidental magic collision are also impossible
+  in mimalloc mode because the range check fails first.
+
+```
+TINMAXHEAP=64G  -> reserve 64 GiB virtual
+TINMAXHEAP=2G   -> reserve 2 GiB
+TINMAXHEAP=0    -> disable; _tin_is_managed falls back to magic-only
+                   (degraded mode, sanitizer builds)
+```
+
+`runtime/heap_arena.c` calls `mi_reserve_os_memory_ex` at constructor
+priority 101 (before any other Tin constructor touches the allocator)
+to register a contiguous virtual range with mimalloc. macOS aarch64
+caps large reservations even with unlimited `ulimit -v`, so the helper
+halves the requested size on failure down to 256 MiB before giving up.
+
+The reservation is virtual only (`commit=false`); pages commit lazily
+as mimalloc grows into them, and `madvise(MADV_DONTNEED)` returns RSS
+to the OS as regions go cold.
+
+### `_tin_is_managed`
 
 ```c
-// Example for the string "hello"
-static const struct {
-    int64_t rc;          // TIN_IMMORTAL_RC = -1
-    char    data[6];     // "hello\0"
-} __str_hello = { -1, "hello" };
+int _tin_is_managed(void *ptr);
 ```
 
-The `TinString.ptr` for this literal points to `__str_hello.data`, four bytes
-past the `rc` field. `_tin_retain` and `_tin_release` see `rc == -1` and skip
-the block entirely - no bookkeeping for static data.
+Returns 1 when `ptr` is the public pointer of one of Tin's rc-blocks.
 
----
+**Default build (libc malloc).** Single-stage magic check:
 
-## ARC heap allocation
+- **Magic.** The would-be header at `ptr - sizeof(TinRCHdr)` must
+  carry `TIN_RC_HDR_MAGIC` in its `_pad` slot. `_tin_rc_alloc` and
+  friends stamp it at allocation. Interior pointers (e.g. `&arr[5]`)
+  land inside block data where `_pad` is random user bytes and the
+  magic mismatches.  False positives are statistically impossible
+  with a 64-bit nonce.
 
-Any pointer obtained via Tin's address-of operator or return-escape promotion
-is ARC-managed. `mem::free` is never needed in normal Tin code - it is only
-for explicitly `mem::malloc`'d blocks used in C interop.
+**With `--mimalloc` (arena active).** Two-stage check, range first:
 
-**`&struct{}` literal** - inline RC-alloc, `isHeapOwned` on the holder:
+1. **Range.** `ptr` must fall inside
+   `[arena_base, arena_base + arena_size)`.  Foreign pointers (libc
+   malloc, stack, rodata, extern returns, foreign mmap'd regions)
+   fail this without dereferencing the header.
+2. **Magic.** Same as above; rejects interior pointers within the
+   arena and freed-then-not-yet-reused blocks (`_pad` is zeroed in
+   `_tin_arena_free`).
 
-```tin
-let p = &point{x: 10, y: 20}   // _tin_rc_alloc; freed when p leaves scope
-```
+Codegen uses `_tin_is_managed` indirectly through `_tin_retain_ptr` /
+`_tin_release_ptr` for every primitive `*T` retain/release site --
+foreign pointers and interior pointers both fall out as safe no-ops,
+and only legitimate block-start pointers actually touch the rc field.
 
-**`return &localVar`** - late promotion at the return site, `heapPromotingFns`
-marks the callee so the caller sets `isHeapOwned` automatically:
-
-```tin
-fn make_counter() *i64 =
-  let x i64 = 0
-  return &x          // x promoted to _tin_rc_alloc block at return
-
-let c = make_counter()   // isHeapOwned; freed when c leaves scope
-```
-
-Both paths use `_tin_rc_alloc` and clean up via `emitHeapChainRelease` at
-scope exit. Calling `mem::free` on either kind of pointer is undefined behavior
-(the user-data pointer passed to C `free` is 8 bytes past the actual header).
-
----
-
-## Raw memory helpers (`mem.c`)
-
-For cases where ARC overhead is unwanted (e.g. temporary internal buffers),
-two simple wrappers are available:
+### `_tin_retain_ptr` / `_tin_release_ptr`
 
 ```c
-void *_tin_malloc(int64_t size);
-void  _tin_free(void *p);
+void _tin_retain_ptr(void *ptr);
+void _tin_release_ptr(void *ptr);
 ```
 
-`_tin_malloc` aborts on failure; `_tin_free` is a direct `free`. These are
-used sparingly inside the runtime itself (e.g. `_tin_str_concat` uses plain
-`malloc` for the concatenated buffer). In user code, ARC functions are
-preferred.
-
----
-
-## Which types are ARC-tracked?
-
-`isRCTrackedType` (`codegen/runtime.go`) determines whether the compiler
-inserts retain/release calls for a value of a given type:
-
-| LLVM type                  | Tin type             | ARC-tracked? | Notes                                       |
-|----------------------------|----------------------|--------------|---------------------------------------------|
-| `{i8*, i64}`               | `string` / `atom`    | Yes          | ptr may be immortal or rc-alloc'd           |
-| `{T*, i64}`                | `[T]` (typed array)  | Yes          | ptr always rc-alloc'd                       |
-| `{i32, i8*}`               | `any`                | Yes          | ptr always rc-alloc'd (boxed value)         |
-| `T*`                       | `*T` in `[*T]` array | In-array     | Element pointer must be heap-allocated; see below |
-| Named struct               | user-defined struct  | Indirect     | Fields checked recursively                  |
-| `i64`, `f64`, `bool`, etc. | primitives           | No           | value types, no heap                        |
-
-For **named structs**, `walkRCStructFields` recursively retains/releases any
-fields whose types are ARC-tracked. A struct is never itself ARC-managed -
-its fields are.
-
-`extractRCDataPtr` extracts the `i8*` that `_tin_retain`/`_tin_release` will
-receive:
-
-- **string** `{i8*, i64}` -> field 0 directly (already `i8*`)
-- **fat array** `{T*, i64}` -> field 0 bitcast to `i8*`
-- **any** `{i32, i8*}` -> field 1 directly
-
----
-
-## When does the compiler emit retain/release?
-
-The codegen (`codegen/runtime.go`) inserts ARC calls at these points:
-
-| Event                                                      | ARC call                                        |
-|------------------------------------------------------------|-------------------------------------------------|
-| Variable assigned from an existing reference (identifier)  | `_tin_retain(new_ref)`                          |
-| Variable goes out of scope                                 | `_tin_release(var)`                             |
-| Variable overwritten                                       | `_tin_release(old)`, then retain the new value  |
-| Return value                                               | retain before returning; caller takes ownership |
-| Temporary result from `++` or function call used in `echo` | `_tin_release(temp)` after use                  |
-| Function argument passing                                  | no retain (callee borrows, not owns)            |
-| Method called on temporary struct receiver (`tmp.method()`) | `emitRelease(tmp)` after the outer call        |
-| `*ptr` when `ptr` is a temporary producer                  | `_tin_release(ptr)` on the outer allocation     |
-
-This follows a **caller-retain, callee-borrows** model. Ownership transfers
-happen explicitly at assignment and scope exit.
-
-Fresh allocations (`++` concat, slice append, function return values) start
-with `rc = 1`. If they are stored in a named variable, the scope-exit release
-brings `rc` back to zero. If they are used as temporaries (e.g., passed
-directly to `echo`), an explicit release is emitted at the use site.
-
----
-
-## Heap promotion
-
-### The problem
-
-A local variable declared with `let` lives on the stack (`alloca` in LLVM IR).
-If a pointer to that variable escapes the function frame - typically via
-`return &x` - the caller receives a dangling pointer. The stack frame is gone as
-soon as the callee returns.
-
-```tin
-fn bad() *i64 {
-    let x = 42
-    return &x  // would be a dangling pointer if x lives on the stack
-}
-```
-
-### What the compiler does
-
-Before generating the body of any function, the codegen runs a lightweight
-**escape analysis** (`findEscapingAddressTakenVars` in `codegen/stmts.go`).
-It walks the AST and collects every local variable whose address is returned:
-
-- `return &x` - direct address escape
-- `let p = &x; return p` - escape via alias variable
-- `return (&x, y)` - escape inside a tuple literal
-
-When a variable is found to escape, the promotion happens at the return site
-(`emitChainedHeapPromotion`). The variable lives on the stack during the
-function body; just before the return, it is copied into a fresh
-`_tin_rc_alloc` block and the heap pointer is returned:
-
-```
-; x lives on the stack during the function body
-%x = alloca i64
-...
-; at the return site - copy into ARC block
-%sz   = <llvmSizeOf i64>
-%heap = call i8* @_tin_rc_alloc(i64 %sz)   ; rc = 1
-%xptr = bitcast i8* %heap to i64*
-%val  = load i64, i64* %x
-store i64 %val, i64* %xptr
-ret i64* %xptr
-```
-
-The returned pointer is ARC-managed. The compiler tracks which functions use
-late heap promotion in `heapPromotingFns`. At the call site, if the callee is
-in `heapPromotingFns`, the result variable is marked `isHeapOwned = true` and
-`emitHeapChainRelease` frees it automatically at scope exit - no `mem::free`
-needed.
-
-### `noRelease` flag
-
-Heap-promoted variables in the **callee** are marked `noRelease: true` in the
-scope entry so scope-exit cleanup skips them - the callee must not release
-memory it is handing off to the caller. The **caller** gets `isHeapOwned = true`
-on the receiving variable and releases it at scope exit instead.
-
-### Which patterns trigger promotion
-
-| Pattern                            | ARC?  | Notes                                                          |
-|------------------------------------|-------|----------------------------------------------------------------|
-| `return &localVar`                 | Yes   | Late-promoted to `_tin_rc_alloc`; caller auto-releases         |
-| `return &param`                    | Yes   | Parameter value copied into `_tin_rc_alloc`; caller releases   |
-| `let p = &localVar; return p`      | Yes   | Alias chain - same promotion                                   |
-| `return (&x, y)`                   | Yes   | Tuple element - x promoted                                     |
-| `let p = &x; let q = &p; return q` | Yes   | Transitive chain - both promoted                               |
-| `let p = &MyStruct{}`              | Yes   | Inline RC-alloc; freed when `p` leaves scope                   |
-| `return &MyStruct{}`               | Yes   | Inline RC-alloc; caller takes ownership                        |
-| `return localVar`                  | No    | Value return - no pointer                                      |
-| `return MyStruct{}`                | No    | Struct returned by value                                       |
-| `let p = &x; foo(p)` (no return)   | No    | Pointer stays local - no promotion needed                      |
-| `let p = &x; return y`             | No    | Alias exists but only `y` is returned                          |
-
-### Limitations
-
-- **Name shadowing**: if two variables in different scopes share the same name and
-  one escapes, both get heap-promoted. Wasteful but safe.
-- **Non-return escapes**: passing `&x` to a function that stores it externally
-  (e.g., a channel send) is not tracked. The analysis is limited to return-path
-  escapes only.
-
-### Implementation files
-
-| File               | Role                                                                                                                                         |
-|--------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| `codegen/stmts.go` | `findEscapingAddressTakenVars`, `walkForAliases`, `walkForEscapes`, `markEscapeVal`, `markEscapeChain`; heap-allocation path in `genVarDecl` |
-| `codegen/funcs.go` | Sets `cg.curFnEscapingVars` before compiling each function body                                                                              |
-| `codegen/coro.go`  | `llvmSizeOf` - GEP null-pointer trick to compute `sizeof(T)` as an LLVM value                                                                |
-| `codegen/scope.go` | `noRelease` field on `scopeEntry` prevents scope-exit free                                                                                   |
-
----
-
-## Fat array element release
-
-When a fat array `[T]` is released, the correct action depends on the element
-type `T`. The outer buffer always carries an ARC header (allocated with
-`_tin_rc_alloc`); only the **last owner** (RC hits 0) runs element cleanup.
-
-### Element release dispatch (`emitReleaseInner`)
-
-`emitReleaseInner` in `codegen/runtime.go` selects the appropriate C function
-based on the element type:
-
-| Element type `T`                | C function called                    | Notes                                           |
-|---------------------------------|--------------------------------------|-------------------------------------------------|
-| `string` `{i8*, i64}`          | `_tin_release_fat_elem_array`        | Releases string data ptr at offset 0            |
-| `any` `{i32, i8*}`             | `_tin_release_any_elem_array`        | Tag-aware; handles closure envs inside `any`    |
-| closure `{fn*, i8*}`           | `_tin_release_fn_elem_array`         | Releases env ptr at offset 8                    |
-| `*T` raw pointer                | `_tin_release_ptr_elem_array`        | Each element is itself an ARC data ptr          |
-| `[T]` nested array or struct    | `_tin_foreach_struct_elem_release`   | Per-type IR helper; recurses to any depth       |
-
-All of these functions share the same outer-RC gate: they atomically decrement
-the buffer's RC and only run element cleanup when the count reaches zero.
-Concurrent copies of the array all hold a reference; only the last release
-triggers element cleanup, preventing double-free.
-
-### N-dimensional arrays (`[[T]]`, `[[[T]]]`, ...)
-
-Nested arrays like `[[string]]` are not a special case - they fall into the
-generic `_tin_foreach_struct_elem_release` path.
-
-At compile time, `emitGenericFatArrayRelease` generates a private IR helper
-`__tin_release_<type_key>_elem(i8* elem_ptr)` for the element type.
-The helper loads the element in-place and calls `emitRelease` on it, which in
-turn dispatches to the correct C function for that element type. Because the
-dispatch is recursive, any nesting depth is handled correctly with no
-special-casing.
-
-Example for `[[string]]`:
-```
-// outer: [string-array-element]
-_tin_foreach_struct_elem_release(outer_data, outer_len, sizeof({i8**,i64}),
-                                 __tin_release_fatarray__i8__elem)
-
-// generated helper:
-void __tin_release_fatarray__i8__elem(i8 *elem_ptr) {
-    [string] val = *({i8**,i64}*)elem_ptr;
-    _tin_release_fat_elem_array(val.ptr as i8*, val.len);  // releases strings
-}
-```
-
-The per-type helper is cached in `CodeGen.elemReleaseHelpers` and registered
-**before** its body is generated so that self-referential types (e.g. a struct
-containing an array of itself) do not produce infinite recursion.
-
-### Pointer arrays (`[*T]`)
-
-A `[*T]` array stores raw ARC-managed heap pointers as elements. Every
-pointer in such an array **must** point to a `_tin_rc_alloc`'d block.
-
-The compiler enforces this at every `++= ` append:
-
-- **`items ++= call_result`** - fresh pointer from a call (RC=1); no
-  retain needed, ownership transfers to the array.
-- **`items ++= ptr_variable`** - existing pointer variable; the compiler emits
-  `_tin_retain(ptr as i8*)` so the array co-owns the block.
-- **`items ++= &localVar`** - stack pointer; the compiler heap-promotes the
-  value: copies it into a fresh `_tin_rc_alloc` block so the stored pointer is
-  always ARC-managed.
-
-When the array is released, `_tin_release_ptr_elem_array` decrements the
-outer buffer RC; if it hits zero, it calls `_tin_release` on each element
-pointer and frees the buffer:
-
-```c
-void _tin_release_ptr_elem_array(void *data, int64_t count) {
-    // ... RC gate ...
-    void **elems = (void **)data;
-    for (int64_t i = 0; i < count; i++) _tin_release(elems[i]);
-    free(hdr);
-}
-```
-
-### Struct arrays (`[S]` where `S` has RC fields)
-
-Named struct elements with RC-tracked fields (strings, arrays, closures, etc.)
-are released by the same `_tin_foreach_struct_elem_release` / per-type helper
-mechanism described under N-dimensional arrays above.
-
-The helper is named `__tin_release_<StructName>_elem` and is generated by
-`ensureElemReleaseHelper`. It calls `emitRelease` on the loaded struct value,
-which invokes `deinit` (if defined) and then releases each RC field via
-`walkRCStructFields`.
-
----
-
-## `any` cast release
-
-When an `any` value is immediately unboxed with `as T` without first being
-stored in a variable, the `any` box must be released at the cast site.
-
-```tin
-let x = getfield(obj, 'count) as i64   // any box freed here
-```
-
-`genAsExpr` (`codegen/exprs.go`) emits an `emitRelease` on the source `any`
-value after the cast when:
-1. The source type is `any`.
-2. The target type is not `any`.
-3. The source expression is not a copy-borrow (`!isCopyExpr`), i.e. the `any`
-   was freshly allocated (from a call, reflection, etc.) and has no other owner.
-
-This prevents the `any` box from leaking when it is used as a transient
-unboxing vehicle and never assigned to a variable.
-
----
-
-## Method chain temporary release
-
-When a method is called on a struct returned directly by another call (a method
-chain), the intermediate struct is a **temporary** - it was retained by the
-inner callee's return but is never stored in a named variable and therefore
-never released at scope exit.
-
-```tin
-let s = v.get("name").as_string()
-//         ^^^^^^^^^^^
-//         temporary Value returned by get(); never assigned to a variable
-```
-
-`genCallExpr` (`codegen/exprs.go`) emits `emitRelease(block, objVal)` on the
-receiver immediately after the outer call returns, provided:
-
-1. The method is not a pointer receiver (`!fn.IsPtr`) - pointer receivers
-   pass a pointer to an existing heap block; the caller does not own it.
-2. The receiver expression is a **temporary producer** (`isTemporaryProducer`):
-   a `CallExpr`, string interpolation, `++` concat result, or non-empty array
-   literal - i.e., any expression whose result is freshly retained and has no
-   other owner.
-
-This release is emitted at all three call paths inside `genCallExpr`:
-- Overload-resolved method calls.
-- Generic method instantiations.
-- Direct (non-generic) method calls.
-
-The emitted release calls `emitRelease`, which walks the struct's RC fields
-via `walkRCStructFields` (releasing strings, slices, closures, etc.) before
-freeing the struct's own allocation if it is heap-owned.
-
-### Why `!fn.IsPtr` matters
-
-A pointer receiver (`fn foo(this *MyStruct)`) receives `*MyStruct` - a pointer
-to an existing allocation. The caller never owns that pointer and must not
-release it. Only value receivers (`fn foo(this MyStruct)`) cause a struct copy
-whose RC fields are retained by the callee; those are the ones that need a
-matching release on the calling side.
-
----
-
-## Pointer dereference of temporary (ARC move)
-
-`*ptr` when `ptr` is a temporary producer (e.g., `*parse_value(&p)`) performs
-an **ARC move**: the struct fields are transferred to the loaded copy, but the
-outer pointer allocation itself would otherwise leak.
-
-```tin
-return *parse_node(&p, 0)   // parse_node returns *Value; deref loads the Value
-                            // and must free the *Value allocation
-```
-
-`genDerefExpr` (`codegen/exprs.go`) handles this case:
-
-1. Loads the pointed-to value normally.
-2. When `isTemporaryProducer(e.Expr)` is true, bitcasts the pointer to `i8*`
-   and calls `_tin_release` directly (not `emitRelease`).
-
-The distinction is important: `emitRelease` would walk the struct's RC fields
-and release them - but those fields are now owned by the loaded copy. Only the
-outer heap block (the `_tin_rc_alloc` allocation for the pointer itself) needs
-to be freed. Calling `_tin_release` directly decrements that block's RC and
-frees it when it reaches zero, without touching the fields.
-
----
-
-## Call argument release (`emitCallArgRelease`)
-
-Temporary values produced by a call, string interpolation, or `++` concat may
-be passed directly as function arguments without ever being stored in a named
-variable. Without explicit cleanup, these allocations would leak.
-
-`emitCallArgRelease` (`codegen/runtime.go`) is called after each call site to
-release the pre-coercion argument value when appropriate. It fires only when
-the argument is a **temporary producer** (as determined by `isTemporaryProducer`
-below); it skips arguments that are references to existing named variables.
-
-### Rules
-
-| Argument type                          | Action                                              |
-|----------------------------------------|-----------------------------------------------------|
-| `any` (post-coercion only)             | `emitRelease(post)` - box from type coercion freed  |
-| `copy(x)` annotation                  | No-op - copy semantics, caller retains ownership    |
-| RC-tracked fat type (string, array, `any`) | `emitRelease(pre)` - direct release of fat value |
-| `*TinStruct` pointer from a temporary  | `emitRelease(pre)` - heap block returned by callee  |
-| Anything else                          | No-op                                               |
-
-The `*TinStruct` case uses the `isTemporaryProducer` gate to distinguish:
-- `foo()` passed as argument - temporary heap result, release after call.
-- `&stackVar` passed as argument - stack borrow, must NOT release.
-
-### `isTemporaryProducer`
-
-Returns `true` for expressions whose result is freshly retained and has no
-other owner:
-
-- `CallExpr` (function or method call result)
-- String interpolation (`"{x} {y}"`)
-- `++` concat result
-- Non-empty array literal (`[1, 2, 3]`)
-
----
-
-## Struct field retain (`emitStructFieldRetain`)
-
-When a struct value is **copied** (passed by value, returned, or assigned),
-the compiler calls `emitRetain` on the copy. For RC-tracked fat types (string,
-array, `any`, closures) and nested struct values, `emitRetain` handles this
-via `walkRCStructFields`.
-
-For `*TinStruct` pointer fields (e.g., a linked-list node storing a `*Node`
-pointer as a field), a plain `emitRetain` would be a no-op - pointer types do
-not flow through the fat-type path. `emitStructFieldRetain` fills this gap.
-
-`emitStructFieldRetain` is called from the `walkRCStructFields` visitor
-(retained path only) and emits `_tin_retain(field_ptr as i8*)` when the field
-is a `*TinStruct` pointer. For all other field types, it delegates to the
-regular `emitRetain`.
-
-This ensures that copying a struct containing ARC-managed pointer fields
-correctly increments the reference count of the pointed-to allocation, keeping
-the object alive for the duration of the copy's lifetime.
-
-### Why this is separate from `emitRetain`
-
-`emitRetain` is also called for function parameters of type `*TinStruct`.
-Those parameters point to existing stack-allocated or heap-allocated structs
-owned by the caller; retaining them would be incorrect (the caller is
-responsible for the allocation's lifetime). `emitStructFieldRetain` is
-called only from the field-walk path, which is triggered only when copying a
-struct value - never for parameter handling.
+Provenance-aware retain/release for bare pointer values whose source
+is unknown at the call site (`*void`, `*i64`, raw extern returns).
+Both short-circuit via `_tin_is_managed` before falling through to the
+biased `_tin_retain` / `_tin_release` path. A pointer that came from
+`mem::malloc`, an extern C call, or `&local_var` is outside the arena
+and returns immediately - no header math, no free.
+
+This is what lets Tin treat every pointer value as a uniformly
+rc-tracked binding without breaking C interop: foreign pointers cost
+one range check; Tin-arena pointers participate in ARC normally. The
+data-pointer fast path (struct field walks, fat-string releases) stays
+on the non-provenance entry points because callers there know the
+pointer is Tin-managed by construction.
+
+### mimalloc
+
+Opt-in via `--mimalloc`.  When enabled, the runtime is compiled with
+`-DTIN_USE_MIMALLOC=1`, links against `libmimalloc`, and `heap_arena.c`
+reserves the arena + creates per-thread mi_heaps.  rc-block alloc /
+free in `arc.c` route through `mi_heap_malloc` / `mi_free`.
+
+Without the flag (default), `heap_arena.c` compiles a stub
+`_tin_is_managed` that does only the magic check, and `arc.c` uses
+libc `malloc` / `free` for rc-blocks.  No external dependency.
+
+**Why keep mimalloc as an option at all.** Two reasons:
+
+1. The arena is a defense-in-depth layer for the provenance check.
+   In the default build, `_tin_retain_ptr(some_foreign_ptr)` has to
+   read `*(foreign_ptr - 16)` before it can reject the pointer via
+   magic mismatch.  If that read crosses an unmapped page boundary
+   (rare but possible for a pointer right at the start of a fresh
+   mmap region), the runtime SIGSEGVs instead of returning a clean
+   "no-op."  The arena range check eliminates that risk: a foreign
+   pointer is rejected by address, never touching the header.
+2. mimalloc's allocator is consistently faster than glibc's on
+   alloc-heavy fiber workloads (see `bench/tin/workload.tin`).  Apps
+   that need the perf trade a build dependency for the win.
+
+## See also
+
+- [memory-arc-codegen.md](memory-arc-codegen.md) - ARC heap allocation
+  and retain/release codegen rules.
+- [memory-special-cases.md](memory-special-cases.md) - heap promotion,
+  special-case releases.
+- [arc-threads.md](arc-threads.md) - how ARC interacts with the fiber
+  scheduler and the worker thread pool.
+- [clayout-structs.md](clayout-structs.md) - cLayoutStruct wrapper
+  layout at the FFI boundary.

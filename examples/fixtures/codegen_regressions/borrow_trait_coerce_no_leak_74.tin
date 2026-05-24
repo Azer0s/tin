@@ -1,0 +1,27 @@
+// Regression: passing a `*Struct` to a fn expecting `*Trait`
+// (`f(d)` where `f(a *Trait)` and `let d = &Struct{}`) used to
+// leak the iface fat-pointer block.  buildPtrToTraitBorrow heap-
+// allocates a fresh `{i8* data, vtable*}` block per call site so
+// the *Trait outlives the constructing frame, but the call-arg
+// release path in emitCallArgReleaseForRet skipped the post-coerce
+// iface because the source ast.Identifier was isCopyExpr.  Fix
+// mirrors the `any` boxing path: when post is a *Trait_iface and
+// pre is not, release post.
+
+trait IsAnimal =
+  fn sound(this IsAnimal) string = virtual
+
+struct IsDog(IsAnimal) =
+  name string
+  fn IsAnimal::sound(this IsDog) string = return "woof"
+
+fn describe(a *IsAnimal) string =
+  if a is *IsDog:
+    let d = a as *IsDog
+    return "dog: " ++ (*d).name
+  return "unknown"
+
+fn main() i64 =
+  let d = &IsDog{name: "rex"}
+  echo describe(d)
+  return 0

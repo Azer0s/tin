@@ -1,0 +1,6 @@
+// For-loop iteration variables are views into the container, not owned
+// by the loop body's scope; `move` on them is rejected.
+fn main() =
+  let xs = ["a", "b", "c"]
+  for item in xs:
+    echo move item

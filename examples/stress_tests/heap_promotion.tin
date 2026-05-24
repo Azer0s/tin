@@ -19,9 +19,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Direct address-of return: `return &x`
-// ---------------------------------------------------------------------------
 
 fn alloc_i64() *i64 =
   let x i64 = 42
@@ -33,9 +31,7 @@ test "direct addr-of return (i64)" =
 
   assert::equals(42, v)
 
-// ---------------------------------------------------------------------------
 // 2. Alias return: `let p = &x; return p`
-// ---------------------------------------------------------------------------
 
 fn alloc_i64_via_alias() *i64 =
   let x i64 = 99
@@ -49,9 +45,7 @@ test "alias addr-of return (i64)" =
 
   assert::equals(99, v)
 
-// ---------------------------------------------------------------------------
 // 3. String heap promotion - caller observes value through returned pointer
-// ---------------------------------------------------------------------------
 
 fn alloc_string() *string =
   let s = "hello"
@@ -63,10 +57,8 @@ test "heap-promoted string pointer is readable" =
 
   assert::equals("hello", v)
 
-// ---------------------------------------------------------------------------
 // 4. Multiple independent heap-promoted variables via tuple return
 //    Each variable gets its own heap slot.
-// ---------------------------------------------------------------------------
 
 fn alloc_two(a_val i64, b_val i64) (*i64, *i64) =
   let a i64 = a_val
@@ -84,12 +76,10 @@ test "multiple heap-promoted variables" =
   assert::equals(7, va)
   assert::equals(13, vb)
 
-// ---------------------------------------------------------------------------
 // 5. Heap-promoted variable with defer
 //    Defer observes (and modifies) the heap-promoted variable through a
 //    captured pointer. This is the key use-case that motivated heap
 //    promotion: `defer do: (*ptr) = ...` where ptr escapes.
-// ---------------------------------------------------------------------------
 
 fn alloc_with_defer() *i64 =
   let x i64 = 1
@@ -107,10 +97,8 @@ test "defer mutates heap-promoted variable" =
   // Defer ran after return, set x = 1 * 100 = 100
   assert::equals(100, v)
 
-// ---------------------------------------------------------------------------
 // 6. Non-escaping variable is NOT heap-promoted (regression guard)
 //    Values computed locally and returned by value stay on the stack.
-// ---------------------------------------------------------------------------
 
 fn compute_double(n i64) i64 =
   let result i64 = n * 2
@@ -121,9 +109,7 @@ test "non-escaping variable returns correct value" =
 
   assert::equals(42, r)
 
-// ---------------------------------------------------------------------------
 // 7. Write through heap-promoted pointer, read back in caller
-// ---------------------------------------------------------------------------
 
 fn make_counter() *i64 =
   let c i64 = 0
@@ -138,11 +124,9 @@ test "write through heap pointer" =
 
   assert::equals(15, v)
 
-// ---------------------------------------------------------------------------
 // 8. Struct heap promotion
 //    A locally-declared struct is allocated on the heap because its address
 //    escapes via return.
-// ---------------------------------------------------------------------------
 
 struct hp_point =
   x i64
@@ -177,11 +161,9 @@ test "struct heap promotion - write through pointer" =
   assert::equals(5, px)
   assert::equals(7, py)
 
-// ---------------------------------------------------------------------------
 // 9. Array heap promotion
 //    A local array fat-pointer is heap-promoted so the caller can access
 //    element values through the returned pointer.
-// ---------------------------------------------------------------------------
 
 fn alloc_array() *[i64] =
   let arr [i64] = [100, 200, 300]
@@ -200,11 +182,9 @@ test "array heap promotion" =
   assert::equals(200, v1)
   assert::equals(300, v2)
 
-// ---------------------------------------------------------------------------
 // 10. Nested (transitive) heap promotion
 //     `let px = &x; let ppx = &px; return ppx` - both x and px are
 //     heap-promoted because the alias chain px->x is detected transitively.
-// ---------------------------------------------------------------------------
 
 fn alloc_nested() **i64 =
   let x i64 = 42
@@ -220,12 +200,10 @@ test "nested pointer heap promotion" =
 
   assert::equals(42, v)
 
-// ---------------------------------------------------------------------------
 // Defer tests - multi_defer variants using heap promotion instead of out-params
 //
 // Each function returns a pointer to its local variable so the caller can
 // observe defer side-effects after the function returns.
-// ---------------------------------------------------------------------------
 
 // 11. LIFO ordering - three defers write to a heap-promoted i64
 fn defer_lifo_order() *i64 =
@@ -389,14 +367,11 @@ test "nested defers - inner heap pointer modified before outer reads" =
 
   assert::equals(105, r)
 
-// ---------------------------------------------------------------------------
 // Stress tests - edge cases and combinations
-// ---------------------------------------------------------------------------
 
 // 18. Struct with ARC string field - heap promotion must not prematurely
 //     release the string. The caller reads the string AFTER the function
 //     returns; if ARC is mishandled valgrind catches the invalid read.
-// ---------------------------------------------------------------------------
 
 struct named_value =
   label string
@@ -416,7 +391,6 @@ test "heap-promoted struct with ARC string field" =
 
 // 19. Five independently heap-promoted variables returned as a tuple.
 //     Tests that each variable gets its own heap slot with the correct value.
-// ---------------------------------------------------------------------------
 
 fn alloc_five() (*i64, *i64, *i64, *i64, *i64) =
   let a i64 = 10
@@ -438,7 +412,6 @@ test "five independently heap-promoted variables via tuple" =
 // 20. Write through all five pointers then read back.
 //     Guards against aliasing mistakes where two pointers end up sharing
 //     the same malloc'd block.
-// ---------------------------------------------------------------------------
 
 test "five heap pointers are independent (no aliasing)" =
   let (pa, pb, pc, pd, pe) = alloc_five()
@@ -455,7 +428,6 @@ test "five heap pointers are independent (no aliasing)" =
 
 // 21. Heap-promoted i64 used as a loop accumulator written from outside.
 //     The pointer is handed to a helper that increments through it.
-// ---------------------------------------------------------------------------
 
 fn increment_ptr(p *i64, by i64) =
   (*p) = (*p) + by
@@ -475,7 +447,6 @@ test "heap pointer written from helper function" =
 // 22. Return heap-promoted pointer from inside an if-branch.
 //     Both branches promote different variables; the caller always gets
 //     a valid pointer regardless of which branch runs.
-// ---------------------------------------------------------------------------
 
 fn alloc_conditional(cond bool) *i64 =
   let yes i64 = 100
@@ -498,7 +469,6 @@ test "heap promotion - false branch" =
 
 // 23. Transitive alias chain: ppx -> px -> x.
 //     Three levels of indirection; both px and x must be heap-promoted.
-// ---------------------------------------------------------------------------
 
 fn alloc_triple_deref() ***i64 =
   let x  i64  = 7
@@ -518,7 +488,6 @@ test "triple-deref transitive heap promotion" =
 // 24. Many defers + heap promotion: ten defers each adding a different power
 //     of 10. Tests that the defer chain handles large numbers of captures
 //     correctly when the target is on the heap.
-// ---------------------------------------------------------------------------
 
 fn ten_defers_heap() *i64 =
   let v i64 = 0
@@ -544,7 +513,6 @@ test "ten defers accumulate into heap-promoted variable" =
 
 // 25. Heap-promoted string with defer concatenation.
 //     Exercises ARC retain/release across the defer boundary on the heap.
-// ---------------------------------------------------------------------------
 
 fn build_string_with_defers() *string =
   let s = "x"

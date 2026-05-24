@@ -97,7 +97,14 @@ func (cg *CodeGen) detectStacktraceUsage(stmts []ast.Node) {
 			if !ok {
 				return
 			}
-
+			// Only explicit `stacktrace(...)` opts the program into
+			// the pclntab + frame-pointer machinery.  Earlier we
+			// also flipped the flag for `panic(...)` calls (so the
+			// recovered-message companion trace would be populated),
+			// but on Linux x86_64 a wide TIN_STACKTRACE=1 footprint
+			// crashes panic-handling tests.  Until the cause is
+			// pinned down, panic alone doesn't pull in the resolver
+			// and `recover('trace)` falls back to an empty trace.
 			if id.Name == "stacktrace" {
 				cg.stacktraceUsed = true
 			}
@@ -275,15 +282,9 @@ func (cg *CodeGen) genBuiltinStacktrace(block *ir.Block, capArg, optsArg ast.Nod
 
 	atomPtrType := irtypes.NewPointer(cg.atomType)
 	bufAtom := block.NewBitCast(rawBuf, atomPtrType)
+	lenI64 := block.NewZExt(count, irtypes.I64)
 
-	fatType := irtypes.NewStruct(atomPtrType, irtypes.I64)
-	fatAlloca := block.NewAlloca(fatType)
-	ptrGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(bufAtom, ptrGep)
-	lenGep := block.NewGetElementPtr(fatType, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(block.NewZExt(count, irtypes.I64), lenGep)
-
-	return block.NewLoad(fatType, fatAlloca), nil
+	// Cap == len: the trace buffer is allocated at exactly the captured
+	// length, so an `++=` later would need to grow.
+	return cg.buildFatArrayValue(block, cg.atomType, bufAtom, lenI64, lenI64), nil
 }

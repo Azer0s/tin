@@ -1,0 +1,9 @@
+// Regression: -Wmanual-alloc-leak fires when a mem::malloc /
+// mem::calloc / mem::realloc / mem::alloc binding goes out of
+// scope without a matching mem::free on every path.
+
+use mem
+
+fn main() i64 =
+  let p = mem::malloc(64)
+  return 0

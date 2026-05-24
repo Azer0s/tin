@@ -1,13 +1,13 @@
-// examples/operator_overload_phase0_test.tin -- Phase 0 op-overload
+// examples/operator_overload_phase0_test.tin -- op-overload
 // fall-through: when a struct lists an op-trait impl for one rhs
 // shape (e.g. `add[Foo, Foo]`) but the call site uses a different
 // rhs (`Foo + i64`), dispatch must fall through to the "binary
 // operator not defined" compile error rather than silently
 // compiling or invoking the wrong impl.
 //
-// Replaces examples/operator_overload_phase0.sh.  The bad code
-// lives in examples/fixtures/operator_overload_phase0/ and the
-// test below shells out to `./tin run` to verify the diagnostic.
+// The bad code lives in examples/fixtures/operator_overload_phase0/
+// and the test below shells out to `./tin run` to verify the
+// diagnostic.
 
 use assert
 use "./fixtures/run_compiler"

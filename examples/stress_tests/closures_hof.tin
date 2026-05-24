@@ -18,9 +18,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Function returning a closure that captures its argument
-// ---------------------------------------------------------------------------
 
 fn make_adder(n i64) fn(i64) i64 =
   return fn(x i64) i64 = return x + n
@@ -28,10 +26,8 @@ fn make_adder(n i64) fn(i64) i64 =
 fn make_multiplier(n i64) fn(i64) i64 =
   return fn(x i64) i64 = return x * n
 
-// ---------------------------------------------------------------------------
 // 2. Closures sharing a captured mutable variable
 //    Both closures capture the same binding - tests environment aliasing.
-// ---------------------------------------------------------------------------
 
 fn make_counter() fn() i64 =
   let count i64 = 0
@@ -39,17 +35,13 @@ fn make_counter() fn() i64 =
     count = count + 1
     return count
 
-// ---------------------------------------------------------------------------
 // 3. Function returning a closure that itself returns a closure (currying)
-// ---------------------------------------------------------------------------
 
 fn curry_add(a i64) fn(i64) fn(i64) i64 =
   return fn(b i64) fn(i64) i64 =
     return fn(c i64) i64 = return a + b + c
 
-// ---------------------------------------------------------------------------
 // 4. Array of closures - all closures captured differently
-// ---------------------------------------------------------------------------
 
 fn make_pow_fns() [fn(i64) i64] =
   let fns [fn(i64) i64] = []
@@ -58,16 +50,14 @@ fn make_pow_fns() [fn(i64) i64] =
   let exp1 = fn(x i64) i64 = return x          // x^1
   let exp2 = fn(x i64) i64 = return x * x      // x^2
   let exp3 = fn(x i64) i64 = return x * x * x  // x^3
-  fns ++= exp0
-  fns ++= exp1
-  fns ++= exp2
-  fns ++= exp3
+  fns ++= [exp0]
+  fns ++= [exp1]
+  fns ++= [exp2]
+  fns ++= [exp3]
 
   return fns
 
-// ---------------------------------------------------------------------------
 // 5. Higher-order function that composes N closures from an array
-// ---------------------------------------------------------------------------
 
 fn compose_all(fns [fn(i64) i64], init i64) i64 =
   let acc i64 = init
@@ -77,9 +67,7 @@ fn compose_all(fns [fn(i64) i64], init i64) i64 =
 
   return acc
 
-// ---------------------------------------------------------------------------
 // 6. Generic HOF: takes a predicate, returns a "filter-counter"
-// ---------------------------------------------------------------------------
 
 fn count_matching[t](pred fn(t) bool) fn([t]) i64 =
   return fn(arr [t]) i64 =
@@ -91,9 +79,7 @@ fn count_matching[t](pred fn(t) bool) fn([t]) i64 =
 
     return n
 
-// ---------------------------------------------------------------------------
 // 7. Partial application: fix left argument via closure
-// ---------------------------------------------------------------------------
 
 fn partial_left(f fn(i64, i64) i64, a i64) fn(i64) i64 =
   return fn(b i64) i64 = return f(a, b)
@@ -101,9 +87,7 @@ fn partial_left(f fn(i64, i64) i64, a i64) fn(i64) i64 =
 fn partial_right(f fn(i64, i64) i64, b i64) fn(i64) i64 =
   return fn(a i64) i64 = return f(a, b)
 
-// ---------------------------------------------------------------------------
 // 8. Deeply nested inline closure definition
-// ---------------------------------------------------------------------------
 
 fn deep_nest(n i64) i64 =
   let f1 = fn(a i64) i64 =
@@ -116,9 +100,7 @@ fn deep_nest(n i64) i64 =
 
   return f1(n)
 
-// ---------------------------------------------------------------------------
 // 9. Struct with fn-type field acting as a method table
-// ---------------------------------------------------------------------------
 
 struct handler =
   transform fn(i64) i64
@@ -146,9 +128,7 @@ fn run_handler(h handler, x i64) i64 =
     return h.transform(x)
   return 0 - 1
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "make_adder captures arg" =
   let add5 = make_adder(5)

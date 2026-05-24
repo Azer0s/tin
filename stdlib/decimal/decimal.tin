@@ -322,8 +322,8 @@ fn format_impl(v Value) string =
 
   let new_n = len(body)
   let int_end = new_n - s
-  let int_part = body[0:int_end]
-  let frac_part = body[int_end:new_n]
+  let int_part = body[0..int_end]
+  let frac_part = body[int_end..new_n]
   let result = int_part ++ "." ++ frac_part
 
   if neg:
@@ -343,7 +343,7 @@ fn repeat_char(c char, n i64) string =
   let i i64 = 0
 
   for i < n:
-    buf ++= (c as byte)
+    buf ++= [c as byte]
     i = i + 1
 
   return buf as string

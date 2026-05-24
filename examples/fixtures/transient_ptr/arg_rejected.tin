@@ -1,0 +1,11 @@
+// Passing a pointer-arithmetic result as a function argument is
+// rejected: the callee would receive a view whose backing rc-block
+// the caller may release before the call returns.
+
+fn consume(p *u8) =
+  echo *p
+
+fn main() =
+  let xs [u8] = [1 as u8, 2 as u8, 3 as u8]
+  let p = &xs[0]
+  consume(p + 1)   // rejected

@@ -1,0 +1,109 @@
+// examples/move_test.tin
+//
+// Regression tests for explicit move semantics.
+//
+// `move x` consumes a binding the current scope owns and transfers
+// its rc to the consumer.  Codegen marks the entry as ownershipMoved
+// so the scope-exit release is elided; the parser-side check forbids
+// `move` on anything other than a bare identifier; the codegen-side
+// classifier forbids move on parameters, iterator bindings, and
+// other non-owning bindings; subsequent reads of a moved binding
+// raise a use-after-move compile error.
+
+use assert
+
+// Happy path: move a fresh allocation into a consumer.  The value
+// round-trips through the move correctly.
+
+test "move: fresh string consumed by call" =
+  let s = "hello"
+  let n = len(move s)
+  assert::equals(n, 5)
+
+test "move: fresh fat array consumed by len" =
+  let xs = [1, 2, 3, 4]
+  let n = len(move xs)
+  assert::equals(n, 4)
+
+// Move into echo: the bytes still print correctly.
+
+test "move: fresh string consumed by echo" =
+  let s = "world"
+  echo move s
+
+// Move from a copy: `let owned = source; move owned` works because
+// `owned` is a fresh local the scope owns.  This is the recommended
+// pattern when the source itself is not move-eligible (a parameter,
+// an iterator binding, etc.).
+
+fn collect(parts string) string =
+  let owned = parts
+  return move owned
+
+test "move: copy-then-move pattern works for parameter sources" =
+  assert::equals(collect("a-b-c"), "a-b-c")
+
+// Multiple moves in one scope, on different bindings.
+
+test "move: multiple moves of different bindings" =
+  let a = "alpha"
+  let b = "beta"
+  let n1 = len(move a)
+  let n2 = len(move b)
+  assert::equals(n1, 5)
+  assert::equals(n2, 4)
+
+// Per-branch move tracking: a move inside one branch of an if must not
+// leak into the sibling branch as a spurious use-after-move.  The
+// outer scope's release stays rc-balanced because genMoveExpr emits a
+// compensating retain when the binding is "partial-moved" (moved on
+// some branches but not all).
+
+fn move_in_then_use_in_else(c bool) i64 =
+  let s = "hello"
+  if c:
+    let n = len(move s)
+    return n
+  return len(s)
+
+test "move: if-then move, else uses original (partial move)" =
+  assert::equals(move_in_then_use_in_else(true), 5)
+  assert::equals(move_in_then_use_in_else(false), 5)
+
+fn move_in_both_branches(c bool) i64 =
+  let s = "abcd"
+  if c:
+    return len(move s)
+  return len(move s)
+
+test "move: both branches move the binding (all-paths-moved)" =
+  assert::equals(move_in_both_branches(true), 4)
+  assert::equals(move_in_both_branches(false), 4)
+
+fn move_via_elif(n i64) i64 =
+  let s = "world"
+  if n == 1:
+    return len(move s)
+  else if n == 2:
+    return len(s)
+  return len(s)
+
+test "move: elif chain handles partial move" =
+  assert::equals(move_via_elif(1), 5)
+  assert::equals(move_via_elif(2), 5)
+  assert::equals(move_via_elif(3), 5)
+
+// Per-branch tracking in match arms.  An int-switch match arm that
+// moves the binding must not leak its moved-state into sibling arms.
+
+fn match_move(n i64) i64 =
+  let s = "match"
+  match n:
+    case 1:
+      return len(move s)
+    default:
+      return len(s)
+
+test "move: match arm moves, default reads original" =
+  assert::equals(match_move(1), 5)
+  assert::equals(match_move(2), 5)

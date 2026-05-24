@@ -31,8 +31,10 @@ struct result[ok, err] =
   is_ok   bool
 
 // Top-level type aliases
-type int_pair   = pair[i64, i64]
-type bool_triple = triple[bool, bool, bool]
+type int_pair        = pair[i64, i64]
+type bool_triple     = triple[bool, bool, bool]
+type i64_result      = result[i64]
+type i64_pair_result = result[i64, i64]
 
 test "pair of integers" =
   let p = int_pair{first: 10, second: 20}
@@ -48,14 +50,12 @@ test "triple of booleans" =
   assert::ok(t.third)
 
 test "result 1-arity" =
-  type i64_result = result[i64]
   let r = i64_result{value: 42, is_ok: true}
 
   assert::ok(r.is_ok)
   assert::equals(r.value, 42)
 
 test "result 2-arity" =
-  type i64_pair_result = result[i64, i64]
   let r = i64_pair_result{value: 0, err_val: 404, is_ok: false}
 
   assert::not_ok(r.is_ok)
@@ -63,8 +63,6 @@ test "result 2-arity" =
 
 test "different arities coexist" =
   // Both result[i64] and result[i64, i64] are live at the same time.
-  type i64_result      = result[i64]
-  type i64_pair_result = result[i64, i64]
   let r1 = i64_result{value: 99, is_ok: true}
   let r2 = i64_pair_result{value: 0, err_val: 500, is_ok: false}
 

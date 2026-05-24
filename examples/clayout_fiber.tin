@@ -17,9 +17,7 @@
 use assert
 use sync
 
-// ---------------------------------------------------------------------------
 // Struct declarations (must match clayout_fiber.c layout exactly)
-// ---------------------------------------------------------------------------
 
 struct packet_t =
   seq     i64
@@ -44,9 +42,7 @@ struct circle_t =
 
 fn{#handover} make_circle(x i64, y i64, radius i64) *circle_t = extern("make_circle")
 
-// ---------------------------------------------------------------------------
 // Helpers for spawning (must be fn{#async})
-// ---------------------------------------------------------------------------
 
 fn{#async} fiber_read_packet(ch sync::Channel[i64]) =
   let p = get_packet()
@@ -96,9 +92,7 @@ fn{#async} fiber_produce_and_send(value i64, id i64, out sync::Channel[i64]) =
   await out.send((*c).id)
   // c released here (RC -> 0, RC block freed)
 
-// ---------------------------------------------------------------------------
 // Tests: non-handover (static C struct) + fibers
-// ---------------------------------------------------------------------------
 
 test "non-handover: fiber reads static C struct fields" =
   let ch = sync::Channel[i64].make(2)
@@ -126,9 +120,7 @@ test "non-handover: two fibers share wrapper to same C struct" =
   assert::equals(await ch.recv(), 1)
   assert::equals(await ch.recv(), 1)
 
-// ---------------------------------------------------------------------------
 // Tests: handover (malloc'd C struct, RC-managed by Tin) + fibers
-// ---------------------------------------------------------------------------
 
 test "handover: fiber reads RC-managed struct - correct fields" =
   let ch = sync::Channel[i64].make(2)
@@ -187,9 +179,7 @@ test "handover: nested cLayoutStruct fields accessible from fiber" =
   assert::equals(await ch.recv(), 20)
   assert::equals(await ch.recv(), 5)
 
-// ---------------------------------------------------------------------------
 // Tests: Channel[*T] - pointer type as generic channel element
-// ---------------------------------------------------------------------------
 
 fn{#async} fiber_recv_counter_ptr(ch sync::Channel[*counter_t], out sync::Channel[i64]) =
   let c = await ch.recv()

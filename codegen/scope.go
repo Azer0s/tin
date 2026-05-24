@@ -36,6 +36,21 @@ type scopeEntry struct {
 	noRelease  bool        // true for borrowed bindings (e.g. union `is` vars) -- scope exit skips all release
 	isGlobal   bool        // true for module-level globals; skip in per-function scope release
 	isUnsigned bool        // true if the variable's Tin type is unsigned (u8/u16/u32/u64)
+	// aliasedFromName is set when this binding was declared as `let b = a`
+	// from another fat-pointer binding (`string` / `[T]`).  Indexed-write
+	// and `++=` sites consult it to emit the -Walias-mutation warning so
+	// the user gets pointed at `copy(...)` when they almost certainly
+	// meant to break the alias.
+	aliasedFromName string
+	// holdsFreshRCPtr is true when the binding was initialized from an
+	// expression that produces a fresh `_tin_rc_alloc`'d pointer (notably
+	// `&StructLit{...}` and ADT constructors).  Without this flag, a
+	// subsequent `return s` from such a binding loses the RC provenance
+	// at the coerce-to-trait site (LLVM Load doesn't trace back through
+	// the alloca's store chain), and `coerceToTrait` falls back to the
+	// borrow vtable whose data-release slot is a no-op -- leaking the
+	// heap block on every caller scope-exit.
+	holdsFreshRCPtr bool
 	// byteArrayElem is the element type name ("byte", "u8", "char") when this
 	// variable holds a [byte]/[u8]/[char] fat array.  Empty string otherwise.
 	// Used by genEcho to choose the per-element printf format.
@@ -152,6 +167,96 @@ type scopeEntry struct {
 	// reports an uninit-read under valgrind or atomically corrupts
 	// adjacent stack / .bss memory.
 	pointsToBorrowedStorage bool
+
+	// ownership classifies how the borrow optimizer treats this binding.
+	// See docs/15-ownership.md for the conceptual model and the codegen
+	// rules for each ownership state.
+	ownership ownership
+
+	// isForIterator marks for-loop iteration bindings (`for x in xs`
+	// and friends).  The slot is filled fresh each iteration; an
+	// explicit `move x` on it is rejected with a non-owning-binding
+	// error so the per-iteration retain/release pair stays balanced.
+	isForIterator bool
+}
+
+// ownership is the borrow optimizer's per-binding classification.
+type ownership int
+
+const (
+	// ownershipOwned: binding holds a +1 reference.  Codegen emits
+	// retain at creation (or consumes a fresh +1) and release at
+	// scope exit.  This is the default classification when the
+	// analyzer cannot prove the binding is borrowed or moved.
+	ownershipOwned ownership = iota
+	// ownershipBorrowed: binding aliases a value whose lifetime is
+	// guaranteed elsewhere.  Codegen skips both the entry retain and
+	// the scope-exit release.
+	ownershipBorrowed
+	// ownershipMoved: ownership has been transferred via `move x` or
+	// inferred move at a last-use transfer.  Codegen skips the
+	// scope-exit release.
+	ownershipMoved
+)
+
+// String returns the user-facing ownership name, matching the words
+// `--explain-ownership` prints in its per-binding report.
+func (o ownership) String() string {
+	switch o {
+	case ownershipOwned:
+		return "owned"
+	case ownershipBorrowed:
+		return "borrow"
+	case ownershipMoved:
+		return "move"
+	default:
+		return "unknown"
+	}
+}
+
+// ParamConvention classifies what a function body does with one of
+// its parameters.  Computed by the borrow analyzer per parameter and
+// consulted at every call site to decide whether the caller emits a
+// retain before the call, a release after, both, or nothing.
+//
+// The convention is purely metadata: a function body's IR is the same
+// regardless of which conventions the callers pick.  All rc work tied
+// to the call boundary lives on the caller's side of the call.
+type ParamConvention int8
+
+const (
+	// paramTransparent: body neither retains nor escapes the param.
+	// Caller emits no rc work at the call site.  This is "Borrowed"
+	// in the older per-param-bool terminology.
+	paramTransparent ParamConvention = iota
+	// paramConsumes: body has a sink that takes ownership of the
+	// param's rc -- field store into another rc-tracked struct, channel
+	// send, return-of-param, closure capture that escapes.  The
+	// caller emits retain-before / release-after, same as paramRetains;
+	// the distinction matters for `move arg` (paramConsumes can absorb
+	// the moved rc into the sink so no post-call release fires).
+	paramConsumes
+	// paramRetains: body keeps a surviving retain that is not paired
+	// by an exit release -- mutates external state through the param,
+	// passes the param to an opaque callee whose convention is
+	// unknown, etc.  Caller emits retain-before / release-after.
+	// Default when the analyzer cannot prove transparent or consumes.
+	paramRetains
+)
+
+// String returns the user-facing convention name shown by
+// `--explain-ownership` next to each parameter.
+func (c ParamConvention) String() string {
+	switch c {
+	case paramTransparent:
+		return "transparent"
+	case paramConsumes:
+		return "consumes"
+	case paramRetains:
+		return "retains"
+	default:
+		return "unknown"
+	}
 }
 
 type scope struct {

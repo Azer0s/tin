@@ -79,6 +79,8 @@ const (
 	KW_OWN
 	KW_DATA
 	KW_REF
+	KW_MOVE
+	KW_VOLATILE
 
 	// Operators
 	PLUS      // +
@@ -160,11 +162,13 @@ var tokenNames = map[TokenType]string{
 	KW_GETFIELD: "getfield", KW_SETFIELD: "setfield", KW_PASS: "pass",
 	KW_ISRC: "isrc",
 	KW_VAR:  "var", KW_SPAWN: "spawn", KW_AWAIT: "await", KW_YIELD: "yield", KW_NIL: "nil",
-	KW_WEAK: "weak",
-	KW_OWN:  "own",
-	KW_DATA: "data",
-	KW_REF:  "ref",
-	PLUS:    "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
+	KW_WEAK:     "weak",
+	KW_OWN:      "own",
+	KW_DATA:     "data",
+	KW_REF:      "ref",
+	KW_MOVE:     "move",
+	KW_VOLATILE: "volatile",
+	PLUS:        "+", MINUS: "-", STAR: "*", SLASH: "/", PERCENT: "%",
 	ASSIGN: "=", EQEQ: "==", NEQ: "!=", LT: "<", LTEQ: "<=", GT: ">", GTEQ: ">=",
 	AND: "&&", OR: "||", NOT: "!", AMP: "&", BITOR: "|", XOR: "^",
 	SHL: "<<", SHR: ">>", INC: "++", APPENDEQ: "++=", PLUSEQ: "+=",
@@ -201,10 +205,12 @@ var keywords = map[string]TokenType{
 	"getfield": KW_GETFIELD, "setfield": KW_SETFIELD, "pass": KW_PASS,
 	"isrc": KW_ISRC,
 	"var":  KW_VAR, "spawn": KW_SPAWN, "await": KW_AWAIT, "yield": KW_YIELD, "nil": KW_NIL,
-	"weak": KW_WEAK,
-	"own":  KW_OWN,
-	"ref":  KW_REF,
-	"true": BOOL_LIT, "false": BOOL_LIT,
+	"weak":     KW_WEAK,
+	"own":      KW_OWN,
+	"ref":      KW_REF,
+	"move":     KW_MOVE,
+	"volatile": KW_VOLATILE,
+	"true":     BOOL_LIT, "false": BOOL_LIT,
 }
 
 // Token is a single lexical unit

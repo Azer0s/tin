@@ -48,6 +48,7 @@ const (
 	DiagDiscardedPureCall = "discarded-pure-call"
 	DiagUnsafeRequired    = "unsafe-required"
 	DiagUnusedLet         = "unused-let"
+	DiagLetNoReassign     = "let-no-reassign"
 	DiagUnusedParam       = "unused-param"
 	DiagUnusedResult      = "unused-result"
 	DiagUnusedImport      = "unused-import"
@@ -153,6 +154,25 @@ const (
 	// Default-on; suppress with -Wno-unguarded-trait-downcast or by
 	// adding the matching `is` check.
 	DiagUnguardedTraitDowncast = "unguarded-trait-downcast"
+	// DiagPtrTrait fires when a type expression names `*Trait` (a
+	// pointer to a trait fat-pointer).  The trait fat-pointer
+	// already carries a heap pointer in its `data` slot, so the
+	// outer `*` is a second indirection on top of an indirection
+	// that's already there.  The value-form `Trait` is the
+	// canonical shape; `*Trait` remains supported for cases that
+	// genuinely need a borrowed fat-ptr but is almost never the
+	// right answer.  Default-on; suppress per-decl with
+	// `//!-Wno-ptr-trait` or globally with `-Wno-ptr-trait`.
+	DiagPtrTrait = "ptr-trait"
+	// DiagTraitSnapshotMutation fires when a value-source coerce to a
+	// trait whose impl on the source struct has pointer-receiver
+	// methods.  The compile is fine -- the trait fat-ptr owns a heap
+	// snapshot and mutations through *Self methods land on it -- but
+	// readers usually expect the alias form (`Trait = &b`) when the
+	// trait can mutate.  The warning steers them at the source they
+	// almost certainly meant.  Default-on; per-call silence with
+	// `//!-Wno-trait-snapshot-mutation`.
+	DiagTraitSnapshotMutation = "trait-snapshot-mutation"
 	// DiagRedundantTypeCast fires on `<lit> as T` when the surrounding
 	// context already pins the slot to T and the literal would
 	// auto-coerce on its own.  Most commonly inside an array literal:
@@ -180,32 +200,214 @@ const (
 	// reflects a copy-paste leftover or a misunderstanding of what the
 	// tag does.  Default-on.
 	DiagIneffectiveAllowDrop = "ineffective-allow-drop"
+	// DiagBareParkingAsyncCall fires on a bare call to a `fn{#async}`
+	// (named, method, or async fat-fn-ptr value) whose body the
+	// may-park analysis classifies as parking -- i.e. transitively
+	// reaches `yield`, `await`, or a known-parking C primitive
+	// (`tin_channel_recv_blocking`, `tin_sleep_ms_c`, ...).
+	//
+	// Calling such a function bare dispatches to its sync variant,
+	// which runs the body inline in the calling thread.  If the body
+	// parks, the calling thread is blocked rather than the fiber being
+	// cooperatively suspended -- the scheduler thread wedges.
+	//
+	// Default-on.  Suppress with `-Wno-bare-parking-async-call` or fix
+	// the call site by using `await spawn fn(args)` (run on a fiber,
+	// get T back) or `spawn fn(args)` (fire-and-forget Future[T]).
+	DiagBareParkingAsyncCall = "bare-parking-async-call"
+	// DiagBareAsyncCall fires on a bare call to ANY `fn{#async}`
+	// regardless of body content.  Pedantic complement to
+	// `-Wbare-parking-async-call`: even compute-only async fns may be
+	// flagged in projects that want every async invocation spelled out
+	// (`await spawn` or `spawn`).
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagBareAsyncCall = "bare-async-call"
+	// DiagSyncUsesAwait fires when a sync fn body contains an `await`
+	// expression directly.  Runtime works (the await uses
+	// `_tin_fiber_sync_await` to drive the scheduler from non-fiber
+	// callers, or park the fiber in fiber callers), but the function's
+	// signature doesn't disclose the parking behavior.  The pedantic
+	// nudge suggests either `sync::wait(future)` for an explicit
+	// sync-to-async bridge or promoting the fn to `fn{#async}`.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagSyncUsesAwait = "sync-uses-await"
+	// DiagDroppableFiber fires when a `spawn fn(args)` statement
+	// produces a `Future[T]` that's neither stored, returned, nor
+	// awaited.  Often intentional (fire-and-forget), but the pedantic
+	// nudge surfaces the discarded result for review.  Suppress by
+	// binding to `_` (`let _ = spawn ...`) or by adding `#allow_drop`
+	// to the spawned fn.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagDroppableFiber = "droppable-fiber"
+	// DiagSyncFnCoercedToAsync fires when a sync `fn(...)` value is
+	// coerced to a `fn{#async}(...)` slot (struct field, parameter,
+	// array element, channel of fn).  The 4-slot fat-fn-ptr ABI makes
+	// the bytes identical, so the value flows in without a copy.
+	//
+	// Spawned fibers DO cooperate at the source fn's coloring points:
+	// slot 2 (coro ramp) is a synth wrapper that internally calls
+	// slot 1 ($colored variant), which carries the same yield insertions
+	// the $coro variant would have.  But the synth wrapper still costs
+	// one coro frame allocation per call and an extra indirect jump
+	// vs. a declared `fn{#async}` (whose slot 2 is the real $coro
+	// emitted in-place).  The warning surfaces the signature drift so
+	// authors can decide whether to declare the original `fn{#async}`
+	// explicitly.
+	//
+	// `#no_autoyield` sync fns are the cooperation-lost case: their
+	// $colored emission is suppressed, so the synth wrapper falls back
+	// to slot 0 and the spawned fiber really doesn't yield.  The
+	// warning intentionally fires loudest for those.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagSyncFnCoercedToAsync = "sync-fn-coerced-to-async"
+	// DiagNonTinThread fires on an `#interop`-tagged fn (callable from
+	// non-Tin threads via the C-interop boundary) whose body
+	// transitively reaches `await` or `spawn`.  The Tin scheduler
+	// assumes thread-local state owned by Tin's own worker pool; calls
+	// from arbitrary C threads have undefined scheduling behavior.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagNonTinThread = "non-tin-thread"
+	// DiagUncheckedNilDeref fires on a pointer dereference (`*p` or
+	// `p.field` through a pointer) when the dataflow pass cannot prove
+	// `p` is non-nil at the use site (i.e. `p`'s nil-fact is neither
+	// nilIsNil -- which would fire the default-on `-Wderef-nil` -- nor
+	// nilIsNotNil).  The complement to `-Wderef-nil`: that one fires
+	// when nil is proven; this one fires when nil is unproven.  Idiomatic
+	// fix is a guard (`if p != nil: ... *p ...`) or an unwrap helper that
+	// returns a non-nil pointer.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagUncheckedNilDeref = "unchecked-nil-deref"
+	// DiagUncheckedDiv fires on `a / b` or `a % b` when the dataflow pass
+	// cannot prove `b != 0` at the use site (i.e. `b`'s interval contains
+	// 0 or `b` has no interval bound).  Complement to the default-on
+	// "division by zero" hard error (which fires only when `b` is a
+	// constant `0`): that one rejects proven-unsafe; this one warns on
+	// unproven-safe.  Idiomatic fix is a guard (`if b != 0: ... a / b ...`).
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagUncheckedDiv = "unchecked-div"
+	// DiagUncheckedIndex fires on `arr[i]` when the dataflow pass
+	// cannot prove `i` was bounds-checked against `arr`'s length on
+	// the current path.  Proof comes from either a literal index that
+	// the default-on `-Warray-bounds` check already vetted, an `if i <
+	// len(arr):` guard, an `if i < N:` guard with `N` a positive
+	// constant, or a `for i in arr` style loop where the index is
+	// derived from iteration over the array.  Complement to
+	// `-Warray-bounds` (proven-OOB constant index) and the existing
+	// per-cmp interval narrowing -- this one closes the gap by
+	// warning on unproven-in-bounds accesses.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagUncheckedIndex = "unchecked-index"
+	// DiagUncheckedReturnedNil fires when the Andersen
+	// interprocedural points-to pass reports that an identifier may
+	// hold nil (because its source function sometimes returns nil),
+	// and the value is dereferenced without a nil guard.
+	// Complement to the default-on `-Wderef-nil` (proven-nil) and
+	// the intraprocedural `-Wunchecked-nil-deref` -- this one
+	// surfaces nil flow ACROSS function boundaries that neither
+	// analysis alone can see.
+	//
+	// Default-off; enabled by `-Wpedantic`.
+	DiagUncheckedReturnedNil = "unchecked-returned-nil"
+	// DiagManualAllocLeak fires when an `mem::malloc` / `mem::calloc`
+	// / `mem::realloc` result bound to a local goes out of scope on
+	// some path without a matching `mem::free`.  The lattice is
+	// MAY-leaked: a branch that frees and one that doesn't both flow
+	// to the join, and the join warns -- mirrors Go's `staticcheck
+	// SA4006`-style ownership escape but inverted (we want a free
+	// somewhere on every path).  Suppress with a `let _ = ...` if
+	// the leak is intentional, or transfer ownership by returning /
+	// storing the pointer (the binding then escapes the scope and
+	// the check stops tracking it).
+	//
+	// Default-on.  Manual allocation is the C-interop bridge; the
+	// language can't help with ARC there, but it can demand a free.
+	DiagManualAllocLeak = "manual-alloc-leak"
+	// DiagManualDoubleFree fires when `mem::free(p)` is invoked on
+	// a pointer that the intraprocedural pass has already proven
+	// freed on the same path.  Hard error class -- double-free is
+	// undefined behavior in C and can corrupt the allocator's
+	// freelist.
+	//
+	// Default-on.
+	DiagManualDoubleFree = "manual-double-free"
+	// DiagManualUseAfterFree fires when an `mem::malloc`-bound
+	// pointer is dereferenced (`*p`, `p.field` after a cast),
+	// re-passed to a function, or otherwise read after a
+	// `mem::free` on the same path.  Same lattice rules as
+	// DiagUseAfterDeinit but scoped to manual allocations.
+	//
+	// Default-on.
+	DiagManualUseAfterFree = "manual-use-after-free"
+	// DiagAliasMutation fires when a binding aliased from another
+	// fat-pointer (string or [T]) is mutated indirectly via indexed
+	// write or `++=`.  Because Tin passes / assigns slices shared,
+	// `let b = a; b[0] = ...` reaches through to `a` as well, which
+	// is almost never what the writer intended.  The fix is to break
+	// the alias up front: `let b = copy(a); b[0] = ...`.
+	// Default-off; opt in via -Wpedantic or -W<name>.
+	DiagAliasMutation = "alias-mutation"
+	// DiagInteropSelfCall fires when Tin code calls a function tagged
+	// `#interop`.  The `#interop` tag emits a C-ABI wrapper for C
+	// consumers; Tin-side callers bypass that wrapper and route to
+	// the internal entry point unchanged, so the tag is decorative at
+	// the Tin call site.  The warning isn't a bug per se - the
+	// callee compiles fine and works - but it usually signals a
+	// misunderstanding of what the tag does.  The clean factoring is
+	// to split into a plain Tin fn that Tin calls and a thin
+	// `#interop` wrapper that delegates to it (the C export).
+	// Default-off; opt in via -Wpedantic or -W<name>.
+	DiagInteropSelfCall = "interop-self-call"
 )
 
 // defaultOffWarnings lists diagnostics that are silent by default and only
 // fire when the user opts in via -Wall, -Wpedantic, or -W<name>.
 var defaultOffWarnings = map[string]bool{
-	DiagUnusedLet:         true,
-	DiagUnusedParam:       true,
-	DiagUnusedResult:      true,
-	DiagFloatEqual:        true,
-	DiagBuiltinShadow:     true,
-	DiagUseBeforeAssign:   true,
-	DiagMagicNumber:       true,
-	DiagStyle:             true,
-	DiagUnclosedCloseable: true,
+	DiagUnusedLet:            true,
+	DiagLetNoReassign:        true,
+	DiagUnusedParam:          true,
+	DiagUnusedResult:         true,
+	DiagFloatEqual:           true,
+	DiagBuiltinShadow:        true,
+	DiagUseBeforeAssign:      true,
+	DiagMagicNumber:          true,
+	DiagStyle:                true,
+	DiagUnclosedCloseable:    true,
+	DiagBareAsyncCall:        true,
+	DiagSyncUsesAwait:        true,
+	DiagDroppableFiber:       true,
+	DiagNonTinThread:         true,
+	DiagSyncFnCoercedToAsync: true,
+	DiagUncheckedNilDeref:    true,
+	DiagUncheckedDiv:         true,
+	DiagUncheckedIndex:       true,
+	DiagUncheckedReturnedNil: true,
+	DiagAliasMutation:        true,
+	DiagInteropSelfCall:      true,
 }
 
 // wallWarnings is the set of diagnostics that -Wall enables on top of the
 // always-on safety warnings. Mirrors the clang/gcc convention: useful
 // hygiene checks that don't usually produce false positives in idiomatic
 // code.
-var wallWarnings = []string{DiagUnusedLet, DiagUnusedResult, DiagFloatEqual, DiagUseBeforeAssign, DiagStyle}
+var wallWarnings = []string{DiagUnusedLet, DiagLetNoReassign, DiagUnusedResult, DiagFloatEqual, DiagUseBeforeAssign, DiagStyle}
 
 // wpedanticWarnings is the set that -Wpedantic enables on top of -Wall.
 // These can produce noise in code that follows trait-conformance patterns
 // (unused parameters required by an interface), so they're opt-in.
-var wpedanticWarnings = []string{DiagUnusedParam, DiagBuiltinShadow, DiagMagicNumber, DiagUnclosedCloseable}
+var wpedanticWarnings = []string{
+	DiagUnusedParam, DiagBuiltinShadow, DiagMagicNumber, DiagUnclosedCloseable,
+	DiagBareAsyncCall, DiagSyncUsesAwait, DiagDroppableFiber, DiagNonTinThread,
+	DiagSyncFnCoercedToAsync, DiagUncheckedNilDeref, DiagUncheckedDiv, DiagUncheckedIndex,
+	DiagUncheckedReturnedNil, DiagAliasMutation, DiagInteropSelfCall,
+}
 
 // diagState tracks the user's preferences for one named warning.
 type diagState struct {
@@ -592,7 +794,7 @@ func (cg *CodeGen) warnInFile(file, name string, pos ast.Pos, format string, arg
 		cg.hadWarnError = true
 	}
 
-	msg := fmt.Sprintf(format, args...)
+	msg := latexToUnicode(fmt.Sprintf(format, args...))
 
 	raw := fmt.Sprintf("%s:%d:%d: %s: %s [-W%s]",
 		file, pos.Line, pos.Col, severity, msg, name)

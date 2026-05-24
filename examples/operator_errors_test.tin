@@ -1,13 +1,12 @@
-// examples/operator_errors_test.tin -- Phase 0 lockdown of the
-// silent `genBinExpr -> i64 0` and `genIndexExpr -> nil` fall-
-// throughs.  Once operator overloading lands, the corresponding
-// op-trait impl suppresses these errors; until then every bad
-// usage must be a clean compile error.
+// examples/operator_errors_test.tin -- lockdown of the silent
+// `genBinExpr -> i64 0` and `genIndexExpr -> nil` fall-throughs.
+// Once operator overloading lands, the corresponding op-trait impl
+// suppresses these errors; until then every bad usage must be a
+// clean compile error.
 //
-// Replaces examples/operator_errors.sh.  Each fixture lives under
-// examples/fixtures/operator_errors/ and is compiled via
-// `./tin run` so the resulting diagnostic is asserted on its real
-// surface (stderr + exit code).
+// Each fixture lives under examples/fixtures/operator_errors/ and
+// is compiled via `./tin run` so the resulting diagnostic is
+// asserted on its real surface (stderr + exit code).
 
 use assert
 use "./fixtures/run_compiler"

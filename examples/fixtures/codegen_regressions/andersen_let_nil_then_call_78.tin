@@ -1,0 +1,18 @@
+// Regression (C): Andersen interprocedural nil flow through a
+// let-bound nil pointer used to be silently missed.
+//
+//   let p *i64 = nil
+//   deref(p)             // <- `*p` inside deref should warn
+//
+// The constraint for `deref(p)` was emitted with the CALLEE's fn
+// name on BOTH sides of the ptcCopy edge, creating a self-edge
+// `deref::p ⊇ deref::p` instead of the cross-fn edge
+// `deref::p ⊇ main::p`.  The fix splits assignConstraints into
+// (dstFn, srcFn) and threads the caller fn name explicitly through
+// callConstraints.
+
+fn deref(p *i64) i64 = return *p
+
+fn main() i64 =
+  let p *i64 = nil
+  return deref(p)

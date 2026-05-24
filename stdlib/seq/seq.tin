@@ -1,0 +1,35 @@
+use "./eager"
+use "./lazy"
+
+// `seq` re-exports both the eager `[t]` and lazy `*Seq[t]` curried
+// pipe APIs.  The overload picker at every call site disambiguates by
+// the shape of what's piped in:
+//
+//   [1, 2, 3, 4] |> seq::map(...) |> seq::sum       // eager arrays
+//   seq::range(1, 100) |> seq::map(...) |> seq::sum  // lazy iterators
+//
+// Functions present in both forms (map / filter / take / skip /
+// take_while / skip_while / chain / step_by / count / sum / sumf /
+// fold / reduce / find / first / nth / for_each) coexist as overloads
+// under the same `seq::<name>` qualifier.  Eager-only operators
+// (flat_map / zip / enumerate / chunks / windows / dedup_by / reverse /
+// sort_by / min_by / max_by / any / all / last / position) remain
+// array-shaped.  Lazy-only constructors are `seq::range`, `seq::iter`,
+// and the materializer `seq::to_array`.
+
+export {
+  // Lazy trait + iterator structs
+  Seq, Range, Iter, MapSeq, FilterSeq, TakeSeq, SkipSeq,
+  TakeWhileSeq, SkipWhileSeq, ChainSeq, StepBySeq,
+
+  // Lazy-only constructors / materializers
+  range, iter, to_array,
+
+  // Curried transforms (both eager + lazy where applicable)
+  map, filter, flat_map, take, skip, take_while, skip_while, step_by,
+  chain, zip, enumerate, chunks, windows, dedup_by, reverse, sort_by,
+
+  // Terminals
+  count, sum, sumf, min_by, max_by, fold, reduce, find, exists, all,
+  first, last, nth, position, for_each,
+} as seq

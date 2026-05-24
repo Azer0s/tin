@@ -29,7 +29,7 @@ primitive ::= "i8" | "i16" | "i32" | "i64" | "i128"
 pointer   ::= "*" atom
 array     ::= "[" atom "]"
 fn_type   ::= "fn(" params ")" atom
-params    ::= ε | atom ("," atom)*
+params    ::= epsilon | atom ("," atom)*
 struct_name ::= identifier
 ```
 
@@ -147,22 +147,20 @@ while (*p && !(*p == ')' && depth == 0)) {
    - The parameter name string data (`plen` bytes + `\0`).
    - Padding to the next 8-byte boundary.
 
-```
-ARC block (rc=1):
-  ┌────────────────────────────┐
-  │  TinString[0]              │  <- ptr points into record[0].data
-  │  TinString[1]              │     len = strlen(param[1])
-  │  ...                       │
-  │  TinString[arity-1]        │
-  ├────────────────────────────┤
-  │  record[0]:                │
-  │    int64_t rc = -1         │  <- immortal sentinel
-  │    char data[plen+1]       │  <- TinString[0].ptr points here
-  │    padding to 8-byte align │
-  ├────────────────────────────┤
-  │  record[1]: ...            │
-  │  ...                       │
-  └────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph arc["ARC block (rc = 1) -- one allocation"]
+    direction TB
+    s0["TinString[0] -- ptr, len"]
+    s1["TinString[1]"]
+    sdot["..."]
+    sn["TinString[arity-1]"]
+    r0["record[0]: rc=-1 | char data[plen+1] | padding to 8-byte align"]
+    r1["record[1]: ..."]
+    rdot["..."]
+    s0 ~~~ s1 ~~~ sdot ~~~ sn ~~~ r0 ~~~ r1 ~~~ rdot
+  end
+  s0 -. "ptr ->" .-> r0
 ```
 
 Each `TinString.ptr` points into its corresponding immortal record's `data`

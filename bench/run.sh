@@ -22,7 +22,7 @@ echo "  go..."
 (cd "$SCRIPT_DIR/go" && go build -o "$BIN_DIR/bench_go" .)
 
 echo "  crystal..."
-for bench in bench pipeline mpmc jitter pipeline10 fanout; do
+for bench in bench pipeline mpmc jitter pipeline10 fanout workload; do
     src="$SCRIPT_DIR/crystal/${bench}.cr"
     [ -f "$src" ] || src="$SCRIPT_DIR/crystal/bench.cr"
     crystal build --release "$SCRIPT_DIR/crystal/${bench}.cr" -o "$BIN_DIR/bench_crystal_${bench}" 2>/dev/null \
@@ -33,7 +33,7 @@ cp "$BIN_DIR/bench_crystal_bench" "$BIN_DIR/bench_crystal"
 
 echo "  rust..."
 (cd "$SCRIPT_DIR/rust" && cargo build --release -q)
-for bin in bench_rust bench_rust_pipeline bench_rust_mpmc bench_rust_jitter bench_rust_pipeline10 bench_rust_fanout; do
+for bin in bench_rust bench_rust_pipeline bench_rust_mpmc bench_rust_jitter bench_rust_pipeline10 bench_rust_fanout bench_rust_workload; do
     cp "$SCRIPT_DIR/rust/target/release/$bin" "$BIN_DIR/$bin"
     chmod +x "$BIN_DIR/$bin"
 done
@@ -41,7 +41,7 @@ cp "$BIN_DIR/bench_rust" "$BIN_DIR/bench_rust_bench"
 chmod +x "$BIN_DIR/bench_rust_bench"
 
 echo "  tin..."
-for bench in bench pipeline mpmc jitter pipeline10 fanout; do
+for bench in bench pipeline mpmc jitter pipeline10 fanout workload; do
     "$ROOT_DIR/tin" build "$SCRIPT_DIR/tin/${bench}.tin" -o "$BIN_DIR/bench_tin_${bench}"
 done
 cp "$BIN_DIR/bench_tin_bench" "$BIN_DIR/bench_tin"
@@ -69,7 +69,7 @@ HYPERFINE=$(command -v hyperfine 2>/dev/null || \
     ls "$HOME"/.asdf/installs/rust/*/bin/hyperfine 2>/dev/null | tail -1 || true)
 
 if [ -n "$HYPERFINE" ] && [ -x "$HYPERFINE" ]; then
-    for bench in bench pipeline mpmc jitter pipeline10 fanout; do
+    for bench in bench pipeline mpmc jitter pipeline10 fanout workload; do
         case "$bench" in
             bench)      label="Pingpong (1M round trips)" ;;
             pipeline)   label="Pipeline (1M passes, 4 stages)" ;;
@@ -77,6 +77,7 @@ if [ -n "$HYPERFINE" ] && [ -x "$HYPERFINE" ]; then
             jitter)     label="Jitter (1M tasks, 8 workers, 0-3 yields)" ;;
             pipeline10) label="Pipeline10 (500K passes, 10 stages)" ;;
             fanout)     label="Fanout (1M items, 8 workers)" ;;
+            workload)   label="Workload (200K items, 8 workers, per-item work)" ;;
         esac
         echo "=== $label ==="
         "$HYPERFINE" \
@@ -99,4 +100,5 @@ else
     run_bench jitter     "jitter (1M tasks, 8 workers, 0-3 yields)"     "throughput"
     run_bench pipeline10 "pipeline10 (500K passes, 10 stages)"          "latency"
     run_bench fanout     "fanout (1M items, 8 workers)"                  "throughput"
+    run_bench workload   "workload (200K items, 8 workers, per-item work)" "throughput"
 fi

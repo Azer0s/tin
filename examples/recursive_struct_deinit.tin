@@ -89,7 +89,7 @@ fn make_forest(n i64, d i64) [*Tree] =
   let acc [*Tree] = []
 
   for let i i64 = 0; i < n; i += 1:
-    acc ++= make_tree(d)
+    acc ++= [make_tree(d)]
 
   return acc
 

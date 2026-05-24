@@ -15,12 +15,10 @@
 //          field.  The programmer declares the referenced data forms a tree
 //          (no runtime cycles).  The compiler trusts this declaration.
 
-// ---------------------------------------------------------------------------
 // Part 1: doubly-linked list  (plain strong + weak)
 //
 // The forward chain (next) is the owning direction.  The backward pointer
 // (prev) is weak: it does not retain the node it points to.
-// ---------------------------------------------------------------------------
 
 struct ListNode =
   val  i64
@@ -58,14 +56,12 @@ let head = make_list(nums)
 
 echo list_sum(head)   // 15
 
-// ---------------------------------------------------------------------------
 // Part 2: expression tree  (own)
 //
 // An expression tree is always acyclic: a node owns its children and
 // children never reference their parent.  Using `own` tells the compiler
 // "I promise the data forms a tree" and allows the self-referential type
 // without requiring a weak back-reference.
-// ---------------------------------------------------------------------------
 
 enum ExprKind =
   lit_v    // leaf: literal integer

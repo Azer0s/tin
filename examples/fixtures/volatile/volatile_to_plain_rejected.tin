@@ -1,0 +1,10 @@
+// `volatile *T` and `*T` are distinct types -- the volatile
+// qualifier survives only when both sides agree.  Binding a
+// volatile pointer to a non-volatile slot drops the safety
+// promise and is rejected.
+
+fn main() =
+  { #unsafe } {
+    let p *char = addr(0xDEAD)   // rejected: volatile *char does not coerce to *char
+    echo p as i64
+  }

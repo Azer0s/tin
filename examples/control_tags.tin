@@ -11,9 +11,7 @@
 //   ./tin run /tmp/bad.tin 2>&1 | grep "#pure violation"
 use assert
 
-// ---------------------------------------------------------------------------
 // #pure - basic case: arithmetic-only functions
-// ---------------------------------------------------------------------------
 
 fn{#pure} square(n i64) i64 = return n * n
 fn{#pure} cube(n i64) i64   = return n * n * n
@@ -26,9 +24,7 @@ test "#pure: pure math functions" =
   assert::equals(cube(3), 27)
   assert::equals(sum_squares(3, 4), 25)
 
-// ---------------------------------------------------------------------------
 // #pure - transitive call graph: A -> B -> C (all pure)
-// ---------------------------------------------------------------------------
 
 fn{#pure} double(n i64) i64 = return n * 2
 fn{#pure} quad(n i64) i64   = return double(double(n))
@@ -39,9 +35,7 @@ test "#pure: transitive pure call chain" =
   assert::equals(quad(3), 12)
   assert::equals(oct(1), 16)
 
-// ---------------------------------------------------------------------------
 // #pure - control flow: if/else, ternary, for loop
-// ---------------------------------------------------------------------------
 
 fn{#pure} abs_val(n i64) i64 =
   if n < 0:
@@ -75,9 +69,7 @@ test "#pure: for loop (no IO)" =
   assert::equals(sum_range(5), 10)
   assert::equals(sum_range(10), 45)
 
-// ---------------------------------------------------------------------------
 // #pure - where-clause bodies
-// ---------------------------------------------------------------------------
 
 fn{#pure} sign(n i64) i64 =
   where n < 0:  -1
@@ -89,9 +81,7 @@ test "#pure: where-clause body" =
   assert::equals(sign(0), 0)
   assert::equals(sign(42), 1)
 
-// ---------------------------------------------------------------------------
 // #pure - self-recursive (mutual recursion between pure functions)
-// ---------------------------------------------------------------------------
 
 fn{#pure} is_even(n i64) bool =
   where n == 0: true
@@ -107,9 +97,7 @@ test "#pure: mutually recursive pure functions" =
   assert::equals(is_odd(3), true)
   assert::equals(is_odd(8), false)
 
-// ---------------------------------------------------------------------------
 // #pure with #allow_sideffect escape hatch
-// ---------------------------------------------------------------------------
 
 fn{#pure} debug_square(n i64) i64 =
   { #allow_sideffect } {
@@ -137,9 +125,7 @@ test "#pure: multiple sequential #allow_sideffect blocks" =
   assert::equals(logging_compute(3), 27)
   assert::equals(logging_compute(4), 64)
 
-// ---------------------------------------------------------------------------
 // #sideffect - explicit declaration
-// ---------------------------------------------------------------------------
 
 fn{#sideffect} noisy_double(n i64) i64 =
   echo "doubling {n}"
@@ -159,9 +145,7 @@ test "#sideffect: function works normally" =
 test "#sideffect: chain of sideffect functions" =
   assert::equals(noisy_sextuple(2), 12)
 
-// ---------------------------------------------------------------------------
 // #no_recurse - must not call itself
-// ---------------------------------------------------------------------------
 
 fn{#no_recurse} iterative_fib(n i64) i64 =
   let a i64 = 0
@@ -205,9 +189,7 @@ fn{#no_recurse} use_countdown(n i64) i64 =
 test "#no_recurse: helpers that recurse among themselves do not violate tag" =
   assert::equals(use_countdown(4), 0)
 
-// ---------------------------------------------------------------------------
 // #no_thread - advisory (no enforcement, just documentation)
-// ---------------------------------------------------------------------------
 
 fn{#no_thread} non_reentrant_op(n i64) i64 =
   return n + 1
@@ -215,9 +197,7 @@ fn{#no_thread} non_reentrant_op(n i64) i64 =
 test "#no_thread: function works normally" =
   assert::equals(non_reentrant_op(41), 42)
 
-// ---------------------------------------------------------------------------
 // Multiple tags combined
-// ---------------------------------------------------------------------------
 
 fn{#pure #no_recurse} safe_add(a i64, b i64) i64 = return a + b
 
@@ -229,10 +209,8 @@ test "combined tags: #pure #no_recurse" =
 test "combined tags: #pure #no_thread" =
   assert::equals(thread_unsafe_pure(5), 30)
 
-// ---------------------------------------------------------------------------
 // CTFE: #pure #no_recurse functions with literal arguments are evaluated
 // at compile time - the call is replaced with a constant in the IR.
-// ---------------------------------------------------------------------------
 
 fn{#pure #no_recurse} ctfe_square(n i64) i64 = return n * n
 

@@ -1,0 +1,5 @@
+// Function parameters are owned by the caller; the callee cannot move them.
+fn forward(s string) string =
+  return move s
+
+fn main() = echo forward("hi")

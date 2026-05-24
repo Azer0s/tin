@@ -34,8 +34,8 @@ struct Bag (index[string, i64], index_set[string, i64]) =
 
       i = i + 1
 
-    this.keys ++= k
-    this.vals ++= v
+    this.keys ++= [k]
+    this.vals ++= [v]
 
 fn main() =
   let b = Bag{keys: [], vals: []}

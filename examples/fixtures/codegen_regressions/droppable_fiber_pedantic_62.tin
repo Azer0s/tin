@@ -1,0 +1,8 @@
+// -Wdroppable-fiber (pedantic) fires on a statement-level
+// `spawn fn(args)` whose Future is neither stored, returned, nor
+// awaited.  Suppress by binding to `_` or by adding `#allow_drop`
+// to the spawned fn.
+fn{#async} log_event(s string) = echo s
+
+fn main() =
+  spawn log_event("ignored-result")

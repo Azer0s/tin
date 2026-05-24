@@ -1,0 +1,45 @@
+// examples/borrow_capture_test.tin
+//
+// Regression: any binding captured by a closure / fiber / defer
+// body is promoted to Owned by the borrow analyzer so the rc-block
+// lives at least as long as the capturing context.  These tests
+// are sound under both --ownership-borrow (where capture promotion
+// is the borrow code path) and the default behavior (where every
+// binding is Owned anyway), and stay leak-clean under --leaks in
+// both modes.
+
+use assert
+
+test "capture: closure that reads outer binding does not UAF" =
+  let s = "captured"
+  let f = fn() string = return s
+  assert::equals(f(), "captured")
+
+test "capture: closure called via let-binding works" =
+  let xs = [1, 2, 3]
+  let sum = fn() i64 =
+    let total i64 = 0
+    let t = total
+
+    for x in xs:
+      total = total + x
+
+    return total
+
+  assert::equals(sum(), 6)
+
+test "capture: defer body uses outer binding without leaking" =
+  let msg = "deferred"
+  defer assert::equals(msg, "deferred")
+  assert::ok(true)
+
+// Pass-through binding used only directly (no capture): still
+// eligible to be Borrowed under --ownership-borrow.  The borrow
+// classifier should not regress this case while adding capture
+// promotion.
+
+test "no-capture: simple alias still passes through" =
+  let original = "original"
+  let alias = original
+  assert::equals(alias, "original")
+  assert::equals(original, "original")

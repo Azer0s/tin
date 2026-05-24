@@ -37,8 +37,7 @@ test "string concatenation is a new allocation" =
   assert::equals(a, "foo")   // original untouched
 
 test "string passed to function" =
-  fn greet(name string) string =
-    return "hello " ++ name
+  let greet = fn(name string) string = return "hello " ++ name
   let s = greet("world")
 
   assert::equals(s, "hello world")
@@ -66,7 +65,7 @@ test "array copy retains" =
 test "array append does not alias" =
   let a = [1, 2, 3]
   let b = a
-  b ++= 4
+  b ++= [4]
 
   // b now has length 4; a is unaffected (append reallocates)
   assert::equals(a.len, 3)
@@ -111,7 +110,7 @@ test "multiple string variables in scope" =
   assert::equals(c, "alpha beta")
 
 test "string returned from function keeps value" =
-  fn make_str(n i64) string =
+  let make_str = fn(n i64) string =
     if n > 0 :
       return "positive"
     return "non-positive"

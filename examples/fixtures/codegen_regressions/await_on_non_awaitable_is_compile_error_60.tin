@@ -1,0 +1,8 @@
+// Strict-await rule: the operand of `await` must implement awaitable.
+// `await fn(args)` where fn returns a raw value is a compile error;
+// the user must write `await spawn fn(args)`.
+fn{#async} produces_i64() i64 = return 7
+
+fn main() =
+  let v = await produces_i64()
+  let _ = v

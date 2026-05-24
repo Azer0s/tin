@@ -1,7 +1,7 @@
-// Phase 0 fall-through: Foo declares add[Foo, Foo] but the rhs is an
-// i64 literal, so the dispatch should fall through to the "binary
-// operator not defined" error rather than silently compiling or
-// dispatching to the wrong impl.
+// Op-overload fall-through: Foo declares add[Foo, Foo] but the rhs
+// is an i64 literal, so the dispatch should fall through to the
+// "binary operator not defined" error rather than silently
+// compiling or dispatching to the wrong impl.
 struct Foo(add[Foo, Foo]) =
   v i64
 

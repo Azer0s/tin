@@ -36,6 +36,33 @@ The compiler coerces integer literals to the required width automatically.
 The `any` type can hold a value of any other type at runtime. See
 [10 - Reflection](10-reflection.md) for full details.
 
+### Integer overflow
+
+Tin integer arithmetic **wraps on overflow**. `i64::max + 1` produces
+`i64::min` rather than trapping; multiplying two large `i64` values
+silently truncates to 64 bits. This matches C and is intentional: the
+compiler emits the same `add` / `mul` / `sub` instructions that the
+CPU natively wraps on without any checks at the call site.
+
+When the result is a compile-time constant the folder catches some
+cases (`100 / 0` is a compile error), but values that flow through
+function arguments, channel receives, or struct fields are
+unchecked at the operation. If a particular code path must trap on
+overflow, write it explicitly:
+
+```tin
+fn add_or_panic(a i64, b i64) i64 =
+  let r = a + b
+  if (b > 0 and r < a) or (b < 0 and r > a) :
+    panic("i64 overflow in add")
+  return r
+```
+
+Tin does **not** insert overflow checks for you. Same applies to
+unsigned types (`u32::max + 1 == 0`), and to floats (`f64` follows
+IEEE 754 - overflow goes to $\pm$`inf`, divide-by-zero goes to `inf` or
+`NaN` without a trap).
+
 ---
 
 ## Integer literal formats
@@ -361,7 +388,7 @@ let x = 1; let y = 2; echo x + y   // 3
 | Bitwise               | `&` `\|` `^` `<<` `>>`                        |
 | Unary                 | `-` (negation) `!` (boolean not)              |
 | Increment / decrement | `i++` `i--` (statement form)                  |
-| Array append          | `++=`                                         |
+| Slice concat-assign   | `++=` (RHS must be `[T]`; wrap a value: `xs ++= [v]`) |
 | Concatenation         | `++`                                          |
 | Pipe                  | `\|>` (see [03 - Functions](03-functions.md)) |
 

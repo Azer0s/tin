@@ -170,8 +170,9 @@ func (s *session) buildRuntime(outSo string) error {
 		"-funwind-tables", "-fasynchronous-unwind-tables",
 		"-gline-tables-only",
 		"-I" + s.runtimeDir,
-		rtC,
 	}
+
+	args = append(args, rtC)
 	if runtime.GOOS != "darwin" {
 		args = append(args, "-ldw")
 	}

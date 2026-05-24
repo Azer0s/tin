@@ -7,7 +7,6 @@
 use math
 use assert
 
-// -------------------------------------------------------------------------
 // Basic f64 literals and arithmetic
 
 fn circle_area(r f64) f64 =
@@ -16,13 +15,11 @@ fn circle_area(r f64) f64 =
 fn circle_circumference(r f64) f64 =
   return 2.0 * math::PI * r
 
-// -------------------------------------------------------------------------
 // int <-> float conversions
 
 fn int_to_float(n i64) f64 = return n as f64
 fn float_to_int(x f64) i64 = return x as i64
 
-// -------------------------------------------------------------------------
 // Utility functions using stdlib math
 
 fn hypotenuse(a f64, b f64) f64 =
@@ -31,7 +28,6 @@ fn hypotenuse(a f64, b f64) f64 =
 fn clamp(x f64, lo f64, hi f64) f64 =
   return math::fmax(lo, math::fmin(hi, x))
 
-// -------------------------------------------------------------------------
 // Newton-Raphson square root (pure-Tin, no stdlib)
 
 fn sqrt_approx(n f64) f64 =
@@ -42,13 +38,11 @@ fn sqrt_approx(n f64) f64 =
 
   return x
 
-// -------------------------------------------------------------------------
 
 echo circle_area(1.0)
 echo hypotenuse(3.0, 4.0)
 echo sqrt_approx(2.0)
 
-// -------------------------------------------------------------------------
 
 test "basic arithmetic" =
   assert::equals(1.5 + 2.5, 4.0)

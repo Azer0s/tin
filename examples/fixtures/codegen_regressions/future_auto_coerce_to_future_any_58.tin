@@ -1,0 +1,12 @@
+// Future[t] implements coerce[Future[any]] so concrete-typed Futures
+// flow into Future[any] slots without an explicit cast.  Used by
+// fan-in idioms like `let fs [Future[any]] = [spawn x(), spawn y()]`.
+use sync
+
+fn{#async} compute(n i64) i64 = return n * n
+
+fn main() =
+  let fs [Future[any]] = [spawn compute(3), spawn compute(7)]
+
+  if len(fs) == 2:
+    echo "coerce-ok"

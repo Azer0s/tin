@@ -1,0 +1,16 @@
+// Cross-type pointer passed as call arg.  Previously accepted
+// silently when both pointee shapes happened to match (e.g. two
+// structs with a single i64 field) -- the implicit-coerce allowlist
+// said "any *X -> any *Y is OK".  Tightened to require pointee
+// equality (or one side opaque *i8 / *void).
+struct A =
+  marker i64
+
+struct B =
+  marker i64
+
+fn takes_a_ptr(p *A) i64 = return p.marker
+
+fn main() =
+  let b = &B{marker: 99}
+  let _ = takes_a_ptr(b)

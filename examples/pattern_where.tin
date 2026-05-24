@@ -251,9 +251,9 @@ fn qsort(xs [i32]) [i32] =
 
     for let e i32 in rest:
       if e < x:
-        lower ++= e
+        lower ++= [e]
       if e >= x:
-        upper ++= e
+        upper ++= [e]
 
     return qsort(lower) ++ [x] ++ qsort(upper)
 

@@ -185,6 +185,7 @@ func (cg *CodeGen) buildAtomToStringBody(fn *ir.Func, tableGlobal *ir.Global, co
 	zeroStr := constant.NewStruct(strType,
 		constant.NewNull(irtypes.I8Ptr),
 		constant.NewInt(irtypes.I64, 0),
+		constant.NewInt(irtypes.I64, 0),
 	)
 
 	entry := fn.NewBlock("entry")
@@ -249,14 +250,11 @@ func (cg *CodeGen) buildAtomToStringBody(fn *ir.Func, tableGlobal *ir.Global, co
 	isNull := loopExit.NewICmp(enum.IPredEQ, rtPtr, constant.NewNull(irtypes.I8Ptr))
 	loopExit.NewCondBr(isNull, retZero, rtFound)
 
-	// rt.found: build fat-ptr from runtime string pointer
+	// rt.found: build fat-ptr from runtime string pointer.  Runtime
+	// strings live in the atom table (immortal storage), so cap = -1.
 	rtLen := rtFound.NewCall(cg.ensureStrlenDecl(), rtPtr)
-	rtFatAlloca := rtFound.NewAlloca(strType)
-	rtGep0 := rtFound.NewGetElementPtr(strType, rtFatAlloca, i32z, i32z)
-	rtFound.NewStore(rtPtr, rtGep0)
-	rtGep1 := rtFound.NewGetElementPtr(strType, rtFatAlloca, i32z, i32o)
-	rtFound.NewStore(rtLen, rtGep1)
-	rtFound.NewRet(rtFound.NewLoad(strType, rtFatAlloca))
+	borrowed := constant.NewInt(irtypes.I64, -1)
+	rtFound.NewRet(cg.buildFatArrayValue(rtFound, irtypes.I8, rtPtr, rtLen, borrowed))
 
 	// ret.zero: return zeroinitializer
 	exitAlloca := retZero.NewAlloca(strType)

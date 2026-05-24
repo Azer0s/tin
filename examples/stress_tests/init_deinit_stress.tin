@@ -18,17 +18,14 @@
 use assert
 use mem
 
-// ---------------------------------------------------------------------------
 // Structs with observable init/deinit via shared log
-// ---------------------------------------------------------------------------
 
 // We use a global [string] to record events.
 // In real test code the log would be a module-level var.
 var event_log [string]
 
 fn log_event(msg string) =
-  event_log ++= msg
-
+  event_log ++= [msg]
 struct resource =
   id     i64
   active bool
@@ -40,9 +37,7 @@ struct resource =
   fn deinit(this resource) =
     log_event("deinit:{this.id}")
 
-// ---------------------------------------------------------------------------
 // 1. Basic init/deinit ordering within a block
-// ---------------------------------------------------------------------------
 
 fn scope_order_test() =
   event_log = []
@@ -51,9 +46,7 @@ fn scope_order_test() =
   let c = resource{id: 3}
   // end of scope: c deinit first (LIFO), then b, then a
 
-// ---------------------------------------------------------------------------
 // 2. deinit on early return
-// ---------------------------------------------------------------------------
 
 fn early_return_test(n i64) i64 =
   event_log = []
@@ -65,9 +58,7 @@ fn early_return_test(n i64) i64 =
 
   return n  // deinit b then a
 
-// ---------------------------------------------------------------------------
 // 3. deinit with nested struct (field struct also has deinit)
-// ---------------------------------------------------------------------------
 
 struct outer_resource =
   inner resource
@@ -80,9 +71,7 @@ struct outer_resource =
     log_event("outer_deinit:{this.outer_id}")
     // inner.deinit is called automatically after outer.deinit
 
-// ---------------------------------------------------------------------------
 // 4. Verify that deinit is NOT called for heap-allocated structs
-// ---------------------------------------------------------------------------
 
 fn heap_no_deinit_test() =
   event_log = []
@@ -94,10 +83,8 @@ fn heap_no_deinit_test() =
   // through raw pointers)
   mem::free(p)
 
-// ---------------------------------------------------------------------------
 // 5. Interaction of defer + deinit
 //    Defers run before deinit for the same scope.
-// ---------------------------------------------------------------------------
 
 fn defer_vs_deinit() =
   event_log = []
@@ -111,9 +98,7 @@ fn defer_vs_deinit() =
   // (ptr, len) at return time, freezing the snapshot before defer
   // and deinit run.
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "init called on construction" =
   event_log = []

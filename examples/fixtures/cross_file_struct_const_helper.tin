@@ -1,0 +1,14 @@
+// examples/fixtures/cross_file_struct_const_helper - helper for
+// cross_file_struct_const_test.tin.  Declares struct-typed top-level
+// consts in all three shapes (named-inferred, positional-inferred,
+// explicit-typed) so the importer can verify each survives the
+// package-loader pass ordering.
+
+struct Color =
+  r u8
+  g u8
+  b u8
+
+const RED = Color{r: 255, g: 100, b: 50}
+const GREEN = Color{42, 99, 17}
+const BLUE Color = Color{r: 0, g: 0, b: 255}

@@ -142,7 +142,7 @@ test "try+map_err over heap-fielded error round-trip is leak-clean" =
 
 // 8. Local `[errors::Err; N]` array of iface values must walk each slot
 // at scope exit.  Pre-fix the scope-release short-circuited on ArrayType
-// and leaked one heap block per slot (4 × 64 bytes on the original
+// and leaked one heap block per slot (4 * 64 bytes on the original
 // repro).  emitFixedArrayRelease + elemNeedsRelease recursion close it.
 
 test "fixed-size array of value-form Err scope-releases each slot" =
@@ -300,3 +300,14 @@ test "channel of fn{#async} non-capturing is leak-clean" =
   let r = await spawn f(41)
 
   assert::equals(42, r)
+
+// 18. sync::wait drives the scheduler from a sync caller and returns
+// the inner T.  The fiber's RC accounting must net to zero whether the
+// Future is consumed via `await` or via the explicit bridge.
+
+fn{#async} _arc_wait_compute(n i64) i64 = return n * n
+
+test "sync::wait round-trips through scheduler without leaking" =
+  let v = sync::wait(spawn _arc_wait_compute(8))
+
+  assert::equals(64, v)

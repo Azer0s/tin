@@ -305,20 +305,22 @@ func (cg *CodeGen) diTypeFromLLVM(t irtypes.Type) metadata.Field {
 	case *irtypes.PointerType:
 		return cg.diTypeFor("*u8")
 	case *irtypes.StructType:
-		// Check for string fat pointer: exactly {i8*, i64}
-		if len(v.Fields) == 2 {
+		// Check for string fat pointer: {i8*, i64 len, i64 cap}
+		if len(v.Fields) == 3 {
 			if pt, ok := v.Fields[0].(*irtypes.PointerType); ok {
 				if it, ok2 := pt.ElemType.(*irtypes.IntType); ok2 && it.BitSize == 8 {
 					if it2, ok3 := v.Fields[1].(*irtypes.IntType); ok3 && it2.BitSize == 64 {
-						return cg.diTypeFor("string")
+						if it3, ok4 := v.Fields[2].(*irtypes.IntType); ok4 && it3.BitSize == 64 {
+							return cg.diTypeFor("string")
+						}
 					}
 				}
 			}
 		}
 		// Search struct registry for a matching type pointer.
-		for name, st := range cg.structTypes {
-			if st == v {
-				return cg.diTypeFor(name)
+		for canon, r := range cg.types {
+			if r.LLVM == v {
+				return cg.diTypeFor(string(canon))
 			}
 		}
 	}
@@ -403,7 +405,7 @@ func (cg *CodeGen) diTypeFor(tinTypeName string) metadata.Field {
 		default:
 			// Try struct registry (normalize :: -> __ for package-qualified names).
 			structKey := strings.ReplaceAll(tinTypeName, "::", "__")
-			if st := cg.structTypes[structKey]; st != nil {
+			if st := cg.structTypeFor(CanonKey(structKey)); st != nil {
 				t = cg.diStructTypeFromRegistry(structKey, st)
 			} else {
 				// Unknown type: opaque i64-sized scalar so the variable is at

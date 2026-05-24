@@ -174,7 +174,7 @@ typedef struct {
     // causing the second fiber's panic to accidentally consume the first fiber's
     // recover() entry.
     TinDeferEntry *saved_defer_chain;
-    // Spawn-chain capture for cross-fiber stacktrace() (Phase 4 of
+    // Spawn-chain capture for cross-fiber stacktrace() (see
     // docs/plans/stacktrace-libunwind.md). spawn_caller_ip is the
     // llvm.returnaddress(0) snapshot at the spawn site that produced
     // this fiber. spawn_parent_pid/spawn_parent_gen identify the parent
@@ -642,6 +642,17 @@ static int _is_worker_thread(void) {
         if (pthread_equal(_workers[i], me)) return 1;
     }
     return 0;
+}
+
+// Exported version of _is_worker_thread for callers in stdlib Tin
+// code.  Returns 1 when the calling thread is one of the M:N
+// worker threads (i.e. a fiber is currently executing on this OS
+// thread), 0 otherwise (main, I/O, timer threads).  Used by
+// sync::wait to refuse running on a worker -- sync::wait is the
+// sync-to-async bootstrap bridge for main / non-async code, never
+// a cooperative wait inside a fiber.
+int32_t _tin_is_worker_thread(void) {
+    return (int32_t)_is_worker_thread();
 }
 
 // Per-fiber spinlock helpers for the park/unpark hot path.
@@ -1260,7 +1271,7 @@ static int64_t _spawn_impl(void *hdl, int prejoined, uintptr_t caller_ip) {
     f->status    = FIBER_RUNNABLE;
     f->prejoined = prejoined;
 
-    // Spawn-chain capture (Phase 4 of docs/plans/stacktrace-libunwind.md).
+    // Spawn-chain capture (see docs/plans/stacktrace-libunwind.md).
     // Only populated when the spawn site asked for it; programs without
     // any reachable stacktrace() leave the fields at zero (the bootstrap
     // default), terminating the walk at this fiber.
@@ -1302,7 +1313,7 @@ int64_t _tin_fiber_spawn_joinable(void *hdl) {
     return _spawn_impl(hdl, 1, 0);
 }
 
-// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
+// Stacktrace-aware spawn variants (see docs/plans/stacktrace-libunwind.md).
 // Codegen routes to these instead of the bare _tin_fiber_spawn{,_joinable}
 // when cg.stacktraceUsed; the extra caller_ip arg is the user fn's
 // llvm.returnaddress(0) at the spawn statement, which gets recorded on
@@ -1898,10 +1909,22 @@ void _tin_fiber_run(void) {
         }
     }
 
-    // Free fiber table.
+    // Free fiber table.  Fibers that didn't reach FIBER_DONE still own
+    // a live coroutine frame (parked on a timer, channel, I/O fd, or
+    // sitting in pending_park before coro.suspend fired).  Workers have
+    // joined by now, so nothing else references the frame -- recycle it
+    // through _tin_coro_free (which routes to the main-thread pool that
+    // gets flushed at the end of this function).  Without this, macOS
+    // `leaks --atExit` flags every parked fiber's frame as a leak on
+    // process exit (especially common in tests that drop a SleepFuture
+    // with the underlying timer still pending).
     if (_fibers) {
         for (int64_t i = 1; i < _fiber_cnt; i++) {
             if (_fibers[i]) {
+                if (_fibers[i]->status != FIBER_DONE && _fibers[i]->hdl) {
+                    _tin_coro_free(_fibers[i]->hdl);
+                    _fibers[i]->hdl = NULL;
+                }
                 free(_fibers[i]->result);
                 if (_fibers[i]->panic_msg) _tin_release(_fibers[i]->panic_msg);
                 pthread_mutex_destroy(&_fibers[i]->done_mu);

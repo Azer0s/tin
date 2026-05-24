@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 	irtypes "github.com/llir/llvm/ir/types"
+	"github.com/llir/llvm/ir/value"
 
 	"github.com/Azer0s/tin/ast"
 )
@@ -43,7 +46,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		if idx := strings.LastIndex(name, "::"); idx >= 0 {
 			// Qualified name: check typeAliases first (e.g. "collections::HashMap" may
 			// alias back to the bare "HashMap" used in genericStructsByArity).
-			if alias, ok := cg.typeAliases[name]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 				return cg.typeExprCanonicalKeyN(alias, depth+1)
 			}
 
@@ -51,7 +54,7 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		}
 		// Bare name: look up in typeAliases for the canonical form.
 		// Recurse to handle alias chains (e.g. t -> Unit -> sync__Unit, or t -> [byte]).
-		if alias, ok := cg.typeAliases[name]; ok {
+		if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			return cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
 
@@ -60,12 +63,12 @@ func (cg *CodeGen) typeExprCanonicalKeyN(te ast.TypeExpr, depth int) string {
 		name := t.Name
 		if strings.Contains(name, "::") {
 			// Qualified name: check typeAliases first (e.g. "collections::HashMap" -> "HashMap").
-			if alias, ok := cg.typeAliases[name]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 				name = cg.typeExprCanonicalKeyN(alias, depth+1)
 			} else {
 				name = strings.ReplaceAll(name, "::", "__")
 			}
-		} else if alias, ok := cg.typeAliases[name]; ok {
+		} else if alias := cg.aliasTypeFor(CanonKey(name)); alias != nil {
 			// Bare name: resolve through alias (e.g. bare "Channel" -> "sync__Channel").
 			name = cg.typeExprCanonicalKeyN(alias, depth+1)
 		}
@@ -127,16 +130,29 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		return irtypes.Void, nil
 	case *ast.PointerType:
 		// *void is invalid in LLVM IR - use i8* (opaque pointer convention)
+		var inner irtypes.Type
+
 		if st, ok := t.Elem.(*ast.SimpleType); ok && st.Name == "void" {
-			return irtypes.I8Ptr, nil
+			inner = irtypes.I8
+		} else {
+			i, err := cg.tinTypeToLLVM(t.Elem)
+			if err != nil {
+				return nil, err
+			}
+
+			inner = i
 		}
 
-		inner, err := cg.tinTypeToLLVM(t.Elem)
-		if err != nil {
-			return nil, err
+		pt := irtypes.NewPointer(inner)
+		if t.IsVolatile {
+			// `volatile *T` lives in addrspace(1). The address-space tag is
+			// what tells the rc machinery (rcKindOf / isPrimitivePtr) and
+			// the binding system to skip retain/release for raw bare-metal
+			// pointers without inventing a second pointer category.
+			pt.AddrSpace = volatileAddrSpace
 		}
 
-		return irtypes.NewPointer(inner), nil
+		return pt, nil
 	case *ast.ArrayType:
 		elem, err := cg.tinTypeToLLVM(t.Elem)
 		if err != nil {
@@ -144,14 +160,22 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		}
 
 		if t.Size < 0 {
-			// Dynamic array: {elem*, i64}
-			return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64), nil
+			// Dynamic array: {elem*, i64 len, i64 cap}
+			return fatArrayPtrType(elem), nil
 		}
 
 		return irtypes.NewArray(uint64(t.Size), elem), nil
 	case *ast.FuncType:
-		// Function values are fat pointers: { fn(i8* env, params...) ret *, i8* }
-		// The i8* env carries the closure environment; non-capturing lambdas use null
+		// Uniform 4-slot fat-fn-ptr ABI:
+		// `{non_colored_sync*, colored_sync*, coro_ramp*, env}`.
+		// Same shape for `fn(...) T` and `fn{#async}(...) T`; coercion
+		// between them is a bitwise copy.  Call lowering picks the slot
+		// by caller context: bare sync call -> slot 0, in-coro bare
+		// call -> slot 1, spawn / await -> slot 2.  Slot 0's inner fn
+		// returns the declared T (canonical user signature); slot 2's
+		// inner fn returns i8* (coro hdl).  Slot 1 currently shares
+		// slot 0's body until per-fn colored emission lands.  See
+		// docs/internals/fn-coloring.md.
 		llParams := []irtypes.Type{irtypes.I8Ptr} // env is always first
 
 		for _, p := range t.Params {
@@ -174,30 +198,38 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 			}
 		}
 
-		// Async fat-fn-ptr: the inner function is the $coro variant which always
-		// returns i8* (coroutine handle), regardless of the declared return type.
-		if t.IsAsync {
-			ret = irtypes.I8Ptr
-		}
+		coroFnTy := irtypes.NewFunc(irtypes.I8Ptr, llParams...)
+		coroFnTy.Variadic = t.IsVarArgs
+		syncFnTy := irtypes.NewFunc(ret, llParams...)
+		syncFnTy.Variadic = t.IsVarArgs
 
-		ft := irtypes.NewFunc(ret, llParams...)
-		ft.Variadic = t.IsVarArgs
-		// Fat pointer struct: { fn_ptr*, i8* }
-
-		return irtypes.NewStruct(irtypes.NewPointer(ft), irtypes.I8Ptr), nil
+		return irtypes.NewStruct(
+			irtypes.NewPointer(syncFnTy), // slot 0: non-colored sync (canonical fn type for inference)
+			irtypes.NewPointer(syncFnTy), // slot 1: colored sync (placeholder, same as slot 0 until per-fn coloring)
+			irtypes.NewPointer(coroFnTy), // slot 2: coro ramp (returns i8* hdl; used by spawn / await)
+			irtypes.I8Ptr,                // slot 3: env
+		), nil
 	case *ast.GenericType:
 		// Handle known generic types
 		if t.Name == "fn" && len(t.TypeParams) >= 1 {
 			return cg.tinTypeToLLVM(&ast.FuncType{})
 		}
 		// Generic trait instantiation (e.g. iter[i64]) -> fat pointer type
-		if td, ok := cg.traits[t.Name]; ok {
-			instKey := traitImplKey(t)
+		if td := cg.traitFor(CanonKey(t.Name)); td != nil {
+			// Resolve aliases in TypeParams so the instKey reflects the
+			// substituted concrete types.  Without this, a struct mono
+			// field of shape `src Seq[t]` (where t is currently
+			// aliased to i64 by pushAlias) builds an iface keyed
+			// "Seq__t" -- which collides with later "Seq__t" lookups
+			// from different contexts AND mismatches the assigned
+			// value's "Seq__i64" iface.
+			resolved := cg.resolveAliasesInTypeExpr(t).(*ast.GenericType)
+			instKey := traitImplKey(resolved)
 			typeSubst := map[string]irtypes.Type{}
 
 			for i, tpName := range td.TypeParams {
-				if i < len(t.TypeParams) {
-					lt, err := cg.tinTypeToLLVM(t.TypeParams[i])
+				if i < len(resolved.TypeParams) {
+					lt, err := cg.tinTypeToLLVM(resolved.TypeParams[i])
 					if err != nil {
 						return nil, err
 					}
@@ -205,6 +237,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					typeSubst[tpName] = lt
 				}
 			}
+			// Pretty form is set once at registration so the diagnostic
+			// path can call diagStructName(instKey) and get
+			// "Seq[i64]" rather than the mangled "Seq__i64" -- compare
+			// memory `feedback_no_pretty_reconstruction.md`.
+			cg.upsertTypeRecord(CanonKey(instKey)).Pretty = cg.prettyTraitInst(t.Name, resolved.TypeParams)
 
 			return cg.buildTraitFatPtrTypeInst(t.Name, instKey, typeSubst)
 		}
@@ -225,10 +262,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		nameWasQualified := strings.Contains(t.Name, "::")
 
-		if _, ok := cg.dataDecls[adtLookupName]; !ok {
+		if cg.dataDeclFor(CanonKey(adtLookupName)) == nil {
 			if idx := strings.LastIndex(adtLookupName, "::"); idx >= 0 {
 				bare := adtLookupName[idx+2:]
-				if _, ok2 := cg.dataDecls[bare]; ok2 {
+				if cg.dataDeclFor(CanonKey(bare)) != nil {
 					adtLookupName = bare
 				}
 			}
@@ -236,14 +273,14 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 		if !nameWasQualified && !cg.suppressBareTypeCheck &&
 			cg.curScope != nil && !cg.curScope.typeNameVisible(adtLookupName) {
-			if _, isAdt := cg.dataDecls[adtLookupName]; isAdt && isUserAdtName(adtLookupName) {
+			if cg.dataDeclFor(CanonKey(adtLookupName)) != nil && isUserAdtName(adtLookupName) {
 				return nil, fmt.Errorf(
 					"type %q is not in scope as a bare name; either qualify (`<pkg>::%s[...]`) or import selectively (`use { %s } from <pkg>`)",
 					adtLookupName, adtLookupName, adtLookupName)
 			}
 		}
 
-		if dd, ok2 := cg.dataDecls[adtLookupName]; ok2 && len(dd.TypeParams) == arity && arity > 0 {
+		if dd := cg.dataDeclFor(CanonKey(adtLookupName)); dd != nil && len(dd.TypeParams) == arity && arity > 0 {
 			parts := make([]string, arity)
 
 			isTemplateVar := false
@@ -263,11 +300,11 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 				// and `Option[i64]` share the same concrete
 				// monomorphization (and the same Some/None ctors).
 				concreteName := adtLookupName + "__" + strings.Join(parts, "__")
-				if _, done := cg.structTypes[concreteName]; !done {
+				if cg.structTypeFor(CanonKey(concreteName)) == nil {
 					if err := cg.monomorphizeDataDecl(dd, t.TypeParams, concreteName); err != nil {
 						return nil, err
 					}
-				} else if concreteDecl, ok := cg.dataDecls[concreteName]; ok {
+				} else if concreteDecl := cg.dataDeclFor(CanonKey(concreteName)); concreteDecl != nil {
 					// Re-register plain method aliases AND plain-method
 					// scope entries in the current scope. The IR
 					// functions live in the module (emitted during the
@@ -283,9 +320,10 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 					cg.rebindAdtMethodsInScope(concreteName, concreteDecl.Methods)
 				}
 
-				cg.dataInstTypeArgs[concreteName] = parts
+				cg.recordInstShape(CanonKey(concreteName), dd.Name, t.TypeParams)
+				cg.recordInstParts(CanonKey(concreteName), parts)
 
-				if st, ok3 := cg.structTypes[concreteName]; ok3 {
+				if st := cg.structTypeFor(CanonKey(concreteName)); st != nil {
 					return st, nil
 				}
 			}
@@ -318,7 +356,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 
 				if !isTemplateVar {
 					concreteName := qualTypeName + "__" + strings.Join(parts, "__")
-					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					if cg.structTypeFor(CanonKey(concreteName)) == nil {
 						synthDecl := &ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: qualTypeName, TypeParams: t.TypeParams},
@@ -338,7 +376,9 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 						}
 					}
 
-					if st, ok2 := cg.structTypes[concreteName]; ok2 {
+					cg.recordInstShape(CanonKey(concreteName), qualTypeName, t.TypeParams)
+
+					if st := cg.structTypeFor(CanonKey(concreteName)); st != nil {
 						return st, nil
 					}
 				}
@@ -364,7 +404,7 @@ func (cg *CodeGen) tinTypeToLLVM(te ast.TypeExpr) (irtypes.Type, error) {
 		return irtypes.NewStruct(irtypes.I8, irtypes.NewArray(maxSize, irtypes.I8)), nil
 	case *ast.TupleArrayType:
 		// @[T1, T2, ...] resolves to [any] - fat array of any values.
-		return irtypes.NewStruct(irtypes.NewPointer(anyFatPtrType()), irtypes.I64), nil
+		return fatArrayPtrType(anyFatPtrType()), nil
 	}
 
 	return irtypes.I64, nil
@@ -436,8 +476,8 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return irtypes.NewVector(4, irtypes.Double), nil
 
 	case "string":
-		// fat pointer: {i8*, i64}
-		return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64), nil
+		// Uniform fat-pointer: {i8*, i64 len, i64 cap}.
+		return stringFatPtrType(), nil
 	case "atom", "__atom":
 		// Atoms are represented as %__atom = type { i32 } (CRC32 of name).
 		// Both spellings appear: user-facing Tin code uses `atom`, while
@@ -452,7 +492,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		return anyFatPtrType(), nil
 	}
 	// Check trait types - represented as fat pointers {i8*, vtable*}
-	if _, ok := cg.traits[name]; ok {
+	if cg.traitFor(CanonKey(name)) != nil {
 		// If the trait belongs to a package, use the qualified instKey so that
 		// bare-name references (e.g. "JsonSerializable" inside json.tin) produce
 		// the same fat-ptr/vtable LLVM types as qualified references (e.g.
@@ -473,10 +513,24 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 
 		return fp, nil
 	}
-	// Strip package qualifier (e.g. "sync::AtomicI64" -> "AtomicI64") and retry.
+	// Strip package qualifier (e.g. "sync::AtomicI64" -> "AtomicI64") and
+	// retry.  Two qualifier forms reach this point: the source form
+	// `pkg::Name` (from a parsed TypeExpr) and the canonical form
+	// `pkg__Name` (from TypeName.Canon flowing back through SimpleType --
+	// see typename.go).  Both must resolve to the same LLVM type for the
+	// canonical/LLVM forms to be interchangeable downstream.
 	bareName := name
 	if idx := strings.LastIndex(name, "::"); idx >= 0 {
 		bareName = name[idx+2:]
+	} else if idx := strings.LastIndex(name, "__"); idx >= 0 {
+		// `pkg__Name` shape: only commit if the bare tail is a known
+		// trait or struct.  Otherwise `Future__i64` would wrongly split
+		// to `i64`; the consistent fallback is to keep `bareName = name`
+		// and let the explicit structTypes lookup handle it.
+		tail := name[idx+2:]
+		if cg.traitFor(CanonKey(tail)) != nil {
+			bareName = tail
+		}
 	}
 	// For package-qualified names (e.g. "udp::Conn"), try the canonical
 	// pkg__Name key BEFORE falling back to the bare name.  This prevents a
@@ -484,17 +538,17 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 	// as the bare alias "Conn") from shadowing the intended type.
 	if bareName != name {
 		pkgQualKey := strings.ReplaceAll(name, "::", "__")
-		if st, ok := cg.structTypes[pkgQualKey]; ok {
+		if st := cg.structTypeFor(CanonKey(pkgQualKey)); st != nil {
 			return st, nil
 		}
 
-		if et, ok := cg.enumTypes[pkgQualKey]; ok {
+		if et := cg.enumTypeFor(CanonKey(pkgQualKey)); et != nil {
 			return et, nil
 		}
 	}
 	// Also check traits with bare name (e.g. "io::AsyncReader" -> "AsyncReader").
 	if bareName != name {
-		if _, ok := cg.traits[bareName]; ok {
+		if cg.traitFor(CanonKey(bareName)) != nil {
 			qualInstKey := strings.ReplaceAll(name, "::", "__")
 
 			fp, err := cg.buildTraitFatPtrTypeInst(bareName, qualInstKey, nil)
@@ -506,15 +560,29 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		}
 	}
 	// Check struct types
-	if st, ok := cg.structTypes[bareName]; ok {
+	if st := cg.structTypeFor(CanonKey(bareName)); st != nil {
 		return st, nil
 	}
 	// Check enum types
-	if et, ok := cg.enumTypes[bareName]; ok {
+	if et := cg.enumTypeFor(CanonKey(bareName)); et != nil {
 		return et, nil
 	}
-	// Check type aliases
-	if alias, ok := cg.typeAliases[bareName]; ok {
+	// Check type aliases.  Guard against alias cycles (e.g. a generic
+	// param transiently aliased to a TypeExpr that references the
+	// param itself) by tracking the resolution path; bail out when a
+	// name reappears.
+	if alias := cg.aliasTypeFor(CanonKey(bareName)); alias != nil {
+		if cg.aliasResolving == nil {
+			cg.aliasResolving = make(map[string]bool, 4)
+		}
+
+		if cg.aliasResolving[bareName] {
+			return nil, fmt.Errorf("alias cycle resolving %q via %s", bareName, alias.String())
+		}
+
+		cg.aliasResolving[bareName] = true
+		defer delete(cg.aliasResolving, bareName)
+
 		return cg.tinTypeToLLVM(alias)
 	}
 	// Unknown identifier in a type position. Tin's convention is that
@@ -529,7 +597,7 @@ func (cg *CodeGen) resolveSimpleType(name string) (irtypes.Type, error) {
 		// One last shot: if the bare name is in dataDecls, accept it.
 		// Predeclare phase may resolve types before genDataDecl sets up
 		// the package-qualified entries we usually look at for ADTs.
-		if _, ok := cg.dataDecls[bareName]; ok {
+		if cg.dataDeclFor(CanonKey(bareName)) != nil {
 			// dataDecls has the template; concrete monomorphization
 			// happens via the GenericType branch when type args are
 			// supplied. A bare reference to a generic ADT (no args) is
@@ -723,13 +791,13 @@ func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
 		return &ast.PointerType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType)}
 	}
 
-	if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 2 {
+	if st, ok := t.(*irtypes.StructType); ok {
 		// Trait fat-ptr {i8*, vtable_struct*} -- demangle the
 		// vtable's struct name (`<pkg>__<Trait>_vtable`) into the
 		// user-visible `<pkg>::<Trait>` so the synthesized
 		// monomorphization re-resolves to the right iface type
 		// instead of falling through to i64.
-		if st.Fields[0] == irtypes.I8Ptr {
+		if len(st.Fields) == 2 && st.Fields[0] == irtypes.I8Ptr {
 			if pt, ok2 := st.Fields[1].(*irtypes.PointerType); ok2 {
 				if vst, ok3 := pt.ElemType.(*irtypes.StructType); ok3 {
 					vname := vst.Name()
@@ -745,18 +813,20 @@ func llvmTypeToTinTypeExprStructural(t irtypes.Type) ast.TypeExpr {
 				}
 			}
 		}
-		// Fat-pointer arrays / strings: {ElemPtr, i64}.  We cannot
-		// distinguish `[u8]` from `string` at the LLVM level (both
-		// are `{i8*, i64}`); both resolve to the same LLVM type
-		// downstream so the choice is cosmetic.  We pick `string`
-		// because it is the more common appearance for this shape
-		// in real code.
-		if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 && st.Fields[1].Equal(irtypes.I64) {
-			if pt.ElemType.Equal(irtypes.I8) {
-				return &ast.SimpleType{Name: "string"}
-			}
+		// Fat-pointer arrays / strings: {ElemPtr, i64 len, i64 cap}.
+		// We cannot distinguish `[u8]` from `string` at the LLVM
+		// level (both are `{i8*, i64, i64}`); both resolve to the same
+		// LLVM type downstream so the choice is cosmetic.  We pick
+		// `string` because it is the more common appearance for this
+		// shape in real code.
+		if len(st.Fields) == 3 && st.Fields[1].Equal(irtypes.I64) && st.Fields[2].Equal(irtypes.I64) {
+			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
+				if pt.ElemType.Equal(irtypes.I8) {
+					return &ast.SimpleType{Name: "string"}
+				}
 
-			return &ast.ArrayType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType), Size: -1}
+				return &ast.ArrayType{Elem: llvmTypeToTinTypeExprStructural(pt.ElemType), Size: -1}
+			}
 		}
 	}
 
@@ -795,23 +865,25 @@ func llvmTypeToTinName(t irtypes.Type) string {
 			return n
 		}
 		// Anonymous struct - detect by shape:
-		// {i8*, i64}  = string
-		// {i32, i8*}  = any
-		if len(st.Fields) == 2 {
-			if st.Fields[0].Equal(irtypes.I8Ptr) && st.Fields[1].Equal(irtypes.I64) {
+		// {i8*, i64, i64}     = string (fat-ptr widened with cap)
+		// {ElemType*, i64, i64} = [ElemType] (fat-ptr widened with cap)
+		// {i32, i8*}          = any (unchanged)
+		if len(st.Fields) == 3 && st.Fields[1].Equal(irtypes.I64) && st.Fields[2].Equal(irtypes.I64) {
+			if st.Fields[0].Equal(irtypes.I8Ptr) {
 				return "string"
 			}
 
-			if st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
-				return "any"
-			}
-			// Fat array pointer: anonymous {ElemType*, i64}.
-			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok && st.Fields[1].Equal(irtypes.I64) {
+			if pt, ok := st.Fields[0].(*irtypes.PointerType); ok {
 				elem := llvmTypeToTinName(pt.ElemType)
 				if elem != "" && elem != "any" {
 					return "[" + elem + "]"
 				}
 			}
+		}
+
+		if len(st.Fields) == 2 &&
+			st.Fields[0].Equal(irtypes.I32) && st.Fields[1].Equal(irtypes.I8Ptr) {
+			return "any"
 		}
 	}
 
@@ -824,9 +896,55 @@ func llvmTypeToTinName(t irtypes.Type) string {
 	return "any"
 }
 
-// stringFatPtrType returns the {i8*, i64} type used for tin strings.
+// stringFatPtrType returns the {i8*, i64 len, i64 cap} type used for
+// tin strings.  Identical shape to the byte-array fat-ptr, so
+// `string` and `[byte]` stay interchangeable after the fat-array
+// widening.  Strings are conceptually immutable so cap matters less
+// than for `[T]`, but maintaining the uniform layout keeps coercion-
+// free and lets future string-mutation code grow strings in place.
 func stringFatPtrType() *irtypes.StructType {
-	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
+	return irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64, irtypes.I64)
+}
+
+// fatArrayPtrType returns the {*elem, i64 len, i64 cap} type used for
+// tin dynamic arrays.  Cap is the allocated element count when >= 0;
+// cap < 0 marks a borrowed view (panics on `++=`, no RC release on drop).
+//
+// All array construction goes through this helper so the layout change
+// stays localized.
+func fatArrayPtrType(elem irtypes.Type) *irtypes.StructType {
+	return irtypes.NewStruct(irtypes.NewPointer(elem), irtypes.I64, irtypes.I64)
+}
+
+// fatArrayConst builds a compile-time constant fat-array value of the
+// given element type, data pointer, length, and capacity.
+func fatArrayConst(elem irtypes.Type, dataPtr constant.Constant, length, capacity int64) *constant.Struct {
+	return constant.NewStruct(fatArrayPtrType(elem),
+		dataPtr,
+		constant.NewInt(irtypes.I64, length),
+		constant.NewInt(irtypes.I64, capacity))
+}
+
+// buildFatArrayValue emits IR to materialize a fat-array value
+// `{dataPtr, length, capacity}` and returns the loaded struct.  All
+// runtime fat-array constructions should go through this helper so the
+// triple-slot layout stays consistent.
+func (cg *CodeGen) buildFatArrayValue(block *ir.Block, elem irtypes.Type, dataPtr, length, capacity value.Value) value.Value {
+	fatType := fatArrayPtrType(elem)
+	alloca := block.NewAlloca(fatType)
+	ptrGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
+	block.NewStore(dataPtr, ptrGep)
+
+	lenGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
+	block.NewStore(length, lenGep)
+
+	capGep := block.NewGetElementPtr(fatType, alloca,
+		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+	block.NewStore(capacity, capGep)
+
+	return block.NewLoad(fatType, alloca)
 }
 
 // anyFatPtrType returns the {i32, i8*} type used for tin `any` values.
@@ -928,28 +1046,43 @@ func llvmTypeSizeAlign(t irtypes.Type) (uint64, uint64) {
 
 // Type query helpers
 
-// isFatPtrType returns true if t is a two-field struct whose first field
-// is a pointer - i.e., a Tin fat-pointer (string, array, etc.).
+// isFatPtrType returns true if t is a Tin fat-pointer: the uniform
+// three-field `{T* data, i64 len, i64 cap}` layout shared by strings,
+// `[byte]`, and every `[T]` dynamic array.
 func isFatPtrType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 {
+	if !ok || len(st.Fields) != 3 {
 		return false
 	}
 
 	_, isPtr := st.Fields[0].(*irtypes.PointerType)
 
-	return isPtr && irtypes.IsInt(st.Fields[1])
+	return isPtr && irtypes.IsInt(st.Fields[1]) && irtypes.IsInt(st.Fields[2])
 }
 
-// isStringType returns true if t is the tin string fat-pointer type {i8*, i64}.
-// Named structs (user-defined) are never fat-pointers.
+// isStringType returns true if t is the tin string fat-pointer type
+// {i8*, i64 len, i64 cap}.  Named structs (user-defined) are never
+// fat-pointers.  Note: strings are also a valid `[byte]` fat-array
+// (i8* is a pointer-to-i8) so isFatArrayPtr matches them too -- the
+// caller should check isStringType first when it matters.
 func isStringType(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || st.Name() != "" || len(st.Fields) != 2 {
+	if !ok || st.Name() != "" || len(st.Fields) != 3 {
 		return false
 	}
 
-	return st.Fields[0] == irtypes.I8Ptr && st.Fields[1].Equal(irtypes.I64)
+	if !st.Fields[1].Equal(irtypes.I64) || !st.Fields[2].Equal(irtypes.I64) {
+		return false
+	}
+	// Compare structurally rather than by pointer identity: codegen
+	// builds string fat-ptrs through several helpers and the resulting
+	// PointerType instances aren't necessarily the same singleton.
+	pt, ok := st.Fields[0].(*irtypes.PointerType)
+	if !ok {
+		return false
+	}
+
+	return pt.ElemType.Equal(irtypes.I8)
 }
 
 // isAnyType returns true if t is the tin `any` fat-pointer type {i32, i8*}.
@@ -963,16 +1096,18 @@ func isAnyType(t irtypes.Type) bool {
 	return st.Fields[0].Equal(irtypes.I32) && st.Fields[1] == irtypes.I8Ptr
 }
 
-// isFatArrayPtr returns true for anonymous {T*, i64} fat array pointer structs.
-// Named structs (user-defined) are excluded to avoid false matches with
-// structs that embed vtable pointers as their first field.
+// isFatArrayPtr returns true for anonymous {T*, i64 len, i64 cap} fat
+// array pointer structs.  Named structs (user-defined) are excluded to
+// avoid false matches with structs that embed vtable pointers as their
+// first field.  Strings are {i8*, i64} (two fields, no cap) -- those
+// match isStringType, not this predicate.
 func isFatArrayPtr(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || st.Name() != "" || len(st.Fields) != 2 {
+	if !ok || st.Name() != "" || len(st.Fields) != 3 {
 		return false
 	}
 
-	if !irtypes.IsInt(st.Fields[1]) {
+	if !irtypes.IsInt(st.Fields[1]) || !irtypes.IsInt(st.Fields[2]) {
 		return false
 	}
 
@@ -981,40 +1116,43 @@ func isFatArrayPtr(t irtypes.Type) bool {
 	return ok
 }
 
-// isFatFnPtr returns true when t is a closure fat pointer { fn(i8*,...)*, i8* }.
+// isFatFnPtr returns true when t is the uniform 4-slot fat-fn-ptr
+// `{non_colored_sync*, colored_sync*, coro_ramp*, env}`.  Slot 0 is
+// the canonical user-facing sync fn type (used for type inference,
+// param-type derivation, and direct calls outside coros).  Slot 1
+// is the in-coro colored sync variant.  Slot 2 is the coro ramp
+// (returns i8* hdl, for `spawn` / await).  Slot 3 is i8* env.
 func isFatFnPtr(t irtypes.Type) bool {
 	st, ok := t.(*irtypes.StructType)
-	if !ok || len(st.Fields) != 2 {
+	if !ok || len(st.Fields) != 4 {
 		return false
 	}
 
-	if st.Fields[1] != irtypes.I8Ptr {
+	if st.Fields[3] != irtypes.I8Ptr {
 		return false
 	}
 
-	pt, ok := st.Fields[0].(*irtypes.PointerType)
-	if !ok {
-		return false
+	for i := 0; i < 3; i++ {
+		pt, ok2 := st.Fields[i].(*irtypes.PointerType)
+		if !ok2 {
+			return false
+		}
+
+		if _, ok3 := pt.ElemType.(*irtypes.FuncType); !ok3 {
+			return false
+		}
 	}
 
-	_, ok = pt.ElemType.(*irtypes.FuncType)
-
-	return ok
+	return true
 }
 
-// isAsyncFatFnPtr returns true when t is an async closure fat pointer
-// { fn(i8*, params...) i8* *, i8* } - the inner function returns i8*
-// (coroutine handle), as produced for fn{#async}(...) type expressions.
+// isAsyncFatFnPtr: under the uniform 4-slot ABI, every fat-fn-ptr
+// carries a coro ramp in slot 2, so the LLVM-level type can't tell
+// async from sync.  Type-system distinctions (was this slot declared
+// `{#async}`) live in the AST.  Kept as an alias for back-compat
+// with the small number of call sites that historically used it.
 func isAsyncFatFnPtr(t irtypes.Type) bool {
-	if !isFatFnPtr(t) {
-		return false
-	}
-
-	st := t.(*irtypes.StructType)
-	fnPtr := st.Fields[0].(*irtypes.PointerType)
-	ft := fnPtr.ElemType.(*irtypes.FuncType)
-
-	return ft.RetType != nil && ft.RetType.Equal(irtypes.I8Ptr)
+	return isFatFnPtr(t)
 }
 
 // isAtomType returns true if t is the %__atom named struct type { i32 }.
@@ -1076,6 +1214,23 @@ func (cg *CodeGen) cDataPtrIndex(structName string) int {
 	return cg.userFieldOffset(structName)
 }
 
+// clayoutFlagsIndex returns the LLVM field index of the i32 flags field
+// for cLayoutStructs (placed immediately after c_data_ptr).  Returns -1
+// for non-cLayout structs.  Bit 0 = "borrowed" (c_data_ptr is foreign).
+func (cg *CodeGen) clayoutFlagsIndex(structName string) int {
+	if !cg.cLayoutStructs[structName] {
+		return -1
+	}
+
+	return cg.cDataPtrIndex(structName) + 1
+}
+
+// cLayoutFlagBorrowed is bit 0 of the wrapper's flags field.  When set,
+// emitCLayoutStructRetain / Release no-op: the wrapper aliases memory
+// outside its own rc-block (typically a pointer-extern return), so the
+// c_data_ptr - 1 retain trick would corrupt unrelated memory.
+const cLayoutFlagBorrowed = int64(1)
+
 // fieldIndex returns the LLVM struct field index for a named user field.
 // For regular structs: returns userFieldOffset + i (wrapper GEP index).
 // For cLayoutStructs: returns the native field index (0-based within %S.native).
@@ -1133,7 +1288,133 @@ func (cg *CodeGen) resolveTypeWithSubst(te ast.TypeExpr, subst map[string]irtype
 		}
 	}
 
-	return cg.tinTypeToLLVM(te)
+	// Compound types carry trait type params nested inside them, e.g.
+	// `Option[t]` / `[t]` / `*Trait[t]` / `fn(t) u`.  Rewrite the AST
+	// to substitute `t -> concrete` everywhere a bare SimpleType
+	// matches a key in subst, then hand the rewritten expression to
+	// tinTypeToLLVM.  Without this, `tinTypeToLLVM(Option[t])` treats
+	// the unbound `t` as opaque and returns a mis-typed instantiation.
+	substTE := make(map[string]ast.TypeExpr, len(subst))
+
+	for tp, lt := range subst {
+		target := llvmTypeToTinTypeExprStructural(lt)
+		if target == nil {
+			continue
+		}
+
+		if st, ok := target.(*ast.SimpleType); ok && st.Name == tp {
+			// Self-alias from a vtable struct type whose name doesn't
+			// recover to a real Tin type -- don't substitute.
+			continue
+		}
+
+		substTE[tp] = target
+	}
+
+	if len(substTE) == 0 {
+		return cg.tinTypeToLLVM(te)
+	}
+
+	return cg.tinTypeToLLVM(substituteTypeExpr(te, substTE))
+}
+
+// resolveAliasesInTypeExpr walks te and replaces every SimpleType whose
+// name has a registered alias (cg.aliasTypeFor) with the alias target,
+// recursing through PointerType, ArrayType, GenericType, FuncType.  Used
+// by tinTypeToLLVM's trait-instantiation branch so the iface instKey
+// reflects the currently-substituted concrete types instead of the
+// generic param names.
+func (cg *CodeGen) resolveAliasesInTypeExpr(te ast.TypeExpr) ast.TypeExpr {
+	if te == nil {
+		return nil
+	}
+
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if alias := cg.aliasTypeFor(CanonKey(t.Name)); alias != nil {
+			return cg.resolveAliasesInTypeExpr(alias)
+		}
+
+		return te
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem:    cg.resolveAliasesInTypeExpr(t.Elem),
+			IsConst: t.IsConst,
+		}
+	case *ast.ArrayType:
+		return &ast.ArrayType{
+			Elem: cg.resolveAliasesInTypeExpr(t.Elem),
+			Size: t.Size,
+		}
+	case *ast.GenericType:
+		newParams := make([]ast.TypeExpr, len(t.TypeParams))
+		for i, p := range t.TypeParams {
+			newParams[i] = cg.resolveAliasesInTypeExpr(p)
+		}
+
+		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
+	case *ast.FuncType:
+		newParams := make([]ast.TypeExpr, len(t.Params))
+		for i, p := range t.Params {
+			newParams[i] = cg.resolveAliasesInTypeExpr(p)
+		}
+
+		return &ast.FuncType{
+			Params:  newParams,
+			RetType: cg.resolveAliasesInTypeExpr(t.RetType),
+			IsAsync: t.IsAsync,
+		}
+	}
+
+	return te
+}
+
+// substituteTypeExpr returns te with every SimpleType{Name} whose Name
+// is a key in subst replaced by the corresponding TypeExpr.  Recursive;
+// nested generic args, array elements, pointer elements, function
+// param/return types are all walked.
+func substituteTypeExpr(te ast.TypeExpr, subst map[string]ast.TypeExpr) ast.TypeExpr {
+	if te == nil {
+		return nil
+	}
+
+	switch t := te.(type) {
+	case *ast.SimpleType:
+		if r, ok := subst[t.Name]; ok {
+			return r
+		}
+
+		return te
+	case *ast.PointerType:
+		return &ast.PointerType{
+			Elem:    substituteTypeExpr(t.Elem, subst),
+			IsConst: t.IsConst,
+		}
+	case *ast.ArrayType:
+		return &ast.ArrayType{
+			Elem: substituteTypeExpr(t.Elem, subst),
+			Size: t.Size,
+		}
+	case *ast.GenericType:
+		newParams := make([]ast.TypeExpr, len(t.TypeParams))
+		for i, p := range t.TypeParams {
+			newParams[i] = substituteTypeExpr(p, subst)
+		}
+
+		return &ast.GenericType{Name: t.Name, TypeParams: newParams}
+	case *ast.FuncType:
+		newParams := make([]ast.TypeExpr, len(t.Params))
+		for i, p := range t.Params {
+			newParams[i] = substituteTypeExpr(p, subst)
+		}
+
+		return &ast.FuncType{
+			Params:  newParams,
+			RetType: substituteTypeExpr(t.RetType, subst),
+		}
+	}
+
+	return te
 }
 
 // llvmElemByteSize returns the size in bytes of a scalar LLVM type, or 0 for

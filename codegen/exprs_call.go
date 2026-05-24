@@ -12,72 +12,16 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-func (cg *CodeGen) genUnaryExpr(block *ir.Block, e *ast.UnaryExpr) (value.Value, error) {
-	val, err := cg.genExpr(block, e.Expr)
-	if err != nil {
-		return nil, err
-	}
-
-	if val == nil {
-		return nil, nil
-	}
-
-	// genExpr may have advanced cg.curBlock through short-circuit && / ||.
-	// The unary op (xor, fneg, sub, load) consumes `val` (often a phi
-	// rooted in a merge block) and must be emitted there, not in the
-	// stale input block. Without this `!(a || b)` lowers to an `xor`
-	// in `entry` that uses a phi defined later in the merge -- invalid
-	// SSA: "Instruction does not dominate all uses".
-	if cg.curBlock != nil {
-		block = cg.curBlock
-	}
-
-	// Operator overloading dispatch (Phase 3): if the operand is a user
-	// struct that implements the corresponding built-in unary operator trait,
-	// lower to a method call. Falls through to the primitive switch
-	// otherwise; primitive structs (any, string, fat array) are excluded by
-	// isStructType.
-	if isStructType(val.Type()) {
-		if traitName, isOp := unaryOpTraitName(e.Op); isOp {
-			structName := cg.typeNameOf(val.Type())
-			if fn := cg.lookupOpMethod(structName, traitName, nil); fn != nil {
-				return cg.emitOpDispatch(block, fn, val, nil)
-			}
-
-			return nil, cg.nodeErr(e, "unary operator %q is not defined for operand of type %s", e.Op, cg.tinTypeDisplay(val.Type()))
-		}
-	}
-
-	switch e.Op {
-	case "-":
-		if irtypes.IsFloat(val.Type()) {
-			return block.NewFNeg(val), nil
-		}
-
-		zero := cg.coerce(block, constant.NewInt(irtypes.I64, 0), val.Type())
-
-		return block.NewSub(zero, val), nil
-	case "!":
-		b := cg.toBool(block, val)
-
-		return block.NewXor(b, constant.NewInt(irtypes.I1, 1)), nil
-	case "~":
-		minusOne := cg.coerce(block, constant.NewInt(irtypes.I64, -1), val.Type())
-
-		return block.NewXor(val, minusOne), nil
-	case "*":
-		// Dereference
-		if pt, ok := val.Type().(*irtypes.PointerType); ok {
-			return block.NewLoad(pt.ElemType, val), nil
-		}
-
-		return val, nil
-	}
-
-	return val, nil
-}
-
 func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, error) {
+	// Stash a call-arg context so nested `ref a` evaluations can look
+	// up the callee's per-param convention to validate the assertion.
+	// Push on entry, pop on every return path via defer.
+	if e != nil {
+		calleeName, paramNames := cg.callContextInfoFor(e.Func)
+		cg.pushCallArgContext(calleeName, paramNames, e.Args)
+
+		defer cg.popCallArgContext()
+	}
 	// Resolve callee.
 	var (
 		callee     value.Value
@@ -115,22 +59,83 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				return cg.expandMacro(block, macro, e.Args, fn.Pos())
 			}
 		}
-		// Built-in: len(expr)
+		// Built-in: len(expr).  Skipped when a user binding shadows the
+		// name in lexical scope -- the binding wins (matches sourcepos).
+		// Pre-fix the builtin always won and the user's `let len = ...`
+		// was silently dead.
 		if fn.Name == "len" && len(e.Args) == 1 {
-			return cg.genBuiltinLen(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("len"); !shadowed {
+				return cg.genBuiltinLen(block, e.Args[0])
+			}
 		}
-		// Built-in: panic(msg)
+		// Built-in: cap(expr) returns the capacity (allocated headroom)
+		// of a string or dynamic array.  Only a LOCAL let-binding
+		// shadows the builtin; function-name collisions (e.g. an stdlib
+		// `cap` import) fall through to the builtin because the call
+		// shape unambiguously says cap-of-slice when the arg is one
+		// string or fat-ptr.
+		if fn.Name == "cap" && len(e.Args) == 1 {
+			if entry, ok := cg.curScope.lookup("cap"); !ok || !entry.isAlloc {
+				return cg.genBuiltinCap(block, e.Args[0])
+			}
+		}
+		// Built-in: copy(expr) returns a fresh, independently-owned
+		// duplicate of a string or dynamic array.  Only a LOCAL
+		// let-binding shadows; stdlib's `io::copy(dst, src)` doesn't
+		// collide because arity differs and copy(arr) is the natural
+		// one-arg form for the deep-copy builtin.
+		if fn.Name == "copy" && len(e.Args) == 1 {
+			if entry, ok := cg.curScope.lookup("copy"); !ok || !entry.isAlloc {
+				return cg.genBuiltinCopy(block, e.Args[0])
+			}
+		}
+		// Built-in: nlen(expr) returns the dimensions of a multidim
+		// array as an [i64].  Same shadowing rule as len.
+		if fn.Name == "nlen" && len(e.Args) == 1 {
+			if _, shadowed := cg.curScope.lookup("nlen"); !shadowed {
+				return cg.genBuiltinNlen(block, e.Args[0])
+			}
+		}
+		// Built-in: nrect(expr) reports rectangularity of a nested
+		// array (every sub-array at the same depth has the same
+		// length).  Same shadowing rule as len.
+		if fn.Name == "nrect" && len(e.Args) == 1 {
+			if _, shadowed := cg.curScope.lookup("nrect"); !shadowed {
+				return cg.genBuiltinNrect(block, e.Args[0])
+			}
+		}
+		// Built-in: panic(msg).  Same shadowing rule.
 		if fn.Name == "panic" && len(e.Args) == 1 {
-			return cg.genBuiltinPanic(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("panic"); !shadowed {
+				return cg.genBuiltinPanic(block, e.Args[0])
+			}
 		}
-		// Built-in: recover() - retrieve panic message from deferred function.
-		if fn.Name == "recover" && len(e.Args) == 0 {
-			return cg.genBuiltinRecover(block)
+		// Built-in: recover() returns the panic message string; the
+		// `recover('trace)` opt-in form returns a `(string, [atom])`
+		// tuple so a deferred function can pair the recovered text
+		// with the panic-site backtrace.  Same shadowing rule.
+		if fn.Name == "recover" && len(e.Args) <= 1 {
+			if _, shadowed := cg.curScope.lookup("recover"); !shadowed {
+				if len(e.Args) == 0 {
+					return cg.genBuiltinRecover(block)
+				}
+
+				if atomLit, ok2 := e.Args[0].(*ast.AtomLit); ok2 && atomLit.Name == "trace" {
+					return cg.genBuiltinRecoverTrace(block)
+				}
+
+				return nil, cg.nodeErr(e.Args[0],
+					"recover(arg) only accepts the atom literal 'trace; "+
+						"call `recover()` for the plain message form")
+			}
 		}
 		// Built-in: default(TypeName) - returns the zero value for a type.
 		// Used in generic code to produce a typed zero without knowing the concrete type.
+		// Same shadowing rule.
 		if fn.Name == "default" && len(e.Args) == 1 {
-			return cg.genBuiltinDefault(block, e.Args[0])
+			if _, shadowed := cg.curScope.lookup("default"); !shadowed {
+				return cg.genBuiltinDefault(block, e.Args[0])
+			}
 		}
 		// Built-in: sourcepos(symbol_or_expr) - returns the atom for
 		// "<name>@<file>:<line>:<col>" (identifier arg) or
@@ -189,7 +194,11 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		}
 		// Check if this is a generic or constrained function call - monomorphize it.
 		{
-			var gTmpl *ast.FuncDecl
+			var (
+				gTmpl    *ast.FuncDecl
+				argVals  []value.Value
+				argsEval bool
+			)
 			if t, ok2 := cg.constrainedFuncs[fn.Name]; ok2 {
 				gTmpl = t
 			} else if t, ok2 := cg.genericFuncs[fn.Name]; ok2 {
@@ -210,8 +219,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					// whose arity matches the call so e.g.
 					// `result::unwrap(r)` (1 arg) and
 					// `result::unwrap(r, msg)` (2 args) route to their
-					// respective templates.
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[fn.Name], len(e.Args)); ov != nil {
+					// respective templates.  When arity ties (e.g.
+					// `fn poke[t](xs [t])` vs `fn poke[t](p *Trait[t])`)
+					// we eval args once up front and pass the LLVM types
+					// so pickGenericFuncOverload can disambiguate by
+					// param shape.
+					if ovs := cg.genericFuncOverloads[fn.Name]; len(ovs) > 1 {
+						argVals = make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err2 := cg.genExpr(block, arg)
+							if err2 != nil {
+								return nil, err2
+							}
+
+							argVals = append(argVals, av)
+						}
+
+						argsEval = true
+
+						argTypes := make([]irtypes.Type, len(argVals))
+						for i, v := range argVals {
+							if v != nil {
+								argTypes[i] = v.Type()
+							}
+						}
+
+						if ov := pickGenericFuncOverloadHinted(ovs, len(e.Args), argTypes, cg.pipeCurriedRetHint); ov != nil {
+							gTmpl = ov
+						}
+					} else if ov := pickGenericFuncOverloadHinted(ovs, len(e.Args), nil, cg.pipeCurriedRetHint); ov != nil {
 						gTmpl = ov
 					}
 				}
@@ -220,14 +256,16 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			if gTmpl != nil {
 				tmpl := gTmpl
 				// Evaluate arguments first to infer concrete types.
-				argVals := make([]value.Value, 0, len(e.Args))
-				for _, arg := range e.Args {
-					av, err2 := cg.genExpr(block, arg)
-					if err2 != nil {
-						return nil, err2
-					}
+				if !argsEval {
+					argVals = make([]value.Value, 0, len(e.Args))
+					for _, arg := range e.Args {
+						av, err2 := cg.genExpr(block, arg)
+						if err2 != nil {
+							return nil, err2
+						}
 
-					argVals = append(argVals, av)
+						argVals = append(argVals, av)
+					}
 				}
 
 				typeSubst := cg.inferTypeArgs(tmpl, argVals)
@@ -240,7 +278,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					if name, found := typeSubst[tp]; found {
-						instKey += name
+						instKey += name.Canon
 					} else {
 						instKey += tp
 					}
@@ -266,10 +304,13 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						return nil, err3
 					}
 				}
-				// Adapt args if needed and call.
+				// Adapt args if needed and call.  Auto-copy struct args
+				// flowing into mutating callees first so the caller's
+				// binding stays isolated from the callee's mutations.
+				cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 				preCoerceVals := argVals
 				argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
-				result := block.NewCall(concreteFunc, argVals...)
+				result := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
 				// ARC: release temporary RC-tracked arguments (same as regular call path).
 				for i, astArg := range e.Args {
 					if i >= len(preCoerceVals) {
@@ -358,6 +399,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				ovCallee = oEntry.val
 			}
 
+			cg.applyAutoCopyToArgVals(block, e.Args, argVals)
+
 			argValsPreCoerce := append([]value.Value(nil), argVals...)
 			if f, ok2 := ovCallee.(*ir.Func); ok2 {
 				argVals = cg.adaptArgs(block, argVals, f.Sig)
@@ -405,552 +448,17 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			callee = loaded
 		} else {
-			callee = entry.val
+			// Route to the $colored variant of the callee when emitting
+			// inside a cooperative body ($coro or $colored).  See
+			// docs/internals/fn-coloring.md "Call routing".  Falls
+			// through to the plain sync entry when no colored variant
+			// was emitted for the callee (callee not in coloredCallable
+			// or its body was elided).
+			callee = cg.resolveColoredCallee(fn.Name, entry.val)
 		}
 
 	case *ast.FieldAccess:
-		// Static dispatch: TypeName.method() where TypeName is a struct type, not a variable.
-		// Must be checked BEFORE trying to evaluate fn.Expr as a value, because type names
-		// are not in scope as values and would cause "undefined identifier" errors.
-		if staticName, typeArgStr := cg.tryResolveStructTypeName(fn.Expr); staticName != "" {
-			methodKey := staticName + "_" + fn.Field
-			baseStaticName := staticName // preserved for error messages before typeArgStr overwrites staticName
-			// Also try the concrete monomorphized key when a type arg is present.
-			if typeArgStr != "" {
-				// Each part can itself be a nested generic, a pointer/array,
-				// a qualified name, or a type alias. Parse via the same
-				// type-key string parser the canonical machinery uses, then
-				// run typeExprCanonicalKey to resolve aliases (so e.g.
-				// `type Ptr = *i64; Atomic[Ptr].new(...)` instantiates as
-				// `Atomic__*i64`, the same struct `Atomic[*i64].new(...)`
-				// would). splitTopLevelTypeArgs respects bracket depth so
-				// inner commas (`HashMap[K, List[i64]]`) don't split wrong.
-				typeArgTEs := splitTopLevelTypeArgs(typeArgStr)
-				resolvedParts := make([]string, len(typeArgTEs))
-
-				for i, te := range typeArgTEs {
-					resolvedParts[i] = cg.typeExprCanonicalKey(te)
-				}
-
-				concreteName := staticName + "__" + strings.Join(resolvedParts, "__")
-				if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
-					if _, isGeneric := cg.genericStructsByArity[staticName]; isGeneric {
-						synthDecl := &ast.TypeDecl{
-							Name: concreteName,
-							Type: &ast.GenericType{Name: staticName, TypeParams: typeArgTEs},
-						}
-						if mErr := cg.genTypeDecl(synthDecl); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
-						}
-					}
-				}
-
-				if _, exists := cg.structTypes[concreteName]; exists {
-					methodKey = concreteName + "_" + fn.Field
-					staticName = concreteName
-				}
-			}
-
-			// Overloaded static method: evaluate args first, resolve best variant.
-			if variants, hasOverloads := cg.overloads[methodKey]; hasOverloads {
-				llArgs := make([]value.Value, 0, len(e.Args))
-				for _, arg := range e.Args {
-					av, err2 := cg.genExpr(block, arg)
-					if err2 != nil {
-						return nil, err2
-					}
-
-					llArgs = append(llArgs, av)
-
-					if cg.curBlock != nil && cg.curBlock != block {
-						block = cg.curBlock
-					}
-				}
-
-				best := cg.resolveOverload(variants, llArgs)
-				if best == nil {
-					typeName := prettyStructName(baseStaticName)
-					if typeArgStr != "" {
-						typeName = prettyStructName(baseStaticName) + "[" + strings.ReplaceAll(typeArgStr, ",", ", ") + "]"
-					}
-
-					return nil, cg.nodeErr(e, "no matching overload for %s::%s (got %d arg(s))", typeName, fn.Field, len(llArgs))
-				}
-
-				oEntry, oOk := cg.curScope.lookup(best.irName)
-				if !oOk {
-					return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
-				}
-
-				var ovCallee value.Value
-
-				if oEntry.isAlloc {
-					ptrType := oEntry.val.Type().(*irtypes.PointerType)
-					ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
-				} else {
-					ovCallee = oEntry.val
-				}
-
-				preCoerceVals := append([]value.Value(nil), llArgs...)
-				if f2, ok2 := ovCallee.(*ir.Func); ok2 {
-					llArgs = cg.adaptArgs(block, llArgs, f2.Sig)
-				}
-
-				result := block.NewCall(ovCallee, llArgs...)
-
-				for i, astArg := range e.Args {
-					if i >= len(preCoerceVals) || i >= len(llArgs) {
-						break
-					}
-
-					cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
-				}
-
-				if irtypes.IsVoid(result.Type()) {
-					return nil, nil
-				}
-
-				return result, nil
-			}
-
-			if entry, ok := cg.curScope.lookup(methodKey); ok {
-				if f, isFn := entry.val.(*ir.Func); isFn && cg.isStaticMethodIR(f, staticName) {
-					llArgs := make([]value.Value, 0, len(e.Args))
-					for _, arg := range e.Args {
-						av, err2 := cg.genExpr(block, arg)
-						if err2 != nil {
-							return nil, err2
-						}
-
-						llArgs = append(llArgs, av)
-
-						if cg.curBlock != nil && cg.curBlock != block {
-							block = cg.curBlock
-						}
-					}
-
-					preCoerceVals := append([]value.Value(nil), llArgs...)
-					llArgs = cg.adaptArgs(block, llArgs, f.Sig)
-
-					result := block.NewCall(f, llArgs...)
-
-					for i, astArg := range e.Args {
-						if i >= len(preCoerceVals) || i >= len(llArgs) {
-							break
-						}
-
-						cg.emitCallArgReleaseForRet(block, astArg, preCoerceVals[i], llArgs[i], result.Type())
-					}
-
-					if irtypes.IsVoid(result.Type()) {
-						return nil, nil
-					}
-
-					return result, nil
-				}
-			}
-		}
-
-		// Method call: obj.method(args...) or ptr->method(args...)
-		objVal, err := cg.genExpr(block, fn.Expr)
-		if err != nil {
-			return nil, err
-		}
-
-		// -> operator: dereference the pointer-to-struct to get the struct value.
-		if fn.IsPtr {
-			if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
-				objVal = block.NewLoad(pt.ElemType, objVal)
-			}
-		}
-
-		// Trait fat-pointer dispatch: if obj is {i8*, vtable*}, use vtable.
-		if traitName, ok := cg.isTraitFatPtr(objVal.Type()); ok {
-			result, err := cg.callTraitMethod(block, objVal, traitName, fn.Field, e.Args)
-			if err != nil {
-				return nil, cg.nodeErr(e, "%v", err)
-			}
-
-			return result, nil
-		}
-		// Auto-deref: *TraitFatPtr -> load the fat pointer and dispatch through vtable.
-		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
-			if traitName, ok2 := cg.isTraitFatPtr(pt.ElemType); ok2 {
-				loaded := block.NewLoad(pt.ElemType, objVal)
-
-				result, err := cg.callTraitMethod(block, loaded, traitName, fn.Field, e.Args)
-				if err != nil {
-					return nil, cg.nodeErr(e, "%v", err)
-				}
-
-				return result, nil
-			}
-		}
-
-		// Concrete struct method: resolve as StructName_method.
-		// When obj is a pointer-to-struct (*T), use the pointee's name for method
-		// lookup but keep objVal as the pointer (the thisArg logic below handles it).
-		objLookupType := objVal.Type()
-		if pt, ok := objLookupType.(*irtypes.PointerType); ok {
-			if cg.typeNameOf(pt.ElemType) != "" {
-				objLookupType = pt.ElemType
-			}
-		}
-
-		structName := cg.typeNameOf(objLookupType)
-		methodName := structName + "_" + fn.Field
-
-		// Overloaded method: evaluate args first to pick the best variant.
-		if variants, hasOverloads := cg.overloads[methodName]; hasOverloads {
-			argVals := make([]value.Value, 0, len(e.Args))
-			for _, arg := range e.Args {
-				av, err2 := cg.genExpr(block, arg)
-				if err2 != nil {
-					return nil, err2
-				}
-
-				argVals = append(argVals, av)
-
-				if cg.curBlock != nil && cg.curBlock != block {
-					block = cg.curBlock
-				}
-			}
-
-			best := cg.resolveOverload(variants, argVals)
-			if best == nil {
-				return nil, cg.nodeErr(e, "no matching overload for %s.%s (got %d arg(s))", prettyStructName(structName), fn.Field, len(argVals))
-			}
-
-			oEntry, oOk := cg.curScope.lookup(best.irName)
-			if !oOk {
-				return nil, cg.nodeErr(e, "overload %s not found in scope", best.irName)
-			}
-
-			var ovCallee value.Value
-
-			if oEntry.isAlloc {
-				ptrType := oEntry.val.Type().(*irtypes.PointerType)
-				ovCallee = block.NewLoad(ptrType.ElemType, oEntry.val)
-			} else {
-				ovCallee = oEntry.val
-			}
-			// Static method called on an instance: don't pass the instance as receiver.
-			ovIsStatic := false
-			if f, ok2 := ovCallee.(*ir.Func); ok2 {
-				ovIsStatic = cg.isStaticMethodIR(f, structName)
-			}
-
-			var llArgs []value.Value
-			if ovIsStatic {
-				llArgs = make([]value.Value, 0, len(argVals))
-				llArgs = append(llArgs, argVals...)
-			} else {
-				// Build thisArg (pointer receiver if needed).
-				thisArg := objVal
-
-				if f, ok2 := ovCallee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
-					firstParam := f.Sig.Params[0]
-					if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
-						if pt.ElemType.Equal(objVal.Type()) {
-							if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
-								thisArg = lv
-							} else {
-								tmp := block.NewAlloca(objVal.Type())
-								block.NewStore(objVal, tmp)
-								thisArg = tmp
-							}
-						}
-					}
-				}
-
-				llArgs = make([]value.Value, 0, len(argVals)+1)
-				llArgs = append(llArgs, thisArg)
-				llArgs = append(llArgs, argVals...)
-			}
-
-			if f, ok2 := ovCallee.(*ir.Func); ok2 {
-				llArgs = cg.adaptArgs(block, llArgs, f.Sig)
-			}
-
-			result := block.NewCall(ovCallee, llArgs...)
-			// ARC: release temporary RC-tracked args (same logic as genCallExpr bottom).
-			thisOff := 1
-			if ovIsStatic {
-				thisOff = 0
-			}
-
-			for i, astArg := range e.Args {
-				if i >= len(argVals) || i+thisOff >= len(llArgs) {
-					break
-				}
-
-				cg.emitCallArgReleaseForRet(block, astArg, argVals[i], llArgs[i+thisOff], result.Type())
-			}
-
-			// ARC: release temporary struct receiver (method chain temporaries).
-			if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
-				cg.emitRelease(block, objVal)
-			}
-
-			if irtypes.IsVoid(result.Type()) {
-				return nil, nil
-			}
-
-			return result, nil
-		}
-
-		entry, ok := cg.curScope.lookup(methodName)
-		if !ok {
-			// Check for a generic method template (e.g. map_opt[r] on option__i64).
-			if tmpl, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod {
-				// Evaluate call arguments.
-				callArgs := make([]value.Value, 0, len(e.Args))
-				for _, arg := range e.Args {
-					av, err2 := cg.genExpr(block, arg)
-					if err2 != nil {
-						return nil, err2
-					}
-
-					callArgs = append(callArgs, av)
-
-					if cg.curBlock != nil && cg.curBlock != block {
-						block = cg.curBlock
-					}
-				}
-				// Build arg list for type inference: this + call args.
-				inferArgs := make([]value.Value, 0, len(callArgs)+1)
-				inferArgs = append(inferArgs, objVal)
-				inferArgs = append(inferArgs, callArgs...)
-				typeSubst := cg.inferTypeArgs(tmpl, inferArgs)
-				instKey := ""
-
-				for i, tp := range tmpl.TypeParams {
-					if i > 0 {
-						instKey += "__"
-					}
-
-					if name, found := typeSubst[tp]; found {
-						instKey += name
-					} else {
-						instKey += tp
-					}
-				}
-				// Monomorphize: use the full method scope name as the function name so
-				// the IR name becomes "structName_methodName__instKey".
-				tmplCopy := *tmpl
-				tmplCopy.Name = methodName
-
-				concreteFunc, err2 := cg.monomorphizeFunc(&tmplCopy, instKey, typeSubst)
-				if err2 != nil {
-					return nil, err2
-				}
-				// Build LLVM call args: this + call args, adapted to signature.
-				thisArg := objVal
-
-				if len(concreteFunc.Sig.Params) > 0 {
-					if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr {
-						if pt.ElemType.Equal(objVal.Type()) {
-							if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
-								thisArg = lv
-							} else {
-								tmp := block.NewAlloca(objVal.Type())
-								block.NewStore(objVal, tmp)
-								thisArg = tmp
-							}
-						}
-					}
-				}
-
-				llArgs := make([]value.Value, 0, len(callArgs)+1)
-				llArgs = append(llArgs, thisArg)
-				llArgs = append(llArgs, callArgs...)
-				llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
-				result := block.NewCall(concreteFunc, llArgs...)
-				// ARC: release temporary RC-tracked call arguments (index 1+ in llArgs; 0 is this).
-				for i, astArg := range e.Args {
-					if i >= len(callArgs) || i+1 >= len(llArgs) {
-						break
-					}
-
-					cg.emitCallArgReleaseForRet(block, astArg, callArgs[i], llArgs[i+1], result.Type())
-				}
-
-				// ARC: release temporary struct receiver (method chain temporaries).
-				if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
-					cg.emitRelease(block, objVal)
-				}
-
-				if irtypes.IsVoid(result.Type()) {
-					return nil, nil
-				}
-
-				return result, nil
-			}
-			// Also check without prefix.
-			entry, ok = cg.curScope.lookup(fn.Field)
-		}
-
-		if ok {
-			if entry.isAlloc {
-				ptrType := entry.val.Type().(*irtypes.PointerType)
-				callee = block.NewLoad(ptrType.ElemType, entry.val)
-			} else {
-				callee = entry.val
-			}
-			// Static method called on an instance: skip the instance receiver.
-			instIsStatic := false
-			if f, ok2 := callee.(*ir.Func); ok2 {
-				instIsStatic = cg.isStaticMethodIR(f, structName)
-			}
-
-			var llArgs []value.Value
-
-			llArgsPreCoerce := make([]value.Value, 0, len(e.Args))
-			if instIsStatic {
-				llArgs = make([]value.Value, 0, len(e.Args))
-				for _, arg := range e.Args {
-					av, err := cg.genExpr(block, arg)
-					if err != nil {
-						return nil, err
-					}
-
-					llArgs = append(llArgs, av)
-					llArgsPreCoerce = append(llArgsPreCoerce, av)
-
-					if cg.curBlock != nil && cg.curBlock != block {
-						block = cg.curBlock
-					}
-				}
-			} else {
-				// Determine the first argument: if the method expects a pointer
-				// receiver (*Struct), pass the address of the object rather than
-				// its value so that mutations through `this` are visible to the caller.
-				thisArg := objVal
-
-				if f, ok2 := callee.(*ir.Func); ok2 && len(f.Sig.Params) > 0 {
-					firstParam := f.Sig.Params[0]
-					if pt, isPtr := firstParam.(*irtypes.PointerType); isPtr {
-						if pt.ElemType.Equal(objVal.Type()) {
-							// Try to get the lvalue (alloca) for the receiver expression.
-							if lv, err2 := cg.genLValue(block, fn.Expr); err2 == nil {
-								thisArg = lv
-							} else {
-								// Fallback: store to a temp alloca (mutations are lost,
-								// but this keeps the call type-correct).
-								tmp := block.NewAlloca(objVal.Type())
-								block.NewStore(objVal, tmp)
-								thisArg = tmp
-							}
-						}
-					}
-				}
-
-				llArgs = make([]value.Value, 0, len(e.Args)+1)
-				llArgs = append(llArgs, thisArg)
-
-				for _, arg := range e.Args {
-					av, err := cg.genExpr(block, arg)
-					if err != nil {
-						return nil, err
-					}
-
-					llArgs = append(llArgs, av)
-					llArgsPreCoerce = append(llArgsPreCoerce, av)
-
-					if cg.curBlock != nil && cg.curBlock != block {
-						block = cg.curBlock
-					}
-				}
-			}
-			// Call-site generics: when the called method's return type
-			// originally contained a wildcard slot and a return-type hint
-			// differs from the callee's actual return type, route through
-			// the per-target monomorphization so the call's result is
-			// directly the target shape (no caller-side rewrap).
-			if f, ok2 := callee.(*ir.Func); ok2 {
-				if decl := cg.funcDecls[methodName]; decl != nil && decl.RetTypeHasWildcard {
-					if cg.returnTypeHint == nil {
-						return nil, cg.nodeErr(e,
-							"%s.%s has a wildcard slot in its return type that needs context to fill (a let-binding type annotation, the enclosing function's return type, or an argument type expectation). Annotate the receiving binding (e.g. `let x %s = ...`) or call the method through `try` inside a function whose return type fixes the slot.",
-							prettyStructName(structName), strings.TrimPrefix(methodName, structName+"_"),
-							prettyStructName(structName))
-					}
-
-					if !cg.returnTypeHint.Equal(f.Sig.RetType) {
-						bareMethod := strings.TrimPrefix(methodName, structName+"_")
-						if monoFn, ok3 := cg.ensureWildcardMono(structName, bareMethod, objVal.Type(), cg.returnTypeHint); ok3 {
-							callee = monoFn
-						}
-					}
-				}
-			}
-
-			// Adapt arg types to function signature.
-			if f, ok2 := callee.(*ir.Func); ok2 {
-				calleeType = f.Sig
-				llArgs = cg.adaptArgs(block, llArgs, calleeType)
-			}
-
-			// Auto-yield before calling a heavy or recursive method.
-			block = cg.genCallSiteYieldFor(block, methodName)
-
-			result := block.NewCall(callee, llArgs...)
-			// ARC: release temporary RC-tracked args.
-			thisOff := 1
-			if instIsStatic {
-				thisOff = 0
-			}
-
-			for i, astArg := range e.Args {
-				if i >= len(llArgsPreCoerce) || i+thisOff >= len(llArgs) {
-					break
-				}
-
-				cg.emitCallArgReleaseForRet(block, astArg, llArgsPreCoerce[i], llArgs[i+thisOff], result.Type())
-			}
-
-			// ARC: release temporary struct receiver (method chain temporaries).
-			// When the receiver is a temporary produced by a call (e.g. foo().bar()),
-			// the struct returned by foo() has its RC fields retained by foo's return
-			// but is never stored in a named variable and thus never released at scope
-			// exit.  Release it here to balance the retain emitted by foo's return.
-			if !fn.IsPtr && isTemporaryProducer(fn.Expr) {
-				cg.emitRelease(block, objVal)
-			}
-
-			if irtypes.IsVoid(result.Type()) {
-				return nil, nil
-			}
-
-			return result, nil
-		}
-		// Fallback: the "method" might be a callable function field on the struct.
-		// e.g. struct handler { validate fn(i64) bool } called as h.validate(x).
-		if _, isStruct := objVal.Type().(*irtypes.StructType); isStruct {
-			alloca := block.NewAlloca(objVal.Type())
-			block.NewStore(objVal, alloca)
-
-			gep := cg.emitFieldGEP(block, alloca, structName, fn.Field)
-			if gep != nil {
-				if pt, ok := gep.Type().(*irtypes.PointerType); ok {
-					fieldVal := block.NewLoad(pt.ElemType, gep)
-					if isFatFnPtr(fieldVal.Type()) {
-						return cg.callFatFn(block, fieldVal, e.Args)
-					}
-				}
-			}
-		}
-
-		if witnesses, stripped := cg.deadStrippedMethods[structName][fn.Field]; stripped {
-			return nil, cg.nodeErr(e, "%s.%s %s",
-				prettyStructName(structName), fn.Field, formatStripWitnesses(witnesses))
-		}
-
-		if _, isPtr := objLookupType.(*irtypes.PointerType); isPtr {
-			return nil, cg.nodeErr(e, "undefined method: %s.%s (possible missing dereference)", prettyStructName(structName), fn.Field)
-		}
-
-		return nil, cg.nodeErr(e, "undefined method: %s.%s", prettyStructName(structName), fn.Field)
+		return cg.genCallFieldAccess(block, e, fn)
 
 	case *ast.ScopeAccess:
 		// Macro call through a qualified path (e.g. `log::info!(l, "x")`,
@@ -1023,12 +531,12 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					}
 
 					concreteName := bareBaseName + "__" + strings.Join(resolvedParts, "__")
-					if _, alreadyDone := cg.structTypes[concreteName]; !alreadyDone {
+					if cg.structTypeFor(CanonKey(concreteName)) == nil {
 						if mErr := cg.genTypeDecl(&ast.TypeDecl{
 							Name: concreteName,
 							Type: &ast.GenericType{Name: bareBaseName, TypeParams: resolvedTEs},
 						}); mErr != nil {
-							return nil, cg.nodeErr(e, "instantiating %s: %v", prettyStructName(concreteName), mErr)
+							return nil, cg.nodeErr(e, "instantiating %s: %v", cg.diagStructName(concreteName), mErr)
 						}
 					}
 
@@ -1051,7 +559,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						best := cg.resolveOverload(variants, olArgs)
 						if best == nil {
 							return nil, cg.nodeErr(e, "no matching overload for %s[%s]::%s (got %d arg(s))",
-								prettyStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
+								cg.diagStructName(bareBaseName), strings.Join(resolvedParts, ", "), methodField, len(olArgs))
 						}
 
 						oEntry, oOk := cg.curScope.lookup(best.irName)
@@ -1067,6 +575,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 						} else {
 							ovCallee = oEntry.val
 						}
+
+						cg.applyAutoCopyToArgVals(block, e.Args, olArgs)
 
 						preCoerceVals := append([]value.Value(nil), olArgs...)
 						if f2, ok2 := ovCallee.(*ir.Func); ok2 {
@@ -1144,6 +654,8 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					} else {
 						ovCallee = oEntry.val
 					}
+
+					cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 
 					argValsPreCoerce := append([]value.Value(nil), argVals...)
 					if f, ok2 := ovCallee.(*ir.Func); ok2 {
@@ -1270,7 +782,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			// substituted (e.g. a recursive call like _encode_any[T](...) inside
 			// _encode_any__jt_rect), resolve it to the concrete type so we don't
 			// create a self-referential alias ("T" -> "T") that causes infinite recursion.
-			if alias, ok := cg.typeAliases[typeArgName]; ok {
+			if alias := cg.aliasTypeFor(CanonKey(typeArgName)); alias != nil {
 				if st, ok2 := alias.(*ast.SimpleType); ok2 && st.Name != typeArgName {
 					typeArgName = st.Name
 				}
@@ -1298,8 +810,45 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 				usedQual := false
 
+				// When the candidate set under either key has >1 entry
+				// the arity-only picker can't disambiguate.  Eval args
+				// once up front and pass LLVM types so pickGenericFunc-
+				// Overload can rank by param shape (matches the bare-
+				// name path above).  The eval'd argVals are stashed in
+				// preEvaledArgVals so the later monomorphization path
+				// can reuse them without re-running side effects.
+				var preEvaledArgTypes []irtypes.Type
+
+				if (qualFuncName != "" && len(cg.genericFuncOverloads[qualFuncName]) > 1) ||
+					len(cg.genericFuncOverloads[funcName]) > 1 {
+					if cg.preEvaledArgVals == nil {
+						vals := make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err2 := cg.genExpr(block, arg)
+							if err2 != nil {
+								return nil, err2
+							}
+
+							vals = append(vals, av)
+
+							if cg.curBlock != nil && cg.curBlock != block {
+								block = cg.curBlock
+							}
+						}
+
+						cg.preEvaledArgVals = vals
+					}
+
+					preEvaledArgTypes = make([]irtypes.Type, len(cg.preEvaledArgVals))
+					for i, v := range cg.preEvaledArgVals {
+						if v != nil {
+							preEvaledArgTypes[i] = v.Type()
+						}
+					}
+				}
+
 				if qualFuncName != "" {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[qualFuncName], len(e.Args)); ov != nil {
+					if ov := pickGenericFuncOverloadHinted(cg.genericFuncOverloads[qualFuncName], len(e.Args), preEvaledArgTypes, cg.pipeCurriedRetHint); ov != nil {
 						tmpl = ov
 						isGeneric = true
 						usedQual = true
@@ -1311,7 +860,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if !isGeneric {
-					if ov := pickGenericFuncOverload(cg.genericFuncOverloads[funcName], len(e.Args)); ov != nil {
+					if ov := pickGenericFuncOverloadHinted(cg.genericFuncOverloads[funcName], len(e.Args), preEvaledArgTypes, cg.pipeCurriedRetHint); ov != nil {
 						tmpl = ov
 						isGeneric = true
 					} else if g, ok := cg.genericFuncs[funcName]; ok {
@@ -1339,8 +888,35 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				}
 
 				if isGeneric && len(tmpl.TypeParams) > 0 {
-					typeSubst := map[string]string{tmpl.TypeParams[0]: typeArgName}
-					instKey := typeArgName
+					// Multi-arg generic instantiation: `f[T1, T2](args)` is
+					// parsed as IndexExpr{Index: Identifier{Name: "T1, T2"}}.
+					// Split on commas so every template param gets a
+					// substitution; without this only TypeParams[0] was
+					// bound, leaving the rest pointing at stale aliases
+					// (or unresolved) and downstream resolves to garbage.
+					typeArgParts := splitTopLevelTypeArgs(typeArgName)
+					typeSubst := make(map[string]TypeName, len(tmpl.TypeParams))
+					instKey := ""
+
+					for i, tp := range tmpl.TypeParams {
+						if i >= len(typeArgParts) {
+							break
+						}
+
+						partTE := typeArgParts[i]
+						partCanon := cg.typeExprCanonicalKey(partTE)
+						typeSubst[tp] = cg.typeNameFromCanon(partCanon)
+
+						if i > 0 {
+							instKey += "__"
+						}
+
+						instKey += partCanon
+					}
+
+					if instKey == "" {
+						instKey = typeArgName
+					}
 
 					concreteFunc, err2 := cg.monomorphizeFunc(tmpl, instKey, typeSubst)
 					if usedQual && savedHome != nil {
@@ -1350,24 +926,33 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 					if err2 != nil {
 						return nil, err2
 					}
-					// Build argument list and call
-					argVals := make([]value.Value, 0, len(e.Args))
-					for _, arg := range e.Args {
-						av, err3 := cg.genExpr(block, arg)
-						if err3 != nil {
-							return nil, err3
-						}
+					// Build argument list and call.  Reuse args eval'd
+					// during overload disambiguation when available so
+					// side effects don't fire twice.
+					var argVals []value.Value
+					if cg.preEvaledArgVals != nil {
+						argVals = cg.preEvaledArgVals
+						cg.preEvaledArgVals = nil
+					} else {
+						argVals = make([]value.Value, 0, len(e.Args))
+						for _, arg := range e.Args {
+							av, err3 := cg.genExpr(block, arg)
+							if err3 != nil {
+								return nil, err3
+							}
 
-						argVals = append(argVals, av)
+							argVals = append(argVals, av)
 
-						if cg.curBlock != nil && cg.curBlock != block {
-							block = cg.curBlock
+							if cg.curBlock != nil && cg.curBlock != block {
+								block = cg.curBlock
+							}
 						}
 					}
 
+					cg.applyAutoCopyToArgVals(block, e.Args, argVals)
 					preCoerceVals := append([]value.Value(nil), argVals...)
 					argVals = cg.adaptArgs(block, argVals, concreteFunc.Sig)
-					result2 := block.NewCall(concreteFunc, argVals...)
+					result2 := block.NewCall(cg.resolveColoredFn(concreteFunc), argVals...)
 					// ARC: release temporary RC-tracked arguments.
 					for i, astArg := range e.Args {
 						if i >= len(preCoerceVals) {
@@ -1478,7 +1063,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", pt.ElemType)
 		}
 	} else {
-		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", fmtArgType(callee.Type()))
+		return nil, cg.nodeErr(e, "cannot call non-function value (type %s)", cg.fmtArgType(callee.Type()))
 	}
 
 	// Arity check: non-variadic functions must receive exactly the declared number of args.
@@ -1517,6 +1102,25 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 	}
 
 	if calleeType != nil {
+		// Pre-marshal `[string]` / `[atom]` args targeting a C
+		// `char**` param.  The inline marshaler emits a stack
+		// alloca + fill-loop and updates the current block to the
+		// loop-exit, so subsequent arg-prep, the call itself, and
+		// any post-call cleanup all land after the marshal.
+		for i, arg := range llArgs {
+			if i >= len(calleeType.Params) {
+				continue
+			}
+
+			if cg.needsCstrArrMarshal(arg, calleeType.Params[i]) {
+				isAtom := isAtomType(
+					arg.Type().(*irtypes.StructType).Fields[0].(*irtypes.PointerType).ElemType,
+				)
+				llArgs[i], block = cg.marshalArrayToCstrArr(block, arg, isAtom)
+			}
+		}
+
+		cg.applyAutoCopyToArgVals(block, e.Args, llArgs)
 		llArgs = cg.adaptArgs(block, llArgs, calleeType)
 
 		// Strict per-argument type check. Fires for clear mismatches
@@ -1551,9 +1155,62 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 				if !srcEl.Equal(tgtEl) && !srcEl.Equal(irtypes.I8) {
 					return nil, cg.nodeErr(e,
 						"argument %d: cannot pass [%s] where [%s] is expected; use %q to convert",
-						i+1, fmtArgType(srcEl), fmtArgType(tgtEl),
-						"arg as ["+fmtArgType(tgtEl)+"]")
+						i+1, cg.fmtArgType(srcEl), cg.fmtArgType(tgtEl),
+						"arg as ["+cg.fmtArgType(tgtEl)+"]")
 				}
+
+				continue
+			}
+			// Tin fn -> C extern fn-ptr arg.  `tinTypeToExternLLVM`
+			// lowers a Tin `fn(...) T` param to `i8*` at the C ABI
+			// boundary (a raw C function pointer).  At the call site,
+			// we still have the fat-fn-ptr value; route it through
+			// `tin_make_trampoline` to produce a C-callable thunk
+			// that bakes in the closure env via the runtime
+			// register-stash mechanism.  Same mechanism as the
+			// `#interop` return-fn path at codegen/interop.go:970.
+			if isFatFnPtr(arg.Type()) && pt.Equal(irtypes.I8Ptr) {
+				wrapped, wrapErr := cg.wrapFatFnPtrAsCCallback(block, callee, i, arg, e)
+				if wrapErr != nil {
+					return nil, wrapErr
+				}
+
+				if wrapped != nil {
+					llArgs[i] = wrapped
+
+					continue
+				}
+			}
+			// Tin *fn(...) T -> C `fn_t *cbp` arg.  Lowered to `i8**`.
+			// Source is `&cb` (LLVM `*{fn(...), env}`).  Load the
+			// fat-fn-ptr, build the trampoline, store the trampoline
+			// `i8*` in a fresh stack slot, pass the slot's address.
+			if argPt, isPtr := arg.Type().(*irtypes.PointerType); isPtr {
+				if isFatFnPtr(argPt.ElemType) && pt.Equal(irtypes.NewPointer(irtypes.I8Ptr)) {
+					wrapped, wrapErr := cg.wrapFatFnPtrAddrAsCCallbackPtr(block, callee, i, arg, e)
+					if wrapErr != nil {
+						return nil, wrapErr
+					}
+
+					if wrapped != nil {
+						llArgs[i] = wrapped
+
+						continue
+					}
+				}
+			}
+
+			// *TinStruct -> *<S>.native: pass a pointer to the user-
+			// fields region of the Tin allocation.  The fields appear
+			// in the same order and types in both layouts (Tin just
+			// prefixes a typeid + vtable header), so a GEP to the
+			// first user field + bitcast to the native pointer type
+			// is bit-identical to what C expects.  C writes hit the
+			// real Tin storage so out-params propagate.  Limited to
+			// ABI-compat structs (no fat-ptr / fn fields, which have
+			// different shapes in the two layouts).
+			if adapted := cg.adaptTinPtrToNativePtr(block, arg, pt); adapted != nil {
+				llArgs[i] = adapted
 
 				continue
 			}
@@ -1564,7 +1221,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 
 			return nil, cg.nodeErr(e,
 				"argument %d: cannot pass %s where %s is expected",
-				i+1, fmtArgType(arg.Type()), fmtArgType(pt))
+				i+1, cg.fmtArgType(arg.Type()), cg.fmtArgType(pt))
 		}
 	}
 
@@ -1574,7 +1231,29 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		block = cg.genCallSiteYieldFor(block, f.Name())
 	}
 
-	result := block.NewCall(callee, llArgs...)
+	// cLayoutStruct-value-returning wrapper: the wrapper returns the
+	// C-layout %Native struct directly.  The call site allocates the
+	// storage (stack composite + IMMORTAL_RC sentinel for non-escape,
+	// _tin_rc_alloc'd [wrapper | native] block for escape), stores the
+	// native into it, and stamps the Tin wrapper value (typeid + zero
+	// vtables + c_data_ptr) inline.  The release path uses
+	// _tin_release(c_data_ptr - sizeof(wrapper)), which lands on the
+	// sentinel for stack mode and on the rc-alloc header for heap mode.
+	var cLayoutNativeReturnStruct string
+
+	if f, ok := callee.(*ir.Func); ok {
+		if sName, has := cg.cLayoutWrapperNativeReturnFns[f.Name()]; has {
+			cLayoutNativeReturnStruct = sName
+		}
+	}
+
+	var result value.Value = block.NewCall(callee, llArgs...)
+
+	if cLayoutNativeReturnStruct != "" {
+		nativePtr := cg.allocCLayoutReturnBuffer(block, cLayoutNativeReturnStruct, e)
+		block.NewStore(result, nativePtr)
+		result = cg.buildCLayoutWrapperValue(block, nativePtr, cLayoutNativeReturnStruct)
+	}
 
 	// Auto-suspend after externs that put the calling fiber in a
 	// pending-park state (e.g. `_tin_sleep_ms` registers a timer and
@@ -1627,438 +1306,85 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 //   - target is a fat-fn-ptr and src is a function pointer (closure shim)
 //   - both sides are pointer types of compatible underlying shape (ABI is
 //     the pointer width either way)
-func (cg *CodeGen) argTypeImplicitlyOK(src, pt irtypes.Type) bool {
-	if isAnyType(pt) {
-		return true
-	}
 
-	if _, ok := cg.isTraitFatPtr(pt); ok {
-		return true
-	}
-
-	if isFatFnPtr(pt) {
-		return true
-	}
-	// Implicit-conversion functions registered for the target type.
-	if name := cg.typeNameOf(pt); name != "" {
-		for _, e := range cg.implicitConvFns[name] {
-			if e.srcLLVM.Equal(src) {
-				return true
-			}
-		}
-	}
-	// Raw C-pointer / fat-ptr extraction shims.
-	if _, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
-		if _, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
-			return true
-		}
-	}
-
-	if isFatPtrType(src) {
-		if _, tgtIsPtr := pt.(*irtypes.PointerType); tgtIsPtr {
-			return true
-		}
-	}
-
-	if isFatPtrType(pt) {
-		if _, srcIsPtr := src.(*irtypes.PointerType); srcIsPtr {
-			return true
-		}
-	}
-	// Same-size integer types (e.g. i32 vs u32 / char vs i8): coerce
-	// returned the value unchanged because the bit width matches and the
-	// runtime ABI passes them identically.
-	if srcInt, ok := src.(*irtypes.IntType); ok {
-		if tgtInt, ok2 := pt.(*irtypes.IntType); ok2 && srcInt.BitSize == tgtInt.BitSize {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (cg *CodeGen) adaptArgs(block *ir.Block, args []value.Value, sig *irtypes.FuncType) []value.Value {
-	if sig == nil {
-		return args
-	}
-
-	result := make([]value.Value, len(args))
-	for i, arg := range args {
-		if i < len(sig.Params) {
-			result[i] = cg.coerce(block, arg, sig.Params[i])
-		} else if sig.Variadic && arg != nil && isAtomType(arg.Type()) {
-			// Variadic position: atoms must become i8* (the atom string rep).
-			code := cg.extractAtomCode(block, arg)
-			strFatPtr := block.NewCall(cg.ensureAtomToString(), code)
-			result[i] = cg.extractFatPtrData(block, strFatPtr, stringFatPtrType())
-		} else if sig.Variadic && arg != nil && isFatPtrType(arg.Type()) {
-			// Variadic position: fat-ptrs are not valid C varargs - unwrap to
-			// the underlying raw pointer so printf-style calls work correctly.
-			result[i] = cg.extractFatPtrData(block, arg, arg.Type().(*irtypes.StructType))
-		} else {
-			result[i] = arg
-		}
-	}
-
-	return result
-}
-
-func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Value, error) {
-	if _, isNil := e.Expr.(*ast.NilLit); isNil {
-		return nil, cg.nodeErr(e, "field access on nil literal")
-	}
-
-	// Check if this is an enum member access: EnumName.Member or pkg::EnumName.Member
-	var enumBaseName string
-
-	switch base := e.Expr.(type) {
-	case *ast.Identifier:
-		enumBaseName = base.Name
-	case *ast.ScopeAccess:
-		// pkg::EnumName.Member - use the last path element as the enum name.
-		if len(base.Path) > 0 {
-			enumBaseName = base.Path[len(base.Path)-1]
-		}
-	}
-
-	if enumBaseName != "" {
-		key := enumBaseName + "." + e.Field
-		if val, ok2 := cg.enumValues[key]; ok2 {
-			baseType := cg.enumTypes[enumBaseName]
-			if it, ok3 := baseType.(*irtypes.IntType); ok3 {
-				return constant.NewInt(it, val), nil
-			}
-			// Atom enum: wrap i32 code in %__atom struct.
-			if isAtomType(baseType) {
-				return cg.atomConstant(int32(val)), nil
-			}
-
-			return constant.NewInt(irtypes.I32, val), nil
-		}
-	}
-
-	obj, err := cg.genExpr(block, e.Expr)
-	if err != nil {
-		return nil, err
-	}
-
-	if obj == nil {
-		return nil, nil
-	}
-
-	// If pointer, dereference first.
-	objType := obj.Type()
-	if e.IsPtr {
-		if pt, ok := objType.(*irtypes.PointerType); ok {
-			obj = block.NewLoad(pt.ElemType, obj)
-			objType = pt.ElemType
-		}
-	}
-	// Auto-deref: when obj is a pointer-to-named-struct, dereference it even
-	// without the -> operator.  This handles pointer receiver methods where
-	// `this *Foo` fields are accessed with `this.field` rather than `this->field`.
-	if !e.IsPtr {
-		if pt, ok := objType.(*irtypes.PointerType); ok {
-			if cg.typeNameOf(pt.ElemType) != "" {
-				obj = block.NewLoad(pt.ElemType, obj)
-				objType = pt.ElemType
-			}
-		}
-	}
-
-	// Handle .len on dynamic arrays {T*, i64} and strings {i8*, i64}.
-	if e.Field == "len" && (isFatArrayPtr(objType) || isStringType(objType)) {
-		return block.NewExtractValue(obj, 1), nil
-	}
-
-	structName := cg.typeNameOf(objType)
-
-	// Native union field access: bitcast storage to member type and load.
-	if ud, isNative := cg.nativeUnionDecls[structName]; isNative {
-		for _, m := range ud.Members {
-			if m.FieldName == e.Field {
-				memberLLVM, err2 := cg.tinTypeToLLVM(m.Type)
-				if err2 != nil {
-					return nil, err2
-				}
-
-				alloca := block.NewAlloca(objType)
-				block.NewStore(obj, alloca)
-				storageGEP := block.NewGetElementPtr(objType, alloca,
-					constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-				memberPtr := block.NewBitCast(storageGEP, irtypes.NewPointer(memberLLVM))
-
-				return block.NewLoad(memberLLVM, memberPtr), nil
-			}
-		}
-
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
-	}
-
-	// Handle field access on %S.native values: embedded cLayoutStruct fields.
-	// These arise when reading a cLayoutStruct field that itself is a cLayoutStruct
-	// (e.g. outer_t.a where a is inner_t, both cLayoutStructs). We already have the
-	// native value; GEP directly without going through c_data_ptr.
-	if strings.HasSuffix(structName, ".native") {
-		baseName := strings.TrimSuffix(structName, ".native")
-
-		fieldIdx := cg.nativeFieldIndex(baseName, e.Field)
-		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
-		}
-
-		nativeSt := cg.nativeStructTypes[baseName]
-		if nativeSt != nil {
-			alloca := block.NewAlloca(nativeSt)
-			block.NewStore(obj, alloca)
-
-			gep := block.NewGetElementPtr(nativeSt, alloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-			if fieldIdx < len(nativeSt.Fields) {
-				return block.NewLoad(nativeSt.Fields[fieldIdx], gep), nil
-			}
-		}
-
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
-	}
-
-	if cg.cLayoutStructs[structName] {
-		// cLayoutStruct: store to alloca then access through c_data_ptr.
-		alloca := block.NewAlloca(objType)
-		block.NewStore(obj, alloca)
-
-		fieldIdx := cg.nativeFieldIndex(structName, e.Field)
-		if fieldIdx < 0 {
-			return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
-		}
-
-		gep := cg.emitCLayoutFieldPtr(block, alloca, structName, fieldIdx)
-
-		nativeSt := cg.nativeStructTypes[structName]
-		if nativeSt != nil && fieldIdx < len(nativeSt.Fields) {
-			return block.NewLoad(nativeSt.Fields[fieldIdx], gep), nil
-		}
-
-		return block.NewLoad(irtypes.I64, gep), nil
-	}
-
-	fieldIdx := cg.fieldIndex(structName, e.Field)
-	if fieldIdx < 0 {
-		// Not a struct field -- check if it is a bound method reference.
-		// `f.method` where f is of struct type Foo synthesizes a closure that
-		// captures the receiver and calls Foo_method(receiver, args...).
-		if bm, err2 := cg.genBoundMethod(block, e.Expr, obj, structName, e.Field); err2 == nil && bm != nil {
-			return bm, nil
-		}
-
-		return nil, cg.nodeErr(e, "unknown field %s.%s", prettyStructName(structName), e.Field)
-	}
-
-	// We need a pointer to the struct to do GEP.
-	alloca := block.NewAlloca(objType)
-	block.NewStore(obj, alloca)
-	gep := block.NewGetElementPtr(objType, alloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, int64(fieldIdx)))
-
-	// Load the field.
-	if st, ok := objType.(*irtypes.StructType); ok && fieldIdx < len(st.Fields) {
-		return block.NewLoad(st.Fields[fieldIdx], gep), nil
-	}
-
-	return block.NewLoad(irtypes.I64, gep), nil
-}
-
-func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value, error) {
-	// ptr[lo..hi] - range slice on a raw pointer: produce a fat-pointer [T].
-	if bin, ok := e.Index.(*ast.BinExpr); ok && bin.Op == ".." {
-		return cg.genPtrRangeSlice(block, e.Expr, bin.Left, bin.Right)
-	}
-
-	if length, ok := cg.staticArrayLen(e.Expr); ok {
-		cg.checkConstIndexBounds(e, length)
-	}
-
-	// For addressable fixed-size arrays: GEP directly into the original alloca
-	// without loading/copying the entire array. This is critical for arrays
-	// accessed inside loops - the load+alloca+store path allocates N*sizeof(T)
-	// bytes on the stack on every iteration, which is never freed until the
-	// function returns, causing a stack overflow over time.
-	if arrPtr, err2 := cg.genLValue(block, e.Expr); err2 == nil && arrPtr != nil {
-		if pt, ok := arrPtr.Type().(*irtypes.PointerType); ok {
-			if at, ok2 := pt.ElemType.(*irtypes.ArrayType); ok2 {
-				idx, err3 := cg.genExpr(block, e.Index)
-				if err3 != nil {
-					return nil, err3
-				}
-
-				if idx == nil {
-					return nil, nil
-				}
-
-				idx = cg.coerce(block, idx, irtypes.I64)
-				gep := block.NewGetElementPtr(at, arrPtr,
-					constant.NewInt(irtypes.I32, 0), idx)
-
-				return block.NewLoad(at.ElemType, gep), nil
-			}
-		}
-	}
-
-	arr, err := cg.genExpr(block, e.Expr)
-	if err != nil {
-		return nil, err
-	}
-
-	idx, err := cg.genExpr(block, e.Index)
-	if err != nil {
-		return nil, err
-	}
-
-	if arr == nil || idx == nil {
-		return nil, nil
-	}
-
-	idx = cg.coerce(block, idx, irtypes.I64)
-
-	// Check if it's a fat-ptr (dynamic array) or regular array.
-	arrType := arr.Type()
-
-	// SIMD vector: extractelement
-	if _, ok := arrType.(*irtypes.VectorType); ok {
-		idx32 := cg.coerce(block, idx, irtypes.I32)
-
-		return block.NewExtractElement(arr, idx32), nil
-	}
-
-	switch at := arrType.(type) {
-	case *irtypes.StructType:
-		if len(at.Fields) == 2 {
-			// Fat pointer: {T*, i64} - extract data pointer directly without alloca.
-			elemPtrType := at.Fields[0]
-
-			dataPtr := block.NewExtractValue(arr, 0)
-			if pt, ok := elemPtrType.(*irtypes.PointerType); ok {
-				elemGep := block.NewGetElementPtr(pt.ElemType, dataPtr, idx)
-
-				return block.NewLoad(pt.ElemType, elemGep), nil
-			}
-		}
-	case *irtypes.ArrayType:
-		alloca := block.NewAlloca(arrType)
-		block.NewStore(arr, alloca)
-		gep := block.NewGetElementPtr(arrType, alloca,
-			constant.NewInt(irtypes.I32, 0), idx)
-
-		return block.NewLoad(at.ElemType, gep), nil
-	case *irtypes.PointerType:
-		gep := block.NewGetElementPtr(at.ElemType, arr, idx)
-
-		return block.NewLoad(at.ElemType, gep), nil
-	}
-
-	// User struct (or *Struct) receiver: dispatch to ::index trait method
-	// when the struct implements index[K, R]. Mirror of dispatchBinOp's
-	// path - look up an op-trait impl keyed by (structName, "index")
-	// whose param type matches the index value, then emit the call.
-	//
-	// Comma-ok return convention (recommended): impls return a 2-tuple
-	// `(V, bool)` where the bool reports whether the key was present.
-	// At a tuple-destructure call site (`let (v, ok) = t[k]`) the raw
-	// tuple is passed through. At any other call site, codegen auto-
-	// unwraps: emits `if !ok: panic("...")` and substitutes V. Impls
-	// that return plain V (no comma-ok) are also accepted - value
-	// flows through unchanged.
-	if structName := cg.structNameForReceiver(arrType); structName != "" {
-		if fn := cg.lookupOpMethod(structName, "index", []irtypes.Type{idx.Type()}); fn != nil {
-			result, derr := cg.emitOpDispatch(block, fn, arr, []value.Value{idx})
-			if derr != nil {
-				return nil, derr
-			}
-
-			return cg.maybeUnwrapIndexTuple(block, e, result)
-		}
-
-		return nil, cg.nodeErr(e,
-			"type %s has no `::index` impl for index of type %s; declare `fn ::index(this %s, k %s) (V, bool)`",
-			cg.tinTypeDisplay(arrType), cg.tinTypeDisplay(idx.Type()),
-			cg.tinTypeDisplay(arrType), cg.tinTypeDisplay(idx.Type()))
-	}
-
-	return nil, cg.nodeErr(e, "type %s does not support index expressions", arrType)
-}
-
-// maybeUnwrapIndexTuple handles the comma-ok return convention from a
-// user `::index` impl. If `result` is a 2-field struct shaped like
-// `(V, bool)`, the function:
+// allocCLayoutReturnBuffer allocates the storage backing a cLayoutStruct
+// extern value return.  The wrapper writes the native bytes into the
+// returned pointer; c_data_ptr in the Tin wrapper value will point there.
 //
-//   - returns it as-is when codegen is currently inside a tuple-
-//     destructure VarDecl (cg.indexExprRawTuple); the destructure
-//     step will bind both halves.
-//   - otherwise extracts field 0 (V) and field 1 (bool), emits a
-//     branch that panics with a descriptive message when the bool
-//     is false, and returns V on the success path.
+// Stack mode (cg.nextCLayoutStackBind == structName): hoistAlloca a
+// {TinRCHdr | wrapper | native} composite on the caller's entry block,
+// write TIN_IMMORTAL_RC (-1) into the RCHdr slot once, and hand the
+// native portion's address to the wrapper.  The emitRelease(c_data_ptr -
+// sizeof(wrapper)) path reads the sentinel and skips, so the standard
+// release walker is correct without per-call rc traffic.
 //
-// If `result` is not shaped like `(V, bool)` (e.g. an impl that
-// returns plain V without comma-ok), it's returned unchanged.
-func (cg *CodeGen) maybeUnwrapIndexTuple(block *ir.Block, e *ast.IndexExpr, result value.Value) (value.Value, error) {
-	if result == nil {
-		return nil, nil
+// Heap mode (default): _tin_rc_alloc the [wrapper | native] block exactly
+// as the pre-out-param wrapper used to do internally; layout and release
+// math are unchanged.
+func (cg *CodeGen) allocCLayoutReturnBuffer(block *ir.Block, structName string, callExpr *ast.CallExpr) value.Value {
+	tinSt := cg.structTypeFor(CanonKey(structName))
+	nativeSt := cg.nativeStructTypes[structName]
+
+	if tinSt == nil || nativeSt == nil {
+		pos := ""
+
+		if callExpr != nil {
+			pos = fmt.Sprintf(" at %s", callExpr.Pos())
+		}
+
+		panic(fmt.Sprintf("internal: allocCLayoutReturnBuffer needs IR types for cLayoutStruct %q (tinSt=%v, nativeSt=%v)%s -- the wrapper was registered in cLayoutWrapperNativeReturnFns but the struct's LLVM types aren't lowered yet",
+			structName, tinSt != nil, nativeSt != nil, pos))
 	}
 
-	// Tin tuples are `{ i32 type_tag, T1, T2 }` - the (V, bool) pair
-	// lives at fields 1 and 2.
-	st, ok := result.Type().(*irtypes.StructType)
-	if !ok || len(st.Fields) != 3 {
-		return result, nil
+	if cg.nextCLayoutStackBind == structName {
+		// Consume the flag immediately so that nested cLayout extern calls
+		// inside the same let-binding RHS (e.g. `let d = c_outer(c_inner(...))`)
+		// don't all stack-bind -- only the outermost call's result is bound
+		// to the binding the escape analysis covered; the inner call's
+		// result flows into the outer's argument list and therefore escapes.
+		cg.nextCLayoutStackBind = ""
+
+		// Composite mirrors a heap rc-block: [TinRCHdr | wrapper | native]
+		// with the RCHdr slot sized to match the runtime's 16-byte header
+		// (TinRCHdr = { u32 rc; u32 flags; u64 _pad }).  `_tin_release(ptr)`
+		// reads `*(ptr - sizeof(TinRCHdr))` and checks `flags & IMMORTAL`,
+		// so the stack slot's first 8 bytes carry the IMMORTAL bit and the
+		// 8 bytes are padding -- writing the second half is optional but
+		// keeps the layout self-describing and crash-safe under valgrind.
+		// runtime/runtime.h pins sizeof(TinRCHdr) == 16 via _Static_assert
+		// -- if it fires, update the rcHdrTy here AND in genCLayoutStructLit
+		// in lockstep.
+		rcHdrTy := irtypes.NewArray(2, irtypes.I64)
+		compositeTy := irtypes.NewStruct(rcHdrTy, tinSt, nativeSt)
+		composite := cg.hoistAlloca(block, compositeTy)
+
+		// One-shot IMMORTAL_RC sentinel store in the same entry block the
+		// alloca lives in -- the slot's value never changes between calls,
+		// so a single write suffices and avoids per-call store traffic in
+		// hot loops.  Falls back to the current block if hoistAlloca
+		// couldn't reach an entry block.
+		entryBlock := block
+		if cg.curFn != nil && len(cg.curFn.Blocks) > 0 {
+			entryBlock = cg.curFn.Blocks[0]
+		}
+
+		rcFieldGep := entryBlock.NewGetElementPtr(compositeTy, composite,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0),
+			constant.NewInt(irtypes.I32, 0))
+		entryBlock.NewStore(constant.NewInt(irtypes.I64, -1), rcFieldGep)
+
+		nativePtr := block.NewGetElementPtr(compositeTy, composite,
+			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 2))
+
+		return nativePtr
 	}
 
-	okField := st.Fields[2]
-	if it, isInt := okField.(*irtypes.IntType); !isInt || it.BitSize != 1 {
-		return result, nil
-	}
+	wrapperSize := cg.llvmSizeOf(block, tinSt)
+	nativeSize := cg.llvmSizeOf(block, nativeSt)
+	totalSize := block.NewAdd(wrapperSize, nativeSize)
+	rcRaw := block.NewCall(cg.ensureRCAlloc(), totalSize)
+	tinPtr := block.NewBitCast(rcRaw, irtypes.NewPointer(tinSt))
+	overflow := block.NewGetElementPtr(tinSt, tinPtr, constant.NewInt(irtypes.I64, 1))
 
-	if cg.indexExprRawTuple {
-		return result, nil
-	}
-
-	val := block.NewExtractValue(result, 1)
-	okVal := block.NewExtractValue(result, 2)
-
-	panicBlock := cg.newBlock("idx.miss")
-	contBlock := cg.newBlock("idx.ok")
-
-	block.NewCondBr(okVal, contBlock, panicBlock)
-
-	msgPtr := cg.newGlobalString(indexMissMessage(e))
-	panicBlock.NewCall(cg.ensurePanicFn(), msgPtr)
-	panicBlock.NewUnreachable()
-
-	cg.curBlock = contBlock
-
-	return val, nil
-}
-
-// indexMissMessage formats the panic string for an unwrapped index miss.
-// Includes the AST source position to make the source line obvious.
-func indexMissMessage(e *ast.IndexExpr) string {
-	pos := e.Pos()
-
-	return fmt.Sprintf("index miss at %d:%d (no `(_, ok)` destructure to handle absent key)",
-		pos.Line, pos.Col)
-}
-
-// structNameForReceiver returns the named-struct identifier when t is a
-// struct or *Struct. Returns "" for any other shape. Used to drive
-// op-trait dispatch (::index, ::index_set) on receivers that can be
-// either a value-form struct or a pointer-to-struct.
-func (cg *CodeGen) structNameForReceiver(t irtypes.Type) string {
-	if isStructType(t) {
-		return cg.typeNameOf(t)
-	}
-
-	if pt, ok := t.(*irtypes.PointerType); ok && isStructType(pt.ElemType) {
-		return cg.typeNameOf(pt.ElemType)
-	}
-
-	return ""
+	return block.NewBitCast(overflow, irtypes.NewPointer(nativeSt))
 }

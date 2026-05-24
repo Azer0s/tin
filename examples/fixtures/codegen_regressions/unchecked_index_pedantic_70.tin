@@ -1,0 +1,9 @@
+// Regression: -Wunchecked-index (pedantic) fires on `arr[i]` for
+// a built-in array parameter when the index has no proven upper
+// bound on the current path.  The `if i < len(arr):` guard silences
+// the warning on the then branch via the boundsChecked dataflow fact.
+
+fn at(arr [i64], i i64) i64 =
+  return arr[i]
+
+fn main() i64 = return 0

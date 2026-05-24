@@ -48,7 +48,18 @@ type linkOpts struct {
 	// archives); silently dropped on macOS because libSystem cannot be
 	// linked statically. The flag is reflected in the lld-probe cache
 	// key so static and dynamic argvs don't share a slot.
-	static       bool
+	static bool
+	// useMimalloc routes runtime malloc/free through mimalloc's mi_*
+	// API.  When true: the runtime.c TU is compiled with
+	// -DTIN_USE_MIMALLOC=1 (which activates the macro shim that
+	// redirects malloc/free/realloc/calloc to mi_*), and the link
+	// line is augmented with -lmimalloc.  On by default; opt out
+	// via the top-level `--no-mimalloc` flag.
+	//
+	// We hard-error at link time when this is true but libmimalloc
+	// can't be located -- silent fall-back to libc would produce
+	// confusing perf cliffs that look like regressions.
+	useMimalloc  bool
 	targetGOOS   string
 	targetFlags  []string
 	cLinkerFlags []string
@@ -178,6 +189,43 @@ func linkBinary(inputs []string, outBin string, opts linkOpts) error {
 	argv = append(argv, "-o", outBin)
 	argv = append(argv, inputs...)
 	argv = append(argv, opts.cLinkerFlags...)
+
+	// macOS ld defaults the ThinLTO intermediate directory to
+	// `/var/folders/.../T/thinlto-<hash>`, where the hash is computed
+	// from the input list.  Two parallel `tin test` invocations whose
+	// link commands share enough content-addressed pkg .o files end
+	// up with IDENTICAL hashes, so both linkers write to (and read
+	// from) the SAME thinlto dir, scribbling on each other's
+	// `<N>.arm64.thinlto.o` intermediates and producing spurious
+	// duplicate-symbol errors at codegen time.  Force a unique
+	// per-link dir via `-object_path_lto` so the intermediates are
+	// process-isolated.
+	if opts.targetGOOS == "darwin" {
+		ltoDir, err := os.MkdirTemp("", "tin-lto-*")
+		if err != nil {
+			return fmt.Errorf("tin: cannot allocate LTO temp dir: %w", err)
+		}
+
+		defer func() { _ = os.RemoveAll(ltoDir) }()
+
+		argv = append(argv, "-object_path_lto", ltoDir)
+	}
+
+	// mimalloc: link before the entry.suffix so the libc that lives in
+	// the suffix doesn't win the malloc/free symbol resolution race.
+	// On dynamic links (the common path), `-lmimalloc` adds a DT_NEEDED
+	// to libmimalloc; the runtime.c TU was compiled with the macro shim
+	// (-DTIN_USE_MIMALLOC=1) so its internal calls go to mi_malloc /
+	// mi_free directly, bypassing any libc-side resolution entirely.
+	if opts.useMimalloc {
+		libDir, _, ok := findMimallocInstall(opts.targetGOOS)
+		if !ok {
+			return fmt.Errorf("tin: --no-mimalloc was not passed but libmimalloc was not found at any of the standard paths. Install via `brew install mimalloc` (macOS) or your distro's package manager (pacman -S mimalloc / apt install libmimalloc-dev / dnf install mimalloc-devel), or pass --no-mimalloc to fall back to libc malloc")
+		}
+
+		argv = append(argv, "-L"+libDir, "-lmimalloc")
+	}
+
 	argv = append(argv, entry.suffix...)
 
 	if opts.rdynamic && opts.targetGOOS != "darwin" {
@@ -229,6 +277,7 @@ type lldArgvKey struct {
 	useLld        bool
 	static        bool   // -static at link time pulls a different argv (libc.a, etc.)
 	standaloneDbg bool   // -fstandalone-debug (darwin debug builds)
+	mimalloc      bool   // -lmimalloc at link adds a libmimalloc.so/.dylib reference -> distinct lld probe
 	extraHash     string // sha256(extraCFlags) so e.g. -fsanitize=address gets its own probe slot
 }
 
@@ -259,6 +308,7 @@ func lldArgvFor(opts linkOpts) *lldArgvEntry {
 		useLld:        opts.useLld,
 		static:        opts.static,
 		standaloneDbg: opts.standaloneDebugMacOS,
+		mimalloc:      opts.useMimalloc,
 		extraHash:     hashExtraCFlags(opts.extraCFlags),
 	}
 
@@ -509,6 +559,18 @@ func probeLldArgv(opts linkOpts) *lldArgvEntry {
 		args = append(args, "-static")
 	}
 
+	// Probe the link line WITH -lmimalloc so the cached argv prefix
+	// already accounts for any extra search paths or runtime symbols
+	// clang's driver expects.  Skipped when the lib isn't present
+	// (linkBinary will surface the hard error before reaching here on
+	// the real link path; we just need the probe to succeed for the
+	// build-flag fingerprint).
+	if opts.useMimalloc {
+		if libDir, _, ok := findMimallocInstall(opts.targetGOOS); ok {
+			args = append(args, "-L"+libDir, "-lmimalloc")
+		}
+	}
+
 	args = append(args, tmpPath, "-o", dummyOutPath, "-###")
 	out, _ := exec.Command("clang", args...).CombinedOutput()
 
@@ -727,4 +789,61 @@ func tripleFromTargetGOOS(targetGOOS string, targetFlags []string) string {
 	}
 
 	return targetGOOS + "-host"
+}
+
+// findMimallocInstall locates a libmimalloc shared library on the host.
+// Returns (libDir, includeDir, ok).  Checks the standard Homebrew prefix
+// on Darwin and the common Linux library paths.  Used to (1) reject the
+// build loudly when --no-mimalloc was NOT passed but the library is
+// missing, and (2) extend the link line with -L<libDir> -lmimalloc plus
+// the runtime.c compile flags with -I<includeDir>.
+//
+// Caller is responsible for checking the linkOpts.useMimalloc gate
+// before consulting this function.  We do not auto-disable on miss --
+// the user opted in to mimalloc (default), so a missing lib is an
+// installation error we should surface, not paper over.
+func findMimallocInstall(targetGOOS string) (libDir, incDir string, ok bool) {
+	var libCandidates []string
+
+	var incCandidates []string
+
+	if targetGOOS == "darwin" {
+		// Apple Silicon Homebrew prefix; the older /usr/local layout
+		// is a fallback for Intel Macs or non-standard Homebrew installs.
+		libCandidates = []string{"/opt/homebrew/lib", "/usr/local/lib"}
+		incCandidates = []string{"/opt/homebrew/include", "/usr/local/include"}
+	} else {
+		// Linux: Arch / Fedora / RHEL ship in /usr/lib64; Debian / Ubuntu
+		// in /usr/lib/x86_64-linux-gnu; some distros use /usr/lib directly.
+		libCandidates = []string{"/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib", "/usr/local/lib"}
+		incCandidates = []string{"/usr/include", "/usr/local/include"}
+	}
+
+	libNames := []string{"libmimalloc.so", "libmimalloc.dylib", "libmimalloc.a"}
+
+	for _, d := range libCandidates {
+		for _, n := range libNames {
+			if _, err := os.Stat(filepath.Join(d, n)); err == nil {
+				libDir = d
+
+				break
+			}
+		}
+
+		if libDir != "" {
+			break
+		}
+	}
+
+	for _, d := range incCandidates {
+		if _, err := os.Stat(filepath.Join(d, "mimalloc.h")); err == nil {
+			incDir = d
+
+			break
+		}
+	}
+
+	ok = libDir != "" && incDir != ""
+
+	return
 }

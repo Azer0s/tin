@@ -906,6 +906,29 @@ type AwaitExpr struct {
 	Future Node
 }
 
+// MoveExpr explicitly transfers ownership of a local binding to its
+// consumer.  Source-level form: `move x`, where `x` must be a local
+// `let`-binding that the current scope owns.  Codegen emits the
+// binding's current value AND marks the scope entry as ownershipMoved
+// so the scope-exit release is elided and any subsequent use of `x`
+// becomes a compile error.  See docs/15-ownership.md for the model.
+type MoveExpr struct {
+	base
+	Name string // the identifier being moved (e.g. "x")
+}
+
+// RefExpr is the call-site `ref a` assertion: the caller asserts that
+// the corresponding parameter convention is `transparent`, i.e. no rc
+// traffic is required at this call site.  Codegen emits a compile
+// error when the analyzer classified the callee's parameter as
+// `consumes` or `retains`.  Outside a call-arg context the keyword
+// degrades to a plain identifier read.  Only bare identifiers are
+// accepted; partial refs (`ref x.field`) are a parse error.
+type RefExpr struct {
+	base
+	Name string // the identifier being borrowed (e.g. "a")
+}
+
 // TryExpr propagates a fallible-typed expression: `try foo()`.
 // Codegen desugars to:
 //
@@ -1001,17 +1024,23 @@ func (a *ArrayType) String() string {
 }
 
 type PointerType struct {
-	Elem    TypeExpr
-	IsConst bool
+	Elem       TypeExpr
+	IsConst    bool
+	IsVolatile bool // `volatile *T` -- escape hatch for raw/bare-metal pointers; bypasses rc retain/release at codegen time
 }
 
 func (p *PointerType) typeExprMarker() {}
 func (p *PointerType) String() string {
-	if p.IsConst {
-		return "const *" + p.Elem.String()
+	prefix := ""
+	if p.IsVolatile {
+		prefix = "volatile "
 	}
 
-	return "*" + p.Elem.String()
+	if p.IsConst {
+		return prefix + "const *" + p.Elem.String()
+	}
+
+	return prefix + "*" + p.Elem.String()
 }
 
 type FuncType struct {

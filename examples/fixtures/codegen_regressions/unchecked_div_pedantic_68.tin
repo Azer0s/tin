@@ -1,0 +1,9 @@
+// Regression: -Wunchecked-div (pedantic) fires on `a / b` and
+// `a % b` when the dataflow pass cannot prove b != 0.
+// Guard with `if b != 0:` (sets notZero on the then-branch) or
+// `if b > 0:` (narrows interval to lo > 0) to silence.
+
+fn divs(a i64, b i64) i64 =
+  return a / b
+
+fn main() i64 = return 0

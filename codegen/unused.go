@@ -636,6 +636,18 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 			if id, ok := v.Expr.(*ast.Identifier); ok {
 				used[id.Name] = true
 			}
+		case *ast.StructLit:
+			// `Foo{...}` and `pkg::Foo{...}` count as a use of the
+			// type name AND the leading namespace.  Without this the
+			// selective-import "never used" check fires for cases
+			// like `use { Value } from pkg; let v = Value{...}`.
+			name := v.TypeName
+			if idx := strings.Index(name, "::"); idx >= 0 {
+				used[name[:idx]] = true
+				name = name[idx+2:]
+			}
+
+			used[name] = true
 		case *ast.FuncDecl:
 			for _, p := range v.Params {
 				visitType(p.Type)
@@ -708,9 +720,16 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		if base == "" || used[base] {
 			continue
 		}
+		// Report the full path the user wrote (`math::complex`) rather
+		// than the bare base (`complex`) so the warning points at the
+		// exact `use` line they need to remove.
+		shown := ud.Path
+		if shown == "" {
+			shown = base
+		}
 
 		cg.warn(DiagUnusedImport, ud.Pos(),
-			"import %q is never used", base)
+			"import %q is never used", shown)
 	}
 }
 
@@ -814,5 +833,54 @@ func (cg *CodeGen) checkUnusedInFunc(fn *ast.FuncDecl) {
 
 		cg.warn(DiagUnusedLet, v.Pos(),
 			"let-binding %q is never read; rename to `_` if intentional", v.Name)
+	})
+
+	// Mutable `let` that's never reassigned: suggest `const` instead.
+	// Collect every name that appears as an assignment / aug-assign /
+	// address-of (`&x`) target.  An ampersand-borrowed binding is
+	// treated as reassignable because the borrow may mutate through
+	// the pointer; we can't see through that without escape analysis.
+	reassigned := map[string]bool{}
+
+	walkAST(fn.Body, func(n ast.Node) {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if id, ok := s.Target.(*ast.Identifier); ok {
+				reassigned[id.Name] = true
+			}
+		case *ast.AugAssignStmt:
+			if id, ok := s.Target.(*ast.Identifier); ok {
+				reassigned[id.Name] = true
+			}
+		case *ast.AddressOfExpr:
+			if id, ok := s.Expr.(*ast.Identifier); ok {
+				reassigned[id.Name] = true
+			}
+		}
+	})
+
+	walkAST(fn.Body, func(n ast.Node) {
+		v, ok := n.(*ast.VarDecl)
+		if !ok {
+			return
+		}
+
+		if v.Name == "" || v.Name == "_" || v.IsConst {
+			return
+		}
+		// Need a binding that's actually used (otherwise unused-let
+		// already fires and this warning would be noise) AND has an
+		// initializer (a `let x i64` with no value is a forward decl
+		// pattern that implies a later assignment).
+		if !used[v.Name] || v.Value == nil {
+			return
+		}
+
+		if reassigned[v.Name] {
+			return
+		}
+
+		cg.warn(DiagLetNoReassign, v.Pos(),
+			"let-binding %q is never reassigned; use `const` to express immutability", v.Name)
 	})
 }

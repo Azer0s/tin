@@ -1,0 +1,22 @@
+//!+os_platform.c
+
+// Host OS detection.  Returns the platform as an atom selected at
+// compile time -- the underlying C helper is just a constant chosen by
+// preprocessor `#if`, so the call lowers to a single `mov`.
+//
+// Atoms (rather than a string) so callers can `match os::platform()`
+// without runtime allocation or string-compare cost.
+fn _tin_os_platform() i32 = extern("_tin_os_platform")
+
+fn platform() atom =
+  return match _tin_os_platform():
+    case 0: 'darwin
+    case 1: 'linux
+    case 2: 'windows
+    case 3: 'freebsd
+    case 4: 'openbsd
+    case 5: 'netbsd
+    case 6: 'dragonfly
+    case 7: 'solaris
+    case 8: 'unix
+    default: 'unknown

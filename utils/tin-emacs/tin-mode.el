@@ -56,7 +56,7 @@
     "virtual" "as" "is" "forward" "override" "sizeof" "addr"
     "break" "do" "echo" "test" "typeof" "traitof" "fieldnames"
     "fieldtypes" "fieldtag" "getfield" "setfield" "pass" "isrc"
-    "var" "spawn" "await" "yield" "weak" "own" "ref" "try"))
+    "var" "spawn" "await" "yield" "weak" "own" "ref" "try" "move"))
 
 (defun tin-builtin-types ()
   "Tin built-in primitive types."
@@ -67,6 +67,13 @@
     "u8x16" "u8x32" "u16x8" "u16x16" "u32x4" "u32x8" "u64x2" "u64x4"
     "f32x4" "f32x8" "f64x2" "f64x4"
     "bool" "string" "atom" "void" "any"))
+
+(defun tin-builtin-functions ()
+  "Tin built-in function names (not reserved by the lexer; only
+matched when followed by `(' to avoid colouring user bindings
+that happen to share the name)."
+  '("len" "cap" "copy" "nlen" "nrect"
+    "panic" "recover" "stacktrace" "sourcepos"))
 
 (defun tin-constants ()
   "Tin language constants."
@@ -123,6 +130,11 @@ Only matches NAME! (with bang); plain NAME() is left to the function-call rule."
 
    ;; Built-in types
    `(,(regexp-opt (tin-builtin-types) 'symbols) . font-lock-type-face)
+
+   ;; Built-in functions - only when followed by ( so a user
+   ;; binding like `let len = 5` keeps the binding-name face.
+   `(,(concat "\\_<\\(" (regexp-opt (tin-builtin-functions)) "\\)\\_>\\s-*(")
+     (1 font-lock-builtin-face))
 
    ;; Constants: true  false  nil
    `(,(regexp-opt (tin-constants) 'symbols) . font-lock-constant-face)

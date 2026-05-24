@@ -1,0 +1,64 @@
+// bench/blas/tin_raw_dgemm - Tin dgemm via the raw extern binding.
+//
+// Init uses mem::malloc + pointer writes so the setup phase is C-
+// speed and doesn't hide the FFI cost behind Tin's O(n^2) `++=`.
+// This is the ceiling for what Tin can do: a near-zero FFI thunk on
+// top of cblas_dgemm.
+//
+// Usage: ./tin_raw_dgemm N ITERS
+
+use blas
+use mem
+use strings
+use measure
+
+fn main(args [string]) =
+  if len(args) < 3:
+    echo "usage: tin_raw_dgemm N ITERS"
+    return
+
+  let n     = strings::atol(args[1])
+  let iters = strings::atol(args[2])
+  let total = n * n
+
+  let t0 = measure::now_us()
+
+  let a = mem::malloc(total * 8) as *f64
+  let b = mem::malloc(total * 8) as *f64
+  let c = mem::calloc(total, 8) as *f64
+
+  { #unsafe } {
+    for let i i64 = 0; i < total; i++:
+      *(a + i) = ((i % 7) + 1) as f64
+      *(b + i) = ((i % 5) + 1) as f64
+  }
+
+  let t1 = measure::now_us()
+  let ni32 = n as i32
+
+  for let it i64 = 0; it < iters; it++:
+    blas::dgemm_raw(
+      blas::ROW_MAJOR, blas::NO_TRANS, blas::NO_TRANS,
+      ni32, ni32, ni32,
+      1.0,
+      a, ni32,
+      b, ni32,
+      0.0,
+      c, ni32,
+    )
+
+  let t2 = measure::now_us()
+  let sum = 0.0
+
+  { #unsafe } {
+    for let i i64 = 0; i < total; i++:
+      sum = sum + *(c + i)
+  }
+
+  let t3 = measure::now_us()
+  echo "sum: {sum}"
+  echo "init_us={t1 - t0} gemm_us={t2 - t1} sum_us={t3 - t2}"
+
+  mem::free(a as *void)
+  mem::free(b as *void)
+  mem::free(c as *void)

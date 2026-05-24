@@ -33,7 +33,7 @@ fn build_harness() string =
 
   assert::ok(build.exit_code == 0 as i32)
 
-  let clang_argv = ["clang", "-O1", "-I", WORK, "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/closures.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm"]
+  let clang_argv = ["clang", "-O1", "-I", WORK, "-DTIN_USE_MIMALLOC=1", "-I/opt/homebrew/include", "-I/usr/local/include", "-L/opt/homebrew/lib", "-L/usr/local/lib", "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/closures.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm", "-lmimalloc"]
   let clang = run_cmd(clang_argv, "", [] as [string])
 
   assert::ok(clang.exit_code == 0 as i32)

@@ -1,0 +1,9 @@
+// Taking the address of a pointer-arithmetic result is rejected:
+// the result is itself a transient view, so `&(p + n)` would
+// promote a view-of-a-view past the expression that produced it.
+
+fn main() =
+  let xs [u8] = [1 as u8, 2 as u8, 3 as u8]
+  let p = &xs[0]
+  let qq = &(p + 1)   // rejected
+  echo qq

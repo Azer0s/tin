@@ -1,0 +1,17 @@
+// Regression: `where t is [*_]` -- wildcard inside a fat-array
+// element.  Pre-fix parseTypeParamStr's `[]Type` prefix branch
+// only matched the legacy Go-style form; Tin's source form is
+// `[T]`, which fell through to the generic-bracket parser and
+// produced GenericType{Name:"", TypeParams:[...]} -- never
+// matching the bound ArrayType.
+//
+// Fix: parseTypeParamStr now treats `[T]` (and `[T; N]`) as
+// ArrayType when the base name is empty.
+
+fn first_ptr[t](xs t) i64 where t is [*_] =
+  return 1
+
+fn main() i64 =
+  let n = 5
+  let xs = [&n]
+  return first_ptr(xs) - 1

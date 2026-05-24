@@ -191,7 +191,7 @@ fn json_key(field_name string, tag string) string =
   if len(tag) == 6 && tag[5] == @'-':
     return ""
 
-  // Extract the key name: tag[5:] using string ++ byte.
+  // Extract the key name: tag[5..len(tag)] using string ++ byte.
   let key = ""
   let i i64 = 5
 
@@ -404,7 +404,7 @@ struct Parser =
     let cr  = simd::splat(@'\r')
 
     for this.pos + 16 <= this.len:
-      let chunk = simd::loadu(addr(this.src[this.pos]))
+      let chunk = simd::loadu(&this.src[this.pos])
       let is_sp  = simd::cmpeq(chunk, sp)
       let is_tab = simd::cmpeq(chunk, tab)
       let is_nl  = simd::cmpeq(chunk, nl)
@@ -454,7 +454,7 @@ fn parse_str(p *Parser) string =
     // When a special byte is found, copy the plain prefix and break to the
     // scalar handler below (which consumes the special byte itself).
     for p.pos + 16 <= p.len:
-      let chunk  = simd::loadu(addr(p.src[p.pos]))
+      let chunk  = simd::loadu(&p.src[p.pos])
       let hit_dq = simd::cmpeq(chunk, dq)
       let hit_bs = simd::cmpeq(chunk, bsl)
       let hits   = hit_dq | hit_bs
@@ -705,7 +705,7 @@ fn parse_array(p *Parser) *Value =
 
   for !p.at_end():
     p.skip_ws()
-    items ++= parse_value(p)
+    items ++= [parse_value(p)]
     p.skip_ws()
 
     if p.at_end():
@@ -744,8 +744,8 @@ fn parse_object(p *Parser) *Value =
     if !p.at_end() && p.peek() == @':':
       p.advance()
     p.skip_ws()
-    kkeys ++= key
-    items ++= parse_value(p)
+    kkeys ++= [key]
+    items ++= [parse_value(p)]
     p.skip_ws()
 
     if p.at_end():

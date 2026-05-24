@@ -12,9 +12,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // Level 1: basic generic wrapper
-// ---------------------------------------------------------------------------
 
 struct box[t] =
   val t
@@ -25,9 +23,7 @@ struct box[t] =
   fn map_box[r](this box[t], f fn(t) r) box[r] =
     return box[r]{val: f(this.val)}
 
-// ---------------------------------------------------------------------------
 // Level 2: pair of boxes - two independent type params
-// ---------------------------------------------------------------------------
 
 struct pair_box[a, b] =
   left  box[a]
@@ -36,9 +32,7 @@ struct pair_box[a, b] =
   fn swap(this pair_box[a, b]) pair_box[b, a] =
     return pair_box[b, a]{left: this.right, right: this.left}
 
-// ---------------------------------------------------------------------------
 // Level 3: a "stack" of same-type boxes (box inside box inside box)
-// ---------------------------------------------------------------------------
 
 fn triple_box[t](v t) box[box[box[t]]] =
   return box[box[box[t]]]{val: box[box[t]]{val: box[t]{val: v}}}
@@ -46,9 +40,7 @@ fn triple_box[t](v t) box[box[box[t]]] =
 fn triple_unbox[t](b box[box[box[t]]]) t =
   return b.val.val.val
 
-// ---------------------------------------------------------------------------
 // Level 4: generic identity passed through two hops
-// ---------------------------------------------------------------------------
 
 fn identity[t](x t) t =
   return x
@@ -59,24 +51,19 @@ fn double_identity[t](x t) t =
 fn quad_identity[t](x t) t =
   return double_identity(double_identity(x))
 
-// ---------------------------------------------------------------------------
 // Level 5: generic map over array, constrained by nothing (pure type param)
-// ---------------------------------------------------------------------------
 
 fn arr_map[t, r](arr [t], f fn(t) r) [r] =
   let out [r] = []
 
   for let v t in arr:
-    out ++= f(v)
-
+    out ++= [f(v)]
   return out
 
 fn arr_map2[t, r, s](arr [t], f fn(t) r, g fn(r) s) [s] =
   return arr_map(arr_map(arr, f), g)
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "box wrap/unwrap i64" =
   let b = box[i64]{val: 42}

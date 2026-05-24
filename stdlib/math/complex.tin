@@ -1,0 +1,224 @@
+// stdlib/math/complex - Complex numbers (f64, f64).
+//
+// Value is a struct of two f64s (re, im) laid out contiguously with no
+// padding.  Arithmetic uses standard operator traits, so user code reads
+// the same as primitive math:
+//
+//   use math::complex
+//
+//   let z = complex::Value{re: 3.0, im: 4.0}
+//   let w = z * z + complex::I        // (3+4i)^2 + i = -7 + 25i
+//   echo w                            // -7 + 25i
+//   echo z.abs()                      // 5.0  (method form)
+//   echo complex::abs(z)              // 5.0  (function form)
+//
+// Both call shapes are first-class.  The methods read more naturally
+// for chained ops (`z.conj().exp()`); the free functions read more
+// naturally for pipeline / `seq::map` style.
+//
+// Scalar promotion: f64 / i64 / i32 / f32 are accepted as Value
+// operands via the `implicit[T]` traits, so `complex::I + 2.0`,
+// `3 * complex::I`, etc. compile to two calls (implicit coerce then
+// the op-trait method) with no extra surface in user code.
+//
+// The CBLAS `c` / `z` (single / double complex) families expect packed
+// interleaved `{re, im, re, im, ...}` doubles.  A `[Value]` in Tin
+// does NOT match that layout: each element carries the Tin struct
+// header (type_id + vtable slots) so the element stride is 72 bytes
+// instead of 16.  The libs/blas/complex.tin wrappers handle this by
+// packing into an `[f64]` scratch buffer before each CBLAS call and
+// unpacking back for mutating routines.  This is internal to the BLAS
+// wrappers; user code keeps the natural `[Value]` shape.
+
+// Private C-math helpers used by the holomorphic functions below.
+// math.tin doesn't expose sinh / cosh / hypot under their natural
+// names yet, so declare locals here.  Resolved by the `//!-lm` link
+// flag math.tin already brings in.
+fn c_sinh(x f64) f64 = extern("sinh")
+fn c_cosh(x f64) f64 = extern("cosh")
+fn c_sqrt(x f64) f64 = extern("sqrt")
+fn c_exp(x f64)  f64 = extern("exp")
+fn c_log(x f64)  f64 = extern("log")
+fn c_sin(x f64)  f64 = extern("sin")
+fn c_cos(x f64)  f64 = extern("cos")
+fn c_atan2(y f64, x f64) f64 = extern("atan2")
+fn c_hypot(x f64, y f64) f64 = extern("hypot")
+fn c_fabs(x f64) f64 = extern("fabs")
+
+// Value is a fixed-layout (f64 re, f64 im) complex number.  No
+// padding, total size 16 bytes -- matches the CBLAS `void *` complex
+// layout exactly.
+struct Value(
+  add[Value, Value], sub[Value, Value],
+  mul[Value, Value], div[Value, Value],
+  neg[Value], comp[Value],
+  implicit[i32], implicit[i64], implicit[f32], implicit[f64],
+  print
+) =
+  re f64
+  im f64
+
+  // Operator overloads.
+
+  fn ::add(this Value, other Value) Value =
+    return Value{re: this.re + other.re, im: this.im + other.im}
+
+  fn ::sub(this Value, other Value) Value =
+    return Value{re: this.re - other.re, im: this.im - other.im}
+
+  // (a+bi)(c+di) = (ac - bd) + (ad + bc)i
+  fn ::mul(this Value, other Value) Value =
+    return Value{
+      re: this.re * other.re - this.im * other.im,
+      im: this.re * other.im + this.im * other.re
+    }
+
+  // (a+bi) / (c+di) = ((ac+bd) + (bc-ad)i) / (c^2 + d^2)
+  // No guard against c^2 + d^2 == 0: division by zero produces an inf /
+  // NaN result the same way f64 division does.  Callers that care can
+  // check `abs(other)` first.
+  fn ::div(this Value, other Value) Value =
+    let denom f64 = other.re * other.re + other.im * other.im
+    return Value{
+      re: (this.re * other.re + this.im * other.im) / denom,
+      im: (this.im * other.re - this.re * other.im) / denom
+    }
+
+  fn ::neg(this Value) Value =
+    return Value{re: -this.re, im: -this.im}
+
+  fn ::comp(this Value, other Value) bool =
+    return this.re == other.re && this.im == other.im
+
+  // Implicit conversions from numeric scalars.  Lets users mix
+  // `Value + 1` / `2.5 * z` etc. without an explicit constructor.
+  static fn ::implicit(v i32) Value = return Value{re: v as f64, im: 0.0}
+  static fn ::implicit(v i64) Value = return Value{re: v as f64, im: 0.0}
+  static fn ::implicit(v f32) Value = return Value{re: v as f64, im: 0.0}
+  static fn ::implicit(v f64) Value = return Value{re: v,        im: 0.0}
+
+  // print: render as "a + bi" / "a - bi".  The sign of the imaginary
+  // part folds into the joiner so we don't emit "1.0 + -2.0i".
+  fn ::print(this Value) string =
+    if this.im >= 0.0:
+      return "{this.re} + {this.im}i"
+    return "{this.re} - {-this.im}i"
+
+  // Method-form mirrors of the free functions below.  Bodies are
+  // inlined (not delegated) because a bare `abs(this)` call inside
+  // a Value method resolves to the method itself, infinite-looping.
+
+  fn conj(this Value) Value =
+    return Value{re: this.re, im: -this.im}
+
+  fn abs(this Value) f64 =
+    return c_hypot(this.re, this.im)
+
+  fn arg(this Value) f64 =
+    return c_atan2(this.im, this.re)
+
+  fn exp(this Value) Value =
+    let r = c_exp(this.re)
+    return Value{re: r * c_cos(this.im), im: r * c_sin(this.im)}
+
+  fn log(this Value) Value =
+    return Value{re: c_log(c_hypot(this.re, this.im)), im: c_atan2(this.im, this.re)}
+
+  fn sqrt(this Value) Value =
+    let r2 = c_sqrt(c_hypot(this.re, this.im))
+    let half_arg = c_atan2(this.im, this.re) / 2.0
+    return Value{re: r2 * c_cos(half_arg), im: r2 * c_sin(half_arg)}
+
+  fn sin(this Value) Value =
+    return Value{
+      re: c_sin(this.re) * c_cosh(this.im),
+      im: c_cos(this.re) * c_sinh(this.im)
+    }
+
+  fn cos(this Value) Value =
+    return Value{
+      re: c_cos(this.re) * c_cosh(this.im),
+      im: -c_sin(this.re) * c_sinh(this.im)
+    }
+
+  fn tan(this Value) Value =
+    // tan = sin / cos; inline both numerator and denominator and
+    // do one complex division.
+    let s_re = c_sin(this.re) * c_cosh(this.im)
+    let s_im = c_cos(this.re) * c_sinh(this.im)
+    let c_re = c_cos(this.re) * c_cosh(this.im)
+    let c_im = -c_sin(this.re) * c_sinh(this.im)
+    let denom = c_re * c_re + c_im * c_im
+    return Value{
+      re: (s_re * c_re + s_im * c_im) / denom,
+      im: (s_im * c_re - s_re * c_im) / denom
+    }
+
+// Construction helpers
+
+// from_value builds a Value from real and imaginary parts.  The struct
+// literal works too; `from_value` exists so call-site readers don't
+// have to remember field order.
+fn from_value(re f64, im f64) Value = return Value{re: re, im: im}
+
+// from_polar builds a Value from polar form (r, theta in radians).
+// r may be negative; the angle is mod 2pi.
+fn from_polar(r f64, theta f64) Value =
+  return Value{re: r * c_cos(theta), im: r * c_sin(theta)}
+
+// Component readers (mirror math.tin's flat-function style).
+
+// conj returns the complex conjugate (a + bi -> a - bi).
+fn conj(z Value) Value = return Value{re: z.re, im: -z.im}
+
+// abs returns the modulus sqrt(re^2 + im^2).  Uses hypot so values
+// near f64::MAX don't overflow during the intermediate square.
+fn abs(z Value) f64 = return c_hypot(z.re, z.im)
+
+// arg returns the principal argument in (-pi, pi].
+fn arg(z Value) f64 = return c_atan2(z.im, z.re)
+
+// Holomorphic functions
+
+// exp(z) = e^a * (cos b + i sin b)
+fn exp(z Value) Value =
+  let r = c_exp(z.re)
+  return Value{re: r * c_cos(z.im), im: r * c_sin(z.im)}
+
+// log(z) = log|z| + i*arg(z)  (principal branch; arg in (-pi, pi]).
+fn log(z Value) Value =
+  return Value{re: c_log(abs(z)), im: arg(z)}
+
+// sqrt(z) via polar: sqrt(|z|) * (cos(arg/2) + i sin(arg/2)).
+// Principal branch: result has non-negative real part.
+fn sqrt(z Value) Value =
+  return from_polar(c_sqrt(abs(z)), arg(z) / 2.0)
+
+// sin(z) = sin(a) cosh(b) + i cos(a) sinh(b)
+fn sin(z Value) Value =
+  return Value{
+    re: c_sin(z.re) * c_cosh(z.im),
+    im: c_cos(z.re) * c_sinh(z.im)
+  }
+
+// cos(z) = cos(a) cosh(b) - i sin(a) sinh(b)
+fn cos(z Value) Value =
+  return Value{
+    re: c_cos(z.re) * c_cosh(z.im),
+    im: -c_sin(z.re) * c_sinh(z.im)
+  }
+
+// tan(z) = sin(z) / cos(z)
+fn tan(z Value) Value = return sin(z) / cos(z)
+
+// Imaginary unit 0 + 1i.  Use to spell complex literals naturally:
+//   let z = complex::from_value(3.0, 4.0) + complex::I
+const I = Value{re: 0.0, im: 1.0}
+
+export {
+  Value, I,
+  from_value, from_polar,
+  conj, abs, arg,
+  exp, log, sqrt,
+  sin, cos, tan
+} as complex

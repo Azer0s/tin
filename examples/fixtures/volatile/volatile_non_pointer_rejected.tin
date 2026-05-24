@@ -1,0 +1,6 @@
+// `volatile` is a pointer-only qualifier.  Applying it to a
+// non-pointer type is a parse-time rejection.
+
+fn main() =
+  let x volatile i64 = 0   // rejected
+  echo x

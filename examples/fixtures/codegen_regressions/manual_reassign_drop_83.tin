@@ -1,0 +1,16 @@
+// Regression: `p = other()` after `let p = mem::malloc(...)`
+// drops the original allocation -- the prior block is now
+// unreachable and leaks unless freed before the reassignment.
+// The dataflow lattice clears manualAlloc[p] on reassignment
+// to a non-alloc RHS and emits a leak warning at the
+// reassignment site so the user can spot the dropped block.
+
+use mem
+
+fn other() *void = return mem::malloc(32)
+
+fn main() i64 =
+  let p = mem::malloc(64)
+  p = other()
+  mem::free(p)
+  return 0

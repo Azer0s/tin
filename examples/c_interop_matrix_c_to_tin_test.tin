@@ -1,0 +1,94 @@
+// examples/c_interop_matrix_c_to_tin_test.tin -- end-to-end runner
+// for the C -> Tin interop matrix.  Builds the Tin lib in
+// examples/c_interop_matrix/c_to_tin/lib.tin as a static .o with a
+// matching header, links it with driver.c plus the Tin runtime, and
+// asserts every tagged line in the driver's output matches the
+// expected value for that matrix row.
+//
+// Each prefix (CA, CB, ...) maps 1:1 to a row in
+// docs/internals/c-interop-matrix.md (C-A, C-B, ...).  A failure
+// here pins exactly which boundary shape regressed.
+//
+// Work artefacts live in /tmp/tin_interop_c_to_tin/ so a leftover
+// from a previous run doesn't fail the build step on re-entry.
+
+use assert
+use os
+use strings
+use "./fixtures/run_compiler"
+
+const WORK = "/tmp/tin_interop_c_to_tin"
+const SRC  = "examples/c_interop_matrix/c_to_tin"
+
+fn build_driver() string =
+  let _ = os::mkdir(WORK)
+
+  let build_argv = [
+    "./tin", "build", "--lib", SRC ++ "/lib.tin",
+    "-o", WORK ++ "/lib.o",
+    "--emit-header=" ++ WORK ++ "/lib.h",
+  ]
+  let build = run_tin_argv(build_argv, "")
+
+  assert::ok(build.exit_code == 0 as i32)
+
+  let clang_argv = [
+    "clang", "-O1", "-I", WORK,
+    "-DTIN_USE_MIMALLOC=1",
+    "-I/opt/homebrew/include", "-I/usr/local/include",
+    "-L/opt/homebrew/lib", "-L/usr/local/lib",
+    "-o", WORK ++ "/driver",
+    SRC ++ "/driver.c",
+    WORK ++ "/lib.o",
+    "runtime/runtime.c",
+    "-lpthread", "-ldl", "-lm", "-lmimalloc",
+  ]
+  let clang = run_cmd(clang_argv, "", [] as [string])
+
+  assert::ok(clang.exit_code == 0 as i32)
+
+  return WORK ++ "/driver"
+
+fn grep_first(text string, prefix string) string =
+  let lines = strings::split(text, "\n")
+  let i i64 = 0
+
+  for i < len(lines):
+    if strings::has_prefix(lines[i], prefix):
+      return lines[i]
+    i = i + 1
+
+  return ""
+
+fn run_driver() string =
+  let path = build_driver()
+  let r = run_cmd([path], "", [] as [string])
+
+  assert::ok(r.exit_code == 0 as i32)
+
+  return r.stdout
+
+test "C -> Tin matrix: every row produces the expected line" =
+  let out = run_driver()
+
+  // Baseline shapes.
+  assert::equals("CA=42",          grep_first(out, "CA="))
+  assert::equals("CB=hello world", grep_first(out, "CB="))
+  assert::equals("CC=15",          grep_first(out, "CC="))
+  assert::equals("CD=42",          grep_first(out, "CD="))
+
+  // #packed struct by value (in / out).
+  assert::equals("CE=42",          grep_first(out, "CE="))
+  assert::equals("CF=3,4",         grep_first(out, "CF="))
+
+  // Struct pointer round trip.
+  assert::equals("CI_sum=30",      grep_first(out, "CI_sum="))
+  assert::equals("CH_sum=15",      grep_first(out, "CH_sum="))
+
+  // Mixed-parameter shapes.
+  assert::equals("CJ=49",          grep_first(out, "CJ="))
+  assert::equals("CK=10",          grep_first(out, "CK="))
+  assert::equals("CL_sum=13",      grep_first(out, "CL_sum="))
+
+  // Sentinel: every line above ran in order without aborting.
+  assert::equals("done",           grep_first(out, "done"))

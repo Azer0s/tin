@@ -56,3 +56,5 @@ directive with `-I /path/to/runtime` on the include path.
 | [fiber-panic.md](fiber-panic.md)               | Fiber panic lifecycle, `await` re-raise, `defer+recover` in async fns, codegen invariants   |
 | [clayout-structs.md](clayout-structs.md)       | cLayoutStructs wrapper+native layout, c_data_ptr, non-handover/handover/literal paths       |
 | [tco.md](tco.md)                               | Tail call optimization: loop transformation, eligibility, IR shape, interception points      |
+| [fn-coloring.md](fn-coloring.md)               | Fn coloring (non-colored / colored / `$coro` variants), fat-fn-ptr ABI and planned bump      |
+| [codegen-passes.md](codegen-passes.md)         | Pass order in `Generate` and the two package loaders, invariants, how to add a new pass     |

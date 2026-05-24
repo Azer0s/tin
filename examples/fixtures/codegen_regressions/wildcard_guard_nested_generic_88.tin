@@ -1,0 +1,28 @@
+// Regression: `where t is Box[Pair[_, _]]` -- nested wildcard
+// inside a nested generic.  Pre-fix the constraint check parsed
+// the concrete name back from the `__`-mangled IR struct name
+// ("Box__Pair__i64__string"), but that form is ambiguous --
+// "Box__Pair__i64__string" could be Box[Pair, i64, string]
+// (3 args) or Box[Pair[i64, string]] (1 nested arg) and the
+// parser picked the wrong reading.
+//
+// Fix: monomorphizeDataDecl / genTypeDecl now record the
+// original TypeExpr arg list in cg.dataInstShape.  The
+// constraint checker reads that map first, so wildcard match
+// runs against the structured GenericType, not the lossy name.
+
+struct Box[T] =
+  v T
+
+struct Pair[A, B] =
+  a A
+  b B
+
+type BoxP = Box[Pair[i64, string]]
+
+fn unwrap[t](b t) i64 where t is Box[Pair[_, _]] =
+  return 1
+
+fn main() i64 =
+  let b BoxP = BoxP{v: Pair[i64, string]{a: 1, b: "hi"}}
+  return unwrap(b) - 1

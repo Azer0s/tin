@@ -1,0 +1,12 @@
+// Storing a pointer-arithmetic result into a struct field is
+// rejected: the struct outlives the expression that produced the
+// view.
+
+struct holder =
+  p *u8
+
+fn main() =
+  let xs [u8] = [1 as u8, 2 as u8, 3 as u8]
+  let base = &xs[0]
+  let h = holder{p: base + 1}   // rejected
+  echo h.p

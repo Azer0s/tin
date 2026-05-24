@@ -1,0 +1,17 @@
+// Field-access GEP must hoist its alloca to the entry block.  A
+// per-iteration alloca grows the stack by sizeof(struct) every loop
+// pass; at N >> 100k for a multi-field struct that blows past the
+// default 8 MB stack and segfaults.  Use a wide-ish Box and a tight
+// loop so the regression is loud (~16 MB if hoisting reverts).
+struct Box =
+  a i64
+  b i64
+  c i64
+
+fn main() =
+  let b = Box{a: 1, b: 2, c: 3}
+  let total i64 = 0
+
+  for let i i64 = 0; i < 1_000_000; i++:
+    total = total + b.a + b.b + b.c
+  echo "total={total}"

@@ -1,0 +1,49 @@
+// bench/blas/tin_mat_dgemm - Tin dgemm via Matrix[f64].
+//
+// Builds the operands as flat row-major `[f64]` once, wraps each in
+// Matrix[f64] (zero-copy), and calls blas::dgemm in a loop.  No
+// per-call flatten / unflatten -- the Matrix overload hands the
+// contiguous buffer straight to CBLAS.  Comparison point for the
+// `[[f64]]` overload in tin_high_dgemm.
+//
+// Usage: ./tin_mat_dgemm N ITERS
+
+use blas
+use strings
+use measure
+
+fn main(args [string]) =
+  if len(args) < 3:
+    echo "usage: tin_mat_dgemm N ITERS"
+    return
+
+  let n     = strings::atol(args[1])
+  let iters = strings::atol(args[2])
+  let t0    = measure::now_us()
+
+  let a_data [f64] = [0.0] * (n * n)
+  let b_data [f64] = [0.0] * (n * n)
+
+  for let i i64 = 0; i < n; i++:
+    for let j i64 = 0; j < n; j++:
+      let idx = i * n + j
+      a_data[idx] = ((idx % 7) + 1) as f64
+      b_data[idx] = ((idx % 5) + 1) as f64
+  let a = blas::matrix_from(n, n, a_data)
+  let b = blas::matrix_from(n, n, b_data)
+  let c = blas::matrix[f64](n, n)
+
+  let t1 = measure::now_us()
+
+  for let it i64 = 0; it < iters; it++:
+    blas::dgemm(a, b, c)
+
+  let t2 = measure::now_us()
+  let sum = 0.0
+
+  for let i i64 = 0; i < n * n; i++:
+    sum = sum + c.data[i]
+
+  let t3 = measure::now_us()
+  echo "sum: {sum}"
+  echo "init_us={t1 - t0} gemm_us={t2 - t1} sum_us={t3 - t2}"

@@ -1,0 +1,680 @@
+// libs/blas/level3 - BLAS Level 3: matrix-matrix operations.
+//
+// Two layers:
+//
+//   dgemm_raw  thin extern binding: full CBLAS surface.  Operates on
+//              flat row-major (or column-major) buffers.
+//
+//   dgemm      high-level wrapper: takes row-of-rows matrices
+//              `[[f64]]`, infers all three dimensions (m, k, n) from
+//              the array shapes, and computes C := A * B.  A, B and
+//              C are flattened into contiguous buffers for the BLAS
+//              call; results are copied back into C.
+
+use "./types"
+
+// Raw extern bindings.
+
+// dgemm_raw:  C := alpha * op(A) * op(B) + beta * C.
+//
+//   layout      ROW_MAJOR or COL_MAJOR
+//   trans_a     NO_TRANS / TRANS / CONJ_TRANS for A
+//   trans_b     NO_TRANS / TRANS / CONJ_TRANS for B
+//   m, n, k     dims of the multiplied form:
+//                 op(A) is m-by-k, op(B) is k-by-n, C is m-by-n
+//   alpha       scalar
+//   a, lda      A and its leading dimension
+//   b, ldb      B and its leading dimension
+//   beta        scalar
+//   c, ldc      C and its leading dimension; updated in place
+fn dgemm_raw(
+  layout i32, trans_a i32, trans_b i32,
+  m i32, n i32, k i32,
+  alpha f64,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+  beta f64,
+  c *f64, ldc i32,
+) = extern("cblas_dgemm")
+
+fn sgemm_raw(
+  layout i32, trans_a i32, trans_b i32,
+  m i32, n i32, k i32,
+  alpha f32,
+  a *f32, lda i32,
+  b *f32, ldb i32,
+  beta f32,
+  c *f32, ldc i32,
+) = extern("cblas_sgemm")
+
+// dsymm_raw:  side=LEFT  -> C := alpha * A * B + beta * C
+//             side=RIGHT -> C := alpha * B * A + beta * C
+// A is symmetric m-by-m (LEFT) or n-by-n (RIGHT); only `uplo`
+// triangle is read.
+fn dsymm_raw(
+  layout i32, side i32, uplo i32,
+  m i32, n i32,
+  alpha f64,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+  beta f64,
+  c *f64, ldc i32,
+) = extern("cblas_dsymm")
+
+fn ssymm_raw(
+  layout i32, side i32, uplo i32,
+  m i32, n i32,
+  alpha f32,
+  a *f32, lda i32,
+  b *f32, ldb i32,
+  beta f32,
+  c *f32, ldc i32,
+) = extern("cblas_ssymm")
+
+// dsyrk_raw:  C := alpha * op(A) * op(A)^T + beta * C
+// op(A) is A (NoTrans) or A^T (Trans); only `uplo` triangle of C is
+// referenced (read AND written).  C is n-by-n; op(A) is n-by-k.
+fn dsyrk_raw(
+  layout i32, uplo i32, trans i32,
+  n i32, k i32,
+  alpha f64,
+  a *f64, lda i32,
+  beta f64,
+  c *f64, ldc i32,
+) = extern("cblas_dsyrk")
+
+fn ssyrk_raw(
+  layout i32, uplo i32, trans i32,
+  n i32, k i32,
+  alpha f32,
+  a *f32, lda i32,
+  beta f32,
+  c *f32, ldc i32,
+) = extern("cblas_ssyrk")
+
+// dtrmm_raw:  side=LEFT  -> B := alpha * op(A) * B
+//             side=RIGHT -> B := alpha * B * op(A)
+// A is triangular m-by-m (LEFT) or n-by-n (RIGHT).
+fn dtrmm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha f64,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+) = extern("cblas_dtrmm")
+
+fn strmm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha f32,
+  a *f32, lda i32,
+  b *f32, ldb i32,
+) = extern("cblas_strmm")
+
+// dtrsm_raw:  side=LEFT  -> solves op(A) * X = alpha * B
+//             side=RIGHT -> solves        X * op(A) = alpha * B
+// A is triangular m-by-m (LEFT) or n-by-n (RIGHT).  B holds the
+// right-hand side on entry, the solution X on return.
+fn dtrsm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha f64,
+  a *f64, lda i32,
+  b *f64, ldb i32,
+) = extern("cblas_dtrsm")
+
+fn strsm_raw(
+  layout i32, side i32, uplo i32, trans i32, diag i32,
+  m i32, n i32,
+  alpha f32,
+  a *f32, lda i32,
+  b *f32, ldb i32,
+) = extern("cblas_strsm")
+
+// flatten / unflatten helpers all live in level2.tin so both levels
+// can share them (level2 is imported before level3 by blas.tin, so
+// its decls flow through into level3's scope).
+
+// High-level wrappers.
+
+// dgemm computes C := A * B.
+//
+// A, B, and C must each be rectangular; nrect is checked up front so
+// the shapes from nlen are trustable.
+//   nlen(a) = [m, k]   A is m-by-k
+//   nlen(b) = [k, n]   B is k-by-n; A's inner dim must match B's outer
+//   nlen(c) = [m, n]   C is the m-by-n output (overwritten in place)
+fn dgemm(a [[f64]], b [[f64]], c [[f64]]) =
+  if !nrect(a):
+    panic("blas::dgemm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::dgemm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::dgemm: C is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let sc = nlen(c)
+  let m  = sa[0]
+  let k  = sa[1]
+  let n  = sb[1]
+
+  if m == 0: return
+
+  if sb[0] != k:
+    panic("blas::dgemm: A has {k} cols but B has {sb[0]} rows")
+  if k == 0: return
+
+  if sc[0] != m:
+    panic("blas::dgemm: C has {sc[0]} rows but A has {m}")
+  if n != 0 && sc[1] != n:
+    panic("blas::dgemm: C has {sc[1]} cols but B has {n}")
+  let a_flat = flatten_f64(a)
+  let b_flat = flatten_f64(b)
+  // beta=0 below means dgemm overwrites C, so c_flat's pre-call
+  // contents don't matter -- flatten C (instead of a per-element
+  // zero-fill loop) just to get a correctly-sized owned buffer.
+  let c_flat = flatten_f64(c)
+
+  dgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    m as i32, n as i32, k as i32,
+    1.0,
+    &a_flat[0], k as i32,
+    &b_flat[0], n as i32,
+    0.0,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f64(c_flat, c)
+
+fn sgemm(a [[f32]], b [[f32]], c [[f32]]) =
+  if !nrect(a):
+    panic("blas::sgemm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::sgemm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::sgemm: C is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let sc = nlen(c)
+  let m  = sa[0]
+  let k  = sa[1]
+  let n  = sb[1]
+
+  if m == 0: return
+
+  if sb[0] != k:
+    panic("blas::sgemm: A has {k} cols but B has {sb[0]} rows")
+  if k == 0: return
+
+  if sc[0] != m:
+    panic("blas::sgemm: C has {sc[0]} rows but A has {m}")
+  if n != 0 && sc[1] != n:
+    panic("blas::sgemm: C has {sc[1]} cols but B has {n}")
+  let a_flat = flatten_f32(a)
+  let b_flat = flatten_f32(b)
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by sgemm.
+
+  sgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    m as i32, n as i32, k as i32,
+    1.0 as f32,
+    &a_flat[0], k as i32,
+    &b_flat[0], n as i32,
+    0.0 as f32,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f32(c_flat, c)
+
+// dsymm: C := A*B (side=LEFT) or B*A (side=RIGHT), A symmetric.
+//
+// `side` is LEFT or RIGHT; `uplo` is which triangle of A holds the
+// data.  Shapes are inferred from B and C:
+//   nlen(b) = [m, n], nlen(c) = [m, n] - always
+//   A must be m-by-m (side=LEFT) or n-by-n (side=RIGHT)
+// C is overwritten in place.
+fn dsymm(side i32, uplo i32, a [[f64]], b [[f64]], c [[f64]]) =
+  if !nrect(a):
+    panic("blas::dsymm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::dsymm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::dsymm: C is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let sc = nlen(c)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::dsymm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::dsymm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  if sc[0] != m || sc[1] != n:
+    panic("blas::dsymm: C is {sc[0]}x{sc[1]} but expected {m}x{n}")
+  let a_flat = flatten_f64(a)
+  let b_flat = flatten_f64(b)
+  let c_flat = flatten_f64(c) // beta=0; contents discarded by dsymm.
+  dsymm_raw(
+    ROW_MAJOR, side, uplo,
+    m as i32, n as i32,
+    1.0,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+    0.0,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f64(c_flat, c)
+
+fn ssymm(side i32, uplo i32, a [[f32]], b [[f32]], c [[f32]]) =
+  if !nrect(a):
+    panic("blas::ssymm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::ssymm: B is not rectangular")
+  if !nrect(c):
+    panic("blas::ssymm: C is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let sc = nlen(c)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::ssymm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::ssymm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  if sc[0] != m || sc[1] != n:
+    panic("blas::ssymm: C is {sc[0]}x{sc[1]} but expected {m}x{n}")
+  let a_flat = flatten_f32(a)
+  let b_flat = flatten_f32(b)
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by ssymm.
+  ssymm_raw(
+    ROW_MAJOR, side, uplo,
+    m as i32, n as i32,
+    1.0 as f32,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+    0.0 as f32,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f32(c_flat, c)
+
+// dsyrk: C := A * A^T (NoTrans), only `uplo` triangle of C is written.
+//
+// Shapes are inferred:
+//   nlen(a) = [n, k]   A is n-by-k
+//   nlen(c) = [n, n]   C is n-by-n
+// Only the `uplo` triangle of C carries the result; the other
+// triangle is zeroed by the wrapper (the caller's C is overwritten
+// fully).
+fn dsyrk(uplo i32, a [[f64]], c [[f64]]) =
+  if !nrect(a):
+    panic("blas::dsyrk: A is not rectangular")
+  if !nrect(c):
+    panic("blas::dsyrk: C is not rectangular")
+  let sa = nlen(a)
+  let sc = nlen(c)
+  let n  = sa[0]
+  let k  = sa[1]
+
+  if n == 0: return
+
+  if sc[0] != n || sc[1] != n:
+    panic("blas::dsyrk: C is {sc[0]}x{sc[1]} but expected {n}x{n}")
+  let a_flat = flatten_f64(a)
+  let c_flat = flatten_f64(c) // beta=0; contents discarded by dsyrk.
+  dsyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    n as i32, k as i32,
+    1.0,
+    &a_flat[0], k as i32,
+    0.0,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f64(c_flat, c)
+
+fn ssyrk(uplo i32, a [[f32]], c [[f32]]) =
+  if !nrect(a):
+    panic("blas::ssyrk: A is not rectangular")
+  if !nrect(c):
+    panic("blas::ssyrk: C is not rectangular")
+  let sa = nlen(a)
+  let sc = nlen(c)
+  let n  = sa[0]
+  let k  = sa[1]
+
+  if n == 0: return
+
+  if sc[0] != n || sc[1] != n:
+    panic("blas::ssyrk: C is {sc[0]}x{sc[1]} but expected {n}x{n}")
+  let a_flat = flatten_f32(a)
+  let c_flat = flatten_f32(c) // beta=0; contents discarded by ssyrk.
+  ssyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    n as i32, k as i32,
+    1.0 as f32,
+    &a_flat[0], k as i32,
+    0.0 as f32,
+    &c_flat[0], n as i32,
+  )
+
+  unflatten_f32(c_flat, c)
+
+// dtrmm: B := A*B (LEFT) or B*A (RIGHT), A triangular (NoTrans).
+//
+// Shapes are inferred from B:
+//   nlen(b) = [m, n]
+//   A must be m-by-m (LEFT) or n-by-n (RIGHT)
+// B is overwritten in place.
+fn dtrmm(side i32, uplo i32, diag i32, a [[f64]], b [[f64]]) =
+  if !nrect(a):
+    panic("blas::dtrmm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::dtrmm: B is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::dtrmm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::dtrmm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  let a_flat = flatten_f64(a)
+  let b_flat = flatten_f64(b)
+  dtrmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    1.0,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+  )
+
+  unflatten_f64(b_flat, b)
+
+fn strmm(side i32, uplo i32, diag i32, a [[f32]], b [[f32]]) =
+  if !nrect(a):
+    panic("blas::strmm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::strmm: B is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::strmm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::strmm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  let a_flat = flatten_f32(a)
+  let b_flat = flatten_f32(b)
+  strmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    1.0 as f32,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+  )
+
+  unflatten_f32(b_flat, b)
+
+// dtrsm: solves A*X = B (LEFT) or X*A = B (RIGHT), A triangular.
+//
+// B holds the right-hand side on entry and the solution X on return.
+// Shapes are inferred from B:
+//   nlen(b) = [m, n]
+//   A must be m-by-m (LEFT) or n-by-n (RIGHT)
+fn dtrsm(side i32, uplo i32, diag i32, a [[f64]], b [[f64]]) =
+  if !nrect(a):
+    panic("blas::dtrsm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::dtrsm: B is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::dtrsm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::dtrsm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  let a_flat = flatten_f64(a)
+  let b_flat = flatten_f64(b)
+  dtrsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    1.0,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+  )
+
+  unflatten_f64(b_flat, b)
+
+fn strsm(side i32, uplo i32, diag i32, a [[f32]], b [[f32]]) =
+  if !nrect(a):
+    panic("blas::strsm: A is not rectangular")
+  if !nrect(b):
+    panic("blas::strsm: B is not rectangular")
+  let sa = nlen(a)
+  let sb = nlen(b)
+  let m  = sb[0]
+  let n  = sb[1]
+
+  if m == 0 || n == 0: return
+
+  if sa[0] != sa[1]:
+    panic("blas::strsm: A is {sa[0]}x{sa[1]} but must be square")
+
+  let expect = side == LEFT ? m : n
+
+  if sa[0] != expect:
+    panic("blas::strsm: A is {sa[0]}x{sa[0]} but expected {expect}x{expect}")
+  let a_flat = flatten_f32(a)
+  let b_flat = flatten_f32(b)
+  strsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    m as i32, n as i32,
+    1.0 as f32,
+    &a_flat[0], sa[0] as i32,
+    &b_flat[0], n as i32,
+  )
+
+  unflatten_f32(b_flat, b)
+
+// ===== Matrix[T] overloads =====
+//
+// Same routines, accepting the flat-buffer Matrix[T] wrapper from
+// flat.tin.  No flatten / unflatten pass -- `data` is already the
+// CBLAS-native contiguous row-major layout.  These are the perf
+// path; the `[[T]]` overloads above remain the ergonomic default.
+
+fn dgemm(a Matrix[f64], b Matrix[f64], c Matrix[f64]) =
+  if a.cols != b.rows:
+    panic("blas::dgemm: A is {a.rows}x{a.cols}, B has {b.rows} rows")
+  if c.rows != a.rows || c.cols != b.cols:
+    panic("blas::dgemm: C {c.rows}x{c.cols} doesn't match {a.rows}x{b.cols}")
+  if a.rows == 0 || a.cols == 0 || b.cols == 0: return
+  dgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    a.rows as i32, b.cols as i32, a.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn sgemm(a Matrix[f32], b Matrix[f32], c Matrix[f32]) =
+  if a.cols != b.rows:
+    panic("blas::sgemm: A is {a.rows}x{a.cols}, B has {b.rows} rows")
+  if c.rows != a.rows || c.cols != b.cols:
+    panic("blas::sgemm: C {c.rows}x{c.cols} doesn't match {a.rows}x{b.cols}")
+  if a.rows == 0 || a.cols == 0 || b.cols == 0: return
+  sgemm_raw(
+    ROW_MAJOR, NO_TRANS, NO_TRANS,
+    a.rows as i32, b.cols as i32, a.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dsymm(side i32, uplo i32, a Matrix[f64], b Matrix[f64], c Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dsymm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dsymm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if c.rows != b.rows || c.cols != b.cols:
+    panic("blas::dsymm: C {c.rows}x{c.cols} doesn't match B {b.rows}x{b.cols}")
+  if b.rows == 0 || b.cols == 0: return
+  dsymm_raw(
+    ROW_MAJOR, side, uplo,
+    b.rows as i32, b.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn ssymm(side i32, uplo i32, a Matrix[f32], b Matrix[f32], c Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::ssymm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::ssymm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if c.rows != b.rows || c.cols != b.cols:
+    panic("blas::ssymm: C {c.rows}x{c.cols} doesn't match B {b.rows}x{b.cols}")
+  if b.rows == 0 || b.cols == 0: return
+  ssymm_raw(
+    ROW_MAJOR, side, uplo,
+    b.rows as i32, b.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dsyrk(uplo i32, a Matrix[f64], c Matrix[f64]) =
+  if c.rows != a.rows || c.cols != a.rows:
+    panic("blas::dsyrk: C is {c.rows}x{c.cols} but expected {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  dsyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    a.rows as i32, a.cols as i32,
+    1.0,
+    &a.data[0], a.cols as i32,
+    0.0,
+    &c.data[0], c.cols as i32,
+  )
+
+fn ssyrk(uplo i32, a Matrix[f32], c Matrix[f32]) =
+  if c.rows != a.rows || c.cols != a.rows:
+    panic("blas::ssyrk: C is {c.rows}x{c.cols} but expected {a.rows}x{a.rows}")
+  if a.rows == 0: return
+  ssyrk_raw(
+    ROW_MAJOR, uplo, NO_TRANS,
+    a.rows as i32, a.cols as i32,
+    1.0 as f32,
+    &a.data[0], a.cols as i32,
+    0.0 as f32,
+    &c.data[0], c.cols as i32,
+  )
+
+fn dtrmm(side i32, uplo i32, diag i32, alpha f64, a Matrix[f64], b Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrmm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dtrmm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  dtrmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn strmm(side i32, uplo i32, diag i32, alpha f32, a Matrix[f32], b Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::strmm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::strmm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  strmm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn dtrsm(side i32, uplo i32, diag i32, alpha f64, a Matrix[f64], b Matrix[f64]) =
+  if a.rows != a.cols:
+    panic("blas::dtrsm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::dtrsm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  dtrsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )
+
+fn strsm(side i32, uplo i32, diag i32, alpha f32, a Matrix[f32], b Matrix[f32]) =
+  if a.rows != a.cols:
+    panic("blas::strsm: A is {a.rows}x{a.cols} but must be square")
+  let expect = side == LEFT ? b.rows : b.cols
+
+  if a.rows != expect:
+    panic("blas::strsm: A is {a.rows}x{a.rows} but expected {expect}x{expect}")
+  if b.rows == 0 || b.cols == 0: return
+  strsm_raw(
+    ROW_MAJOR, side, uplo, NO_TRANS, diag,
+    b.rows as i32, b.cols as i32,
+    alpha,
+    &a.data[0], a.cols as i32,
+    &b.data[0], b.cols as i32,
+  )

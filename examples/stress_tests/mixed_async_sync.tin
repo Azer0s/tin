@@ -14,9 +14,7 @@
 use assert
 use sync
 
-// ---------------------------------------------------------------------------
 // Sync helpers (regular functions)
-// ---------------------------------------------------------------------------
 
 fn{#pure} square(n i64) i64 =
   return n * n
@@ -37,9 +35,7 @@ fn{#pure} sum_arr(arr [i64]) i64 =
 
   return acc
 
-// ---------------------------------------------------------------------------
 // Async functions that call sync helpers internally
-// ---------------------------------------------------------------------------
 
 fn{#async} async_square(n i64) i64 =
   // sync call inside async function
@@ -50,12 +46,12 @@ fn{#async} async_pipeline(vals [i64], lo i64, hi i64) i64 =
   let clamped [i64] = []
 
   for let v i64 in vals:
-    clamped ++= clamp(v, lo, hi)
+    clamped ++= [clamp(v, lo, hi)]
   // 2. spawn sub-fibers for expensive work (simulated)
   let futures [Future[i64]] = []
 
   for let c i64 in clamped:
-    futures ++= spawn async_square(c)
+    futures ++= [spawn async_square(c)]
   // 3. await all and sum - interleaves async awaits with sync accumulation
   let total i64 = 0
   let i i64 = 0
@@ -68,9 +64,7 @@ fn{#async} async_pipeline(vals [i64], lo i64, hi i64) i64 =
 
   return total
 
-// ---------------------------------------------------------------------------
 // Async function that uses a sync closure to transform data before spawning
-// ---------------------------------------------------------------------------
 
 fn{#async} async_with_sync_transform(n i64) i64 =
   let transform = fn(x i64) i64 = return x * 3 + 1  // sync closure
@@ -79,20 +73,16 @@ fn{#async} async_with_sync_transform(n i64) i64 =
 
   return doubled + sum_arr([1, 2, 3])                  // sync after async
 
-// ---------------------------------------------------------------------------
 // Sync function that uses the result of an awaited call
 // (main() is sync; it calls into async territory via spawn/await)
-// ---------------------------------------------------------------------------
 
 fn process_results(a i64, b i64, c i64) i64 =
   // pure sync aggregation
   return sum_arr([a, b, c])
 
-// ---------------------------------------------------------------------------
 // Mixed: async function that calls another async function directly (no spawn)
 // In Tin an #async function can call another #async function directly - it
 // runs synchronously in the same fiber rather than spawning a new one.
-// ---------------------------------------------------------------------------
 
 fn{#async} direct_async_call_chain(n i64) i64 =
   let a = await spawn async_square(n)
@@ -103,9 +93,7 @@ fn{#async} direct_async_call_chain(n i64) i64 =
 
   return c
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "sync function called from async" =
   let r = await spawn async_square(7)

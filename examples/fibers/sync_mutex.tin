@@ -26,9 +26,7 @@
 use assert
 use sync
 
-// ---------------------------------------------------------------------------
 // Mutex shared counter
-// ---------------------------------------------------------------------------
 
 var g_mu      sync::Mutex
 var g_counter i64
@@ -63,9 +61,7 @@ fn{#async} run_mutex_counter(fibers i64, per_fiber i64) i64 =
 
   return g_counter
 
-// ---------------------------------------------------------------------------
 // RWMutex shared counter (write-lock only path)
-// ---------------------------------------------------------------------------
 
 var g_rwmu    sync::RWMutex
 var g_rw_val  i64
@@ -100,9 +96,7 @@ fn{#async} run_rwmutex_writers(fibers i64, per_fiber i64) i64 =
 
   return g_rw_val
 
-// ---------------------------------------------------------------------------
 // RWMutex mixed: readers run concurrently alongside writers
-// ---------------------------------------------------------------------------
 // Readers hold the read lock briefly while verifying the value is non-negative;
 // writers increment under the write lock.  Final write count must be exact.
 
@@ -159,9 +153,7 @@ fn{#async} run_rwmutex_mixed(writers i64, readers i64, per i64) i64 =
 
   return g_rw_val
 
-// ---------------------------------------------------------------------------
 // Cond signal and broadcast
-// ---------------------------------------------------------------------------
 
 var g_cond     sync::Cond
 var g_cond_mu  sync::Mutex
@@ -193,9 +185,7 @@ fn{#async} cond_producer_broadcast(val i64) =
   g_cond_mu.unlock()
   g_cond.broadcast()
 
-// ---------------------------------------------------------------------------
 // main() for standalone run
-// ---------------------------------------------------------------------------
 
 fn{#async} main() =
   let h1 = spawn run_mutex_counter(8, 100)
@@ -262,9 +252,7 @@ fn{#async} main() =
 
   echo "sync_mutex: OK"
 
-// ---------------------------------------------------------------------------
 // test blocks
-// ---------------------------------------------------------------------------
 
 test "mutex basic lock unlock" =
   let m = sync::Mutex.new()

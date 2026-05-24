@@ -1,0 +1,12 @@
+// sync::wait gives sync code an explicit bridge to wait on a Future
+// without using the `await` keyword.  Verifies the fn drives the
+// scheduler and returns the inner T.
+use sync
+
+fn{#async} compute(n i64) i64 = return n * n
+
+fn main() =
+  let v = sync::wait(spawn compute(7))
+
+  if v == 49:
+    echo "wait-ok"

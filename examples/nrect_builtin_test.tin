@@ -1,0 +1,82 @@
+// examples/nrect_builtin_test - coverage for the nrect(arr) builtin.
+//
+// nrect walks every element at every interior depth and returns true
+// iff every sub-array shares its sibling's length.  Depth-1 arrays
+// and strings are vacuously rectangular.
+
+use assert
+
+test "nrect on a flat 1D array is always true" =
+  assert::ok(nrect([1, 2, 3]))
+  assert::ok(nrect([42]))
+  let empty [i64] = []
+
+  assert::ok(nrect(empty))
+
+test "nrect on a rectangular 2D array" =
+  assert::ok(nrect([[1, 2], [3, 4]]))
+  assert::ok(nrect([[1, 2, 3], [4, 5, 6]]))
+  assert::ok(nrect([[1], [2], [3]]))
+
+test "nrect on a jagged 2D array" =
+  assert::not_ok(nrect([[1, 2, 3], [4]]))
+  assert::not_ok(nrect([[1], [2, 3]]))
+  assert::not_ok(nrect([[1, 2], [3, 4], [5]]))
+
+test "nrect on an empty outer 2D is vacuously true" =
+  let m [[i64]] = []
+
+  assert::ok(nrect(m))
+
+test "nrect on a single empty row is vacuously true" =
+  let inner [i64] = []
+  let outer [[i64]] = [inner]
+
+  assert::ok(nrect(outer))
+
+test "nrect on multiple empty rows is true" =
+  let r1 [i64] = []
+  let r2 [i64] = []
+  let m [[i64]] = [r1, r2]
+
+  assert::ok(nrect(m))
+
+test "nrect on one empty + one non-empty row is false" =
+  let r1 [i64] = []
+  let r2 [i64] = [1, 2, 3]
+  let m [[i64]] = [r1, r2]
+
+  assert::not_ok(nrect(m))
+
+test "nrect on a rectangular 3D array" =
+  let m [[[i64]]] = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+
+  assert::ok(nrect(m))
+
+test "nrect catches jaggedness at inner depth (3D)" =
+  // Outer + middle are rectangular; one innermost row is short.
+  let m [[[i64]]] = [[[1, 2], [3]], [[5, 6], [7, 8]]]
+
+  assert::not_ok(nrect(m))
+
+test "nrect catches jaggedness at middle depth (3D)" =
+  // First outer element has 2 rows; second has 1.
+  let a [[i64]] = [[1, 2], [3, 4]]
+  let b [[i64]] = [[5, 6]]
+  let m [[[i64]]] = [a, b]
+
+  assert::not_ok(nrect(m))
+
+test "nrect composes with nlen for trustable shape access" =
+  let m [[f64]] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+  if nrect(m):
+    let s = nlen(m)
+    assert::equals(2 as i64, s[0])
+    assert::equals(3 as i64, s[1])
+  else:
+    assert::fails("expected rectangular matrix")
+
+test "nrect on a string is vacuously true" =
+  assert::ok(nrect("hello"))
+  assert::ok(nrect(""))

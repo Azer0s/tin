@@ -1,0 +1,180 @@
+// libs/blas/level1 - BLAS Level 1: vector-vector operations.
+//
+// Two layers:
+//
+//   *_raw   thin extern bindings; take a length, raw pointers, and
+//           explicit strides.  Use these for sub-slices or strided
+//           views (e.g. operating on every other element).
+//
+//   <name>  high-level wrappers that take Tin arrays directly,
+//           inferring n = len(...) and stride = 1.  Panic if the two
+//           vector operands disagree on length.
+//
+// Both `d` (double / f64) and `s` (single / f32) variants are exposed.
+
+// Raw extern bindings.
+
+// ddot_raw returns the dot product sum(X[i*incx] * Y[i*incy]) for i in 0..n.
+fn ddot_raw(n i32, x *f64, incx i32, y *f64, incy i32) f64 = extern("cblas_ddot")
+fn sdot_raw(n i32, x *f32, incx i32, y *f32, incy i32) f32 = extern("cblas_sdot")
+
+// dasum_raw returns sum(|X[i*incx]|).
+fn dasum_raw(n i32, x *f64, incx i32) f64 = extern("cblas_dasum")
+fn sasum_raw(n i32, x *f32, incx i32) f32 = extern("cblas_sasum")
+
+// dnrm2_raw returns the Euclidean norm sqrt(sum(X[i*incx]^2)).
+fn dnrm2_raw(n i32, x *f64, incx i32) f64 = extern("cblas_dnrm2")
+fn snrm2_raw(n i32, x *f32, incx i32) f32 = extern("cblas_snrm2")
+
+// dscal_raw updates X[i*incx] := alpha * X[i*incx] in place.
+fn dscal_raw(n i32, alpha f64, x *f64, incx i32) = extern("cblas_dscal")
+fn sscal_raw(n i32, alpha f32, x *f32, incx i32) = extern("cblas_sscal")
+
+// daxpy_raw updates Y[i*incy] := alpha * X[i*incx] + Y[i*incy] in place.
+fn daxpy_raw(n i32, alpha f64, x *f64, incx i32, y *f64, incy i32) = extern("cblas_daxpy")
+fn saxpy_raw(n i32, alpha f32, x *f32, incx i32, y *f32, incy i32) = extern("cblas_saxpy")
+
+// dcopy_raw copies Y[i*incy] := X[i*incx].
+fn dcopy_raw(n i32, x *f64, incx i32, y *f64, incy i32) = extern("cblas_dcopy")
+fn scopy_raw(n i32, x *f32, incx i32, y *f32, incy i32) = extern("cblas_scopy")
+
+// dswap_raw swaps X and Y element-wise (with strides).
+fn dswap_raw(n i32, x *f64, incx i32, y *f64, incy i32) = extern("cblas_dswap")
+fn sswap_raw(n i32, x *f32, incx i32, y *f32, incy i32) = extern("cblas_sswap")
+
+// idamax_raw returns the index of the largest |X[i*incx]| (0-based).
+// CBLAS spec returns size_t on Linux/OpenBLAS but `int` on Accelerate;
+// the low 32 bits of the return register hold a valid index for any
+// array Tin can address, so reading as i32 is portable in practice.
+fn idamax_raw(n i32, x *f64, incx i32) i32 = extern("cblas_idamax")
+fn isamax_raw(n i32, x *f32, incx i32) i32 = extern("cblas_isamax")
+
+// High-level wrappers - take Tin arrays directly, stride implicitly 1.
+
+// ddot returns the dot product of two equal-length f64 vectors.
+fn ddot(x [f64], y [f64]) f64 =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::ddot: length mismatch (x={n}, y={len(y)})")
+  return ddot_raw(n as i32, &x[0], 1, &y[0], 1)
+
+fn sdot(x [f32], y [f32]) f32 =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::sdot: length mismatch (x={n}, y={len(y)})")
+  return sdot_raw(n as i32, &x[0], 1, &y[0], 1)
+
+// dasum returns sum(|x[i]|).
+fn dasum(x [f64]) f64 = return dasum_raw(len(x) as i32, &x[0], 1)
+fn sasum(x [f32]) f32 = return sasum_raw(len(x) as i32, &x[0], 1)
+
+// dnrm2 returns the Euclidean norm of x.
+fn dnrm2(x [f64]) f64 = return dnrm2_raw(len(x) as i32, &x[0], 1)
+fn snrm2(x [f32]) f32 = return snrm2_raw(len(x) as i32, &x[0], 1)
+
+// dscal updates x := alpha * x in place.
+fn dscal(alpha f64, x [f64]) = dscal_raw(len(x) as i32, alpha, &x[0], 1)
+fn sscal(alpha f32, x [f32]) = sscal_raw(len(x) as i32, alpha, &x[0], 1)
+
+// daxpy updates y := alpha * x + y in place.
+fn daxpy(alpha f64, x [f64], y [f64]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::daxpy: length mismatch (x={n}, y={len(y)})")
+  daxpy_raw(n as i32, alpha, &x[0], 1, &y[0], 1)
+
+fn saxpy(alpha f32, x [f32], y [f32]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::saxpy: length mismatch (x={n}, y={len(y)})")
+  saxpy_raw(n as i32, alpha, &x[0], 1, &y[0], 1)
+
+// dcopy copies x into y (both must be the same length).
+fn dcopy(x [f64], y [f64]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::dcopy: length mismatch (x={n}, y={len(y)})")
+  dcopy_raw(n as i32, &x[0], 1, &y[0], 1)
+
+fn scopy(x [f32], y [f32]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::scopy: length mismatch (x={n}, y={len(y)})")
+  scopy_raw(n as i32, &x[0], 1, &y[0], 1)
+
+// dswap exchanges the contents of x and y in place.
+fn dswap(x [f64], y [f64]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::dswap: length mismatch (x={n}, y={len(y)})")
+  dswap_raw(n as i32, &x[0], 1, &y[0], 1)
+
+fn sswap(x [f32], y [f32]) =
+  let n = len(x)
+  if n != len(y):
+    panic("blas::sswap: length mismatch (x={n}, y={len(y)})")
+  sswap_raw(n as i32, &x[0], 1, &y[0], 1)
+
+// idamax returns the 0-based index of the largest |x[i]|.
+fn idamax(x [f64]) i32 = return idamax_raw(len(x) as i32, &x[0], 1)
+fn isamax(x [f32]) i32 = return isamax_raw(len(x) as i32, &x[0], 1)
+
+
+// ===== Array[T] overloads =====
+//
+// Same routine names, accepting Array[T] (f32 or f64).  Storage is
+// already CBLAS-compatible, so each call is the raw extern plus one
+// struct-field load.  Function name stays the precision-specific
+// form (ddot vs sdot, etc.) since CBLAS itself splits that way.
+
+fn ddot(x Array[f64], y Array[f64]) f64 =
+  if x.len != y.len:
+    panic("blas::ddot: length mismatch (x={x.len}, y={y.len})")
+  return ddot_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn sdot(x Array[f32], y Array[f32]) f32 =
+  if x.len != y.len:
+    panic("blas::sdot: length mismatch (x={x.len}, y={y.len})")
+  return sdot_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn dasum(x Array[f64]) f64 = return dasum_raw(x.len as i32, &x.data[0], 1)
+fn sasum(x Array[f32]) f32 = return sasum_raw(x.len as i32, &x.data[0], 1)
+
+fn dnrm2(x Array[f64]) f64 = return dnrm2_raw(x.len as i32, &x.data[0], 1)
+fn snrm2(x Array[f32]) f32 = return snrm2_raw(x.len as i32, &x.data[0], 1)
+
+fn dscal(alpha f64, x Array[f64]) = dscal_raw(x.len as i32, alpha, &x.data[0], 1)
+fn sscal(alpha f32, x Array[f32]) = sscal_raw(x.len as i32, alpha, &x.data[0], 1)
+
+fn daxpy(alpha f64, x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::daxpy: length mismatch (x={x.len}, y={y.len})")
+  daxpy_raw(x.len as i32, alpha, &x.data[0], 1, &y.data[0], 1)
+
+fn saxpy(alpha f32, x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::saxpy: length mismatch (x={x.len}, y={y.len})")
+  saxpy_raw(x.len as i32, alpha, &x.data[0], 1, &y.data[0], 1)
+
+fn dcopy(x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::dcopy: length mismatch (x={x.len}, y={y.len})")
+  dcopy_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn scopy(x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::scopy: length mismatch (x={x.len}, y={y.len})")
+  scopy_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn dswap(x Array[f64], y Array[f64]) =
+  if x.len != y.len:
+    panic("blas::dswap: length mismatch (x={x.len}, y={y.len})")
+  dswap_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn sswap(x Array[f32], y Array[f32]) =
+  if x.len != y.len:
+    panic("blas::sswap: length mismatch (x={x.len}, y={y.len})")
+  sswap_raw(x.len as i32, &x.data[0], 1, &y.data[0], 1)
+
+fn idamax(x Array[f64]) i32 = return idamax_raw(x.len as i32, &x.data[0], 1)
+fn isamax(x Array[f32]) i32 = return isamax_raw(x.len as i32, &x.data[0], 1)

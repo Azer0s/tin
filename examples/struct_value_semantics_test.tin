@@ -1,0 +1,234 @@
+// struct_value_semantics_test.tin - verify that when a struct value
+// is passed to a function that mutates the parameter's contents, the
+// caller's binding is not affected.
+//
+// Tin's call-site auto-copy dispatch wraps such args in a deep_copy
+// at the call boundary, so the callee's mutations apply only to its
+// own copy.  Without the auto-copy, the callee would mutate the
+// caller's shared buffer fields and the assertions below would fail.
+
+use assert
+
+data Bag(print) =
+  B(label string, items [i64])
+
+  fn ::print(this Bag) string =
+    match this:
+      case B(label, items): return label
+
+fn relabel(b Bag) =
+  match b:
+    case B(_, items):
+      b = B("after", items)
+
+fn appender(b Bag) =
+  match b:
+    case B(label, items):
+      b = B(label, items ++ [99])
+
+test "field reassign in callee does not leak to caller" =
+  let original = B("before", [1, 2, 3])
+  relabel(original)
+
+  match original:
+    case B(label, _): assert::equals(label, "before")
+
+test "buffer growth in callee does not leak to caller" =
+  let original = B("x", [1, 2, 3])
+  appender(original)
+
+  match original:
+    case B(_, items):
+      assert::equals(len(items), 3)
+      assert::equals(items[0], 1)
+      assert::equals(items[2], 3)
+
+// Plain (non-data) struct: mutating one field on the callee's copy
+// must not change the caller's view of either field.
+
+struct Box(print) =
+  count i64
+  tag   string
+
+  fn ::print(this Box) string = return this.tag
+
+fn bump(b Box) =
+  b.count = b.count + 100
+  b.tag   = "modified"
+
+test "scalar + string fields stay isolated under mutation" =
+  let original = Box{count: 7, tag: "original"}
+  bump(original)
+
+  assert::equals(original.count, 7)
+  assert::equals(original.tag, "original")
+
+// The case where LLVM by-value alone is NOT enough: a buffer-content
+// write through a shared-buffer field of a struct param.  Without
+// auto-copy at the call site, the callee and caller share the array
+// buffer behind `items`, and `c.items[0] = 999` would propagate back
+// to the caller.  Auto-copy deep-clones the array buffer so the
+// callee's writes apply to an isolated buffer.
+
+struct Container =
+  items [i64]
+
+fn pollute(c Container) =
+  c.items[0] = 999
+
+test "buffer-content write through struct field stays isolated" =
+  let original = Container{items: [1, 2, 3]}
+  pollute(original)
+
+  assert::equals(1, original.items[0])
+  assert::equals(2, original.items[1])
+  assert::equals(3, original.items[2])
+
+// The deep-element case: a struct with an array-of-struct field
+// where the inner struct has its own RC field (string).  Without
+// per-element deep-copy in the array clone, the array buffer would
+// be fresh but the elements would still share their string fields
+// with the original.  A callee mutating `c.entries[i].label` would
+// write through the shared string slot in the cloned array, which
+// in turn reflects back to the caller's original.entries[i].label.
+//
+// Per-element deep-copy via the foreach helper isolates each
+// element so this can't happen.
+
+struct Entry(print) =
+  label string
+
+  fn ::print(this Entry) string = return this.label
+
+struct Registry =
+  entries [Entry]
+
+fn relabel_first(r Registry) =
+  r.entries[0].label = "modified"
+
+test "deep element clone isolates string field inside [Struct]" =
+  let r = Registry{entries: [Entry{label: "original"}, Entry{label: "keep"}]}
+  relabel_first(r)
+
+  assert::equals("original", r.entries[0].label)
+  assert::equals("keep",     r.entries[1].label)
+
+// Explicit copy() on a struct routes through the same deep-copy
+// intrinsic the auto-dispatch uses.  Useful when the caller wants
+// isolation even for a non-mutating callee or before sharing the
+// value with multiple consumers.
+
+fn read_label(b Box) string =
+  return b.tag
+
+test "explicit copy() on a struct produces an isolated value" =
+  let original = Box{count: 1, tag: "first"}
+  let twin     = copy(original)
+
+  assert::equals(read_label(twin), read_label(original))
+  assert::equals(1, twin.count)
+  assert::equals("first", twin.tag)
+
+// Struct with a fixed-size array field [N]T where T is RC-tracked
+// (e.g., [3]string).  Without a matching retain in the deep-copy
+// walker, scope-exit of the autocopy temp would underflow the rc on
+// the shared element buffers and either double-free or dangle the
+// caller's array slots.
+
+struct TripleLabel =
+  labels [string; 3]
+
+fn touch_triple(t TripleLabel) =
+  t.labels[0] = "modified"
+
+test "fixed-size [string; 3] field stays balanced under autocopy" =
+  let original = TripleLabel{labels: ["a", "b", "c"]}
+  touch_triple(original)
+
+  assert::equals("a", original.labels[0])
+  assert::equals("b", original.labels[1])
+  assert::equals("c", original.labels[2])
+
+// Struct with an ADT field: the generic deep-copy walker can't
+// navigate the variant payload safely.  The fallback path retains
+// the field (shares the ADT block with the original) so scope-exit
+// on the autocopy temp goes through the ADT release path balanced.
+// Without the fallback, recursing into the ADT layout would produce
+// a shallow bit-copy and the temp's scope-exit would corrupt the
+// shared payload's rc.
+
+use { Result, Ok, Err } from result
+
+struct Slot =
+  outcome Result[i64, string]
+
+fn just_read(s Slot) i64 =
+  return s.outcome.unwrap_or(-1)
+
+test "struct with ADT field stays rc-balanced under autocopy" =
+  let original = Slot{outcome: Ok(42)}
+  let n = just_read(original)
+
+  assert::equals(42, n)
+
+  match original.outcome:
+    case Ok(v):  assert::equals(42, v)
+    case Err(_): assert::equals(0, 1)
+
+// Method-call autocopy: a method that mutates a struct buffer field
+// via `this.field[i] = ...` should not leak its mutation back to the
+// caller's binding for the receiver.  callContextInfoFor resolves
+// `value.method` to the `Struct_method` key so paramMutatedFor finds
+// the body and the dispatch fires deep_copy on the receiver.
+
+struct Tracker =
+  values [i64]
+
+  fn ::bump_first(this Tracker, by_n i64) =
+    this.values[0] = this.values[0] + by_n
+
+test "method that mutates receiver buffer stays isolated" =
+  let t = Tracker{values: [10, 20, 30]}
+  t.bump_first(5)
+
+  assert::equals(10, t.values[0])
+  assert::equals(20, t.values[1])
+  assert::equals(30, t.values[2])
+
+// Unified rule: direct array args get the same value-semantics
+// treatment as struct args.  A callee mutating `xs[i]` against a
+// `[T]` parameter cannot leak the mutation back to the caller's
+// binding - the value-shaped arg auto-copies at the call boundary.
+// Users opting into Go-style buffer sharing pass `*[T]` instead.
+
+fn poke_first(xs [i64]) =
+  xs[0] = 999
+
+test "direct [i64] arg autocopies under callee mutation" =
+  let nums = [1, 2, 3, 4, 5]
+  poke_first(nums)
+
+  assert::equals(1, nums[0])
+  assert::equals(2, nums[1])
+  assert::equals(5, nums[4])
+
+// Struct field of type `any`: the per-type-id deep-copy dispatch
+// table allocates a fresh data block for the boxed value when the
+// struct is auto-copied, so a callee mutating a field of the boxed
+// struct doesn't reach back through the shared `any` data slot to
+// the caller's binding.
+
+struct AnyHolder =
+  payload any
+
+fn rebind(h AnyHolder) =
+  h.payload = "rebound" as any
+
+test "struct field of type any stays balanced under autocopy" =
+  let h = AnyHolder{payload: "original" as any}
+  rebind(h)
+
+  // Autocopy isolated the field-reassign; h.payload still holds
+  // "original" (the rebind only mutated its local copy's slot).
+  let p = h.payload as string
+  assert::equals("original", p)

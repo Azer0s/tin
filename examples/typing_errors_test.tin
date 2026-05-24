@@ -56,6 +56,10 @@ test "scalar into pointer slot does not panic" =
 test "wrong-struct pointer does not panic" =
   expect_no_compiler_panic("wrong_struct_ptr.tin")
 
+test "cross-type pointer argument is rejected with clean error" =
+  expect_diagnostic("wrong_struct_ptr_arg.tin",
+    "cannot pass *B where *A is expected")
+
 test "string into pointer slot does not panic" =
   expect_no_compiler_panic("str_into_ptr.tin")
 

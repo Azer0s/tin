@@ -190,10 +190,10 @@ func (cg *CodeGen) checkStructUnwrappedCResources(structKey string, sd *ast.Stru
 		}
 
 		cg.warnInFile(file, DiagUnwrappedCResource, pos,
-			"struct %s field %q (%s) crosses an extern boundary unwrapped -- "+
+			"struct %s field %q (%s) crosses an extern boundary unwrapped - "+
 				"copies of %s will alias the resource and double-free on scope exit. %s",
-			prettyStructName(sd.Name), f.Name, shape,
-			prettyStructName(sd.Name), hint)
+			cg.diagStructName(sd.Name), f.Name, shape,
+			cg.diagStructName(sd.Name), hint)
 	}
 }
 

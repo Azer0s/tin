@@ -37,7 +37,7 @@ fn build_harness() string =
 
   assert::ok(build.exit_code == 0 as i32)
 
-  let base = ["clang", "-O1", "-fno-omit-frame-pointer", "-rdynamic", "-DTIN_STACKTRACE=1", "-gline-tables-only", "-I", WORK, "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/interop_st.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm"]
+  let base = ["clang", "-O1", "-fno-omit-frame-pointer", "-rdynamic", "-DTIN_STACKTRACE=1", "-DTIN_USE_MIMALLOC=1", "-gline-tables-only", "-I", WORK, "-I/opt/homebrew/include", "-I/usr/local/include", "-L/opt/homebrew/lib", "-L/usr/local/lib", "-o", WORK ++ "/harness", SRC ++ "/harness.c", WORK ++ "/interop_st.o", "runtime/runtime.c", "-lpthread", "-ldl", "-lm", "-lmimalloc"]
   let extras = extra_link_libs()
   let clang_argv = base ++ extras
   let clang = run_cmd(clang_argv, "", [] as [string])

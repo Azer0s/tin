@@ -18,28 +18,60 @@ let x = nums[0]    // 1
 let y = nums[4]    // 5
 ```
 
-### Array append (`++=`)
+### Array concat-assign (`++=`)
 
-`++=` appends a single element to an array variable in place:
+`++=` extends an array variable in place with every element of another
+slice of the same element type.  The right-hand side must be a `[T]`
+matching the left -- to append a single value, wrap it as a one-element
+slice:
 
 ```rust
 let res [i64] = []
-res ++= 1
-res ++= 2
-res ++= 3
+res ++= [1]            // append one element
+res ++= [2, 3]         // append two elements
 // res is now [1, 2, 3]
+
+let more = [4, 5]
+res ++= more           // concat with another slice  -> [1, 2, 3, 4, 5]
 ```
+
+Passing a bare element (`res ++= 1`) is a compile error.  The diagnostic
+points to the wrap fix:
+
+```
+error: `++=` expects a `[i64]` on the right-hand side; got i64.
+       `++=` is concat-assign (not append-one) -- to append a single
+       value, wrap it: `xs ++= [v]`
+```
+
+The strict shape catches a class of silent bugs (e.g. `xs ++= [v]` on
+`xs : [any]` used to box the whole `[v]` slice as one `any` element,
+leaking memory and giving surprising semantics).  Concat-assign with
+matching slice types has no such ambiguity.
 
 ### Array concatenation (`++`)
 
-`++` creates a new array by joining two arrays or an array and an element:
+`++` creates a new array by joining two arrays of matching element
+type.  Both sides must be slices of the same element type -- to
+prepend or append a single value, wrap it as a one-element slice
+(symmetric with `++=`):
 
 ```rust
 let a = [1, 2, 3]
 let b = [4, 5]
-let c = a ++ b     // [1, 2, 3, 4, 5]
+let c = a ++ b          // [1, 2, 3, 4, 5]
+let d = a ++ [99]       // [1, 2, 3, 99]
+let e = [0] ++ a        // [0, 1, 2, 3]
 
 let s = "Hello" ++ ", world!"   // string concatenation works the same way
+```
+
+Mismatched shapes produce a clear error:
+
+```
+error: `++` is slice concat: both sides must be the same slice
+       type, got [i64] ++ i64. To prepend or append a single value,
+       wrap it as a one-element slice: `[v] ++ xs` or `xs ++ [v]`
 ```
 
 ### Iterating arrays
@@ -66,6 +98,88 @@ let s = "hello"
 echo s.len    // 5
 ```
 
+### Capacity, fill, copy, and the cap-check panic
+
+`cap(arr)`, `copy(arr)`, the `[v] * n` runtime fill syntax, the
+shared-buffer alias model, and the runtime cap-check panic on `++=`
+are documented in
+[04-collections-mutation.md](04-collections-mutation.md).
+
+### Array shape (`nlen`)
+
+For nested arrays, `nlen` returns the **size of each dimension** as an
+`[i64]`. It descends through `arr[0]` at every level, so it captures
+the canonical shape under the assumption that the array is
+rectangular:
+
+```rust
+nlen([1, 2, 3])                        // [3]
+nlen([[1, 2], [3, 4]])                 // [2, 2]
+nlen([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])  // [2, 2, 2]
+nlen([])                               // [0]
+```
+
+`len(nlen(arr))` is the **rank** (number of dimensions). `nlen` is not
+"how many dimensions" on its own; it's the per-dimension sizes.
+
+When descent hits an empty layer the remaining inner dims are reported
+as `0` (rather than dereferencing the null data pointer of the empty
+array):
+
+```rust
+let empty [[i64]] = []
+nlen(empty)                            // [0, 0]
+
+let outer [[i64]] = [[]]
+nlen(outer)                            // [1, 0]
+```
+
+`nlen` only samples `arr[0]` at each level, so jagged arrays report
+the first row's shape:
+
+```rust
+nlen([[1, 2, 3], [4]])                 // [2, 3]  (not [2, ?])
+```
+
+If shape integrity matters, pair `nlen` with `nrect` (below).
+
+### Rectangularity (`nrect`)
+
+`nrect(arr) bool` walks every element at every interior depth and
+returns `true` iff every sub-array shares its sibling's length.
+Use it whenever you need the shape from `nlen` to be trustable -
+BLAS-style matrix code, contiguous-buffer flattening, anything that
+treats a `[[T]]` as a real rectangle:
+
+```rust
+nrect([[1, 2], [3, 4]])                // true
+nrect([[1, 2, 3], [4]])                // false  (rows differ)
+nrect([1, 2, 3])                       // true   (depth 1 is vacuous)
+nrect([])                              // true   (no rows to compare)
+nrect("hello")                         // true   (strings are flat)
+```
+
+`nrect` and `nlen` are complementary, not redundant:
+
+| Builtin | Cost          | Reads             | Returns                  |
+|---------|---------------|-------------------|--------------------------|
+| `len`   | O(1)          | outer length      | `i64`                    |
+| `nlen`  | O(depth)      | `arr[0]` chain    | `[i64]` per-dim sizes    |
+| `nrect` | O(N elements) | every sub-array   | `bool`                   |
+
+The usual pattern is:
+
+```rust
+if !nrect(matrix):
+  panic("expected a rectangular matrix")
+let shape = nlen(matrix)
+let rows = shape[0]
+let cols = shape[1]
+```
+
+For a rare opt-out - when you've just built the matrix yourself and
+know it's rectangular - skip `nrect` and call `nlen` directly.
+
 ### Element type must match
 
 An array of one element type cannot be silently passed where a different
@@ -91,9 +205,11 @@ conversions like `[i32] as [u32]` are a zero-cost pointer reinterpretation.
 
 ### Implementation note
 
-Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len` builtin
-simply reads the second word; it compiles to a single load with no function
-call overhead.
+Arrays are fat pointers `{ i8* data, i64 len, i64 cap }`. The `len`
+builtin reads the second word, `cap` the third; both compile to a
+single load with no function call overhead.
+[04-collections-mutation.md](04-collections-mutation.md#implementation-note)
+covers the amortized growth + in-place fast path for `++=`.
 
 ### Array destructuring
 

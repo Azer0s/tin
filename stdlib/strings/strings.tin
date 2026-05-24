@@ -80,7 +80,7 @@ fn count(s string, sub string) i64 =
     let i i64 = 0
 
     for i + 16 <= n:
-      let chunk = simd::loadu(addr(data[i]))
+      let chunk = simd::loadu(&data[i])
       let eq    = simd::cmpeq(chunk, needle)
       let bits  = simd::movemask(eq)
 
@@ -141,7 +141,7 @@ fn index_of(s string, sub string) i64 =
     let i i64 = 0
 
     for i + 16 <= n:
-      let chunk = simd::loadu(addr(data[i]))
+      let chunk = simd::loadu(&data[i])
       let eq    = simd::cmpeq(chunk, needle)
       let bits  = simd::movemask(eq)
 
@@ -243,7 +243,7 @@ fn split(s string, sep string) [string] =
     let i i64 = 0
 
     for i < n:
-      parts ++= substr(s, i, i + 1)
+      parts ++= [substr(s, i, i + 1)]
       i = i + 1
 
     return parts
@@ -253,13 +253,13 @@ fn split(s string, sep string) [string] =
 
   for i <= n - m:
     if match_at(s, i, sep):
-      parts ++= substr(s, start, i)
+      parts ++= [substr(s, start, i)]
       i = i + m
       start = i
     else:
       i = i + 1
 
-  parts ++= substr(s, start, n)
+  parts ++= [substr(s, start, n)]
 
   return parts
 

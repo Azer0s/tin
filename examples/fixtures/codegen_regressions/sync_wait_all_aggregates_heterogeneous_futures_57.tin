@@ -1,0 +1,15 @@
+// sync::wait_all collects [Future[any]] -> [any] for fan-in patterns.
+// Verifies auto-coercion of Future[i64] / Future[string] into the
+// [Future[any]] slot is silent, and that each element of the result
+// is the unboxed wait value.
+use sync
+
+fn{#async} as_i64() any  = return 99 as any
+fn{#async} as_str() any  = return "hi" as any
+
+fn main() =
+  let fs = [spawn as_i64(), spawn as_str()]
+  let xs = sync::wait_all(fs)
+
+  if len(xs) == 2 && (xs[0] as i64) == 99 && (xs[1] as string) == "hi":
+    echo "all-ok"

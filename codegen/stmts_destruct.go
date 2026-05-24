@@ -28,7 +28,7 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 		}
 
 		if typeName != "" {
-			if aliasedTE, ok2 := cg.typeAliases[typeName]; ok2 {
+			if aliasedTE := cg.aliasTypeFor(CanonKey(typeName)); aliasedTE != nil {
 				if tat, ok3 := aliasedTE.(*ast.TupleArrayType); ok3 {
 					s = &ast.ArrayDestructDecl{
 						Names:     s.Names,
@@ -180,25 +180,20 @@ func (cg *CodeGen) genArrayDestructDecl(block *ir.Block, s *ast.ArrayDestructDec
 			}
 		}
 
-		// Build a generic {i8*, i64} slice for _tin_slice_subslice
-		sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-		rawAlloca := block.NewAlloca(sliceType)
-
+		// Build a `{i8*, i64 len, i64 cap}` raw slice for
+		// _tin_slice_subslice (cap == len; the source array's actual
+		// cap doesn't matter for the subslice, which copies anyway).
+		sliceType := fatArrayPtrType(irtypes.I8)
 		dataPtrAsI8 := block.NewBitCast(ptrField, irtypes.I8Ptr)
-		rawPtrGep := block.NewGetElementPtr(sliceType, rawAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(dataPtrAsI8, rawPtrGep)
 
 		lenGep := block.NewGetElementPtr(arrVal.Type(), arrAlloca,
 			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
 		arrLen := block.NewLoad(irtypes.I64, lenGep)
-		rawLenGep := block.NewGetElementPtr(sliceType, rawAlloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(arrLen, rawLenGep)
-		rawSlice := block.NewLoad(sliceType, rawAlloca)
+		rawSlice := cg.buildFatArrayValue(block, irtypes.I8, dataPtrAsI8, arrLen, arrLen)
+		_ = sliceType
 
 		subFn := cg.ensureSliceSubslice()
-		subResult := block.NewCall(subFn, rawSlice,
+		subResult := cg.callExtern(block, subFn, rawSlice,
 			constant.NewInt(irtypes.I64, int64(regularCount)),
 			constant.NewInt(irtypes.I64, elemSzBytes))
 
@@ -242,7 +237,7 @@ func (cg *CodeGen) genStructDestructDecl(block *ir.Block, s *ast.StructDestructD
 	}
 
 	concreteName := typeName
-	if aliasedType, ok := cg.typeAliases[typeName]; ok {
+	if aliasedType := cg.aliasTypeFor(CanonKey(typeName)); aliasedType != nil {
 		if st, ok2 := aliasedType.(*ast.SimpleType); ok2 {
 			concreteName = st.Name
 		}
@@ -348,11 +343,11 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 
 	concreteName := structNameFromValue(val)
 	if concreteName == "" {
-		return nil, fmt.Errorf("tuple destructuring: expected a Tuple struct value, got %s", fmtArgType(val.Type()))
+		return nil, fmt.Errorf("tuple destructuring: expected a Tuple struct value, got %s", cg.fmtArgType(val.Type()))
 	}
 
-	llType, ok := cg.structTypes[concreteName]
-	if !ok {
+	llType := cg.structTypeFor(CanonKey(concreteName))
+	if llType == nil {
 		return nil, fmt.Errorf("tuple destructuring: unknown struct type '%s'", concreteName)
 	}
 
@@ -363,10 +358,10 @@ func (cg *CodeGen) genTupleDestructDecl(block *ir.Block, s *ast.TupleDestructDec
 	// Ok payload -- snake.tin's `let (grid, _) = parse_int("20")` was the
 	// canonical wrong-shape case after parse_int migrated to Result.
 	if cg.isDataType(val.Type()) {
-		pretty := prettyStructName(concreteName)
+		pretty := cg.diagStructName(concreteName)
 
 		return nil, cg.nodeErr(s,
-			"cannot destructure %s as a tuple -- its layout is "+
+			"cannot destructure %s as a tuple - its layout is "+
 				"{tag, payload}, not (a, b).  Use a `match` to extract the "+
 				"variant, or call a method like .unwrap() / .unwrap_or(d) "+
 				"that returns the inner value directly",

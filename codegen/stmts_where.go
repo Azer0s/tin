@@ -3,7 +3,6 @@ package codegen
 import (
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
@@ -268,7 +267,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 		// Only valid against integer argument types.
 		if !irtypes.IsInt(arg.llvmTyp) {
 			return nil, fmt.Errorf("%d:%d: integer literal pattern used against non-integer argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 
 		argInt := arg.llvmTyp.(*irtypes.IntType)
@@ -289,7 +288,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.BoolLit:
 		if it, ok := arg.llvmTyp.(*irtypes.IntType); !ok || it.BitSize != 1 {
 			return nil, fmt.Errorf("%d:%d: bool literal pattern used against non-bool argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 
 		v := int64(0)
@@ -306,7 +305,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.StringLit:
 		if !isFatArrayPtr(arg.llvmTyp) {
 			return nil, fmt.Errorf("%d:%d: string literal pattern used against non-string argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 		// Build the target string constant as a fat-ptr, strcmp == 0.
 		strFat := cg.buildStringFatPtr(block, p.Value)
@@ -322,7 +321,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.FloatLit:
 		if _, ok := arg.llvmTyp.(*irtypes.FloatType); !ok {
 			return nil, fmt.Errorf("%d:%d: float literal pattern used against non-float argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 
 		cst := constant.NewFloat(arg.llvmTyp.(*irtypes.FloatType), p.Value)
@@ -335,7 +334,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.AtomLit:
 		if !isAtomType(arg.llvmTyp) {
 			return nil, fmt.Errorf("%d:%d: atom literal pattern used against non-atom argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 
 		code := cg.registerAtom(p.Name)
@@ -349,7 +348,7 @@ func (cg *CodeGen) emitSingleArgPatternTest(block *ir.Block, pat ast.Node, arg w
 	case *ast.ArrayPattern:
 		if !isFatArrayPtr(arg.llvmTyp) {
 			return nil, fmt.Errorf("%d:%d: array pattern used against non-array argument (arg %q has type %s)",
-				p.Pos().Line, p.Pos().Col, arg.name, fmtArgType(arg.llvmTyp))
+				p.Pos().Line, p.Pos().Col, arg.name, cg.fmtArgType(arg.llvmTyp))
 		}
 
 		return cg.emitWhereArrayPatternTest(block, p, arg, failBlock)
@@ -451,19 +450,14 @@ func (cg *CodeGen) emitWhereArrayPatternTest(block *ir.Block, ap *ast.ArrayPatte
 				elemSzBytes = int64(sz)
 			}
 
-			sliceType := irtypes.NewStruct(irtypes.I8Ptr, irtypes.I64)
-			rawAlloca := lenOkBlock.NewAlloca(sliceType)
-
+			// `{i8*, i64 len, i64 cap}` raw slice for the subslice
+			// runtime helper.  cap == len; the slice is borrowed for
+			// the call only.
+			sliceType := fatArrayPtrType(irtypes.I8)
 			dataAsI8 := lenOkBlock.NewBitCast(dataPtr, irtypes.I8Ptr)
-			rawPtrGep := lenOkBlock.NewGetElementPtr(sliceType, rawAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-			lenOkBlock.NewStore(dataAsI8, rawPtrGep)
-			rawLenGep := lenOkBlock.NewGetElementPtr(sliceType, rawAlloca,
-				constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-			lenOkBlock.NewStore(arrLen, rawLenGep)
-			rawSlice := lenOkBlock.NewLoad(sliceType, rawAlloca)
+			rawSlice := cg.buildFatArrayValue(lenOkBlock, irtypes.I8, dataAsI8, arrLen, arrLen)
 
-			subRes := lenOkBlock.NewCall(cg.ensureSliceSubslice(), rawSlice,
+			subRes := cg.callExtern(lenOkBlock, cg.ensureSliceSubslice(), rawSlice,
 				constant.NewInt(irtypes.I64, int64(regularCount)),
 				constant.NewInt(irtypes.I64, elemSzBytes))
 
@@ -490,82 +484,4 @@ func whereClauseArity(pat ast.Node) (int, ast.Node) {
 	}
 
 	return 1, pat
-}
-
-// fmtArgType renders an LLVM type using Tin surface names where possible so
-// error messages read naturally. Strings, bools, and ints/floats get their
-// source-level names; everything else falls back to the LLVM form.
-func fmtArgType(t irtypes.Type) string {
-	if t == nil {
-		return "<nil>"
-	}
-
-	if isFatArrayPtr(t) {
-		st := t.(*irtypes.StructType)
-		elem := st.Fields[0].(*irtypes.PointerType).ElemType
-
-		if it, ok := elem.(*irtypes.IntType); ok && it.BitSize == 8 {
-			return "string"
-		}
-
-		return "[" + fmtArgType(elem) + "]"
-	}
-
-	if isAtomType(t) {
-		return "atom"
-	}
-
-	if it, ok := t.(*irtypes.IntType); ok {
-		switch it.BitSize {
-		case 1:
-			return "bool"
-		case 8, 16, 32, 64, 128:
-			return fmt.Sprintf("i%d", it.BitSize)
-		}
-	}
-
-	if ft, ok := t.(*irtypes.FloatType); ok {
-		switch ft.Kind { //nolint:exhaustive // half/X86_FP80/PPC_FP128 are unused by tin
-		case irtypes.FloatKindHalf:
-			return "f16"
-		case irtypes.FloatKindFloat:
-			return "f32"
-		case irtypes.FloatKindDouble:
-			return "f64"
-		case irtypes.FloatKindFP128:
-			return "f128"
-		}
-	}
-
-	if pt, ok := t.(*irtypes.PointerType); ok {
-		// Opaque pointer in modern LLVM: print as *void.
-		if pt.ElemType == nil {
-			return "*void"
-		}
-
-		return "*" + fmtArgType(pt.ElemType)
-	}
-
-	if at, ok := t.(*irtypes.ArrayType); ok {
-		return fmt.Sprintf("[%d x %s]", at.Len, fmtArgType(at.ElemType))
-	}
-
-	if st, ok := t.(*irtypes.StructType); ok {
-		if name := st.Name(); name != "" {
-			return prettyStructName(name)
-		}
-		// Anonymous tuple-like struct: render as (T1, T2, ...).
-		parts := make([]string, len(st.Fields))
-		for i, f := range st.Fields {
-			parts[i] = fmtArgType(f)
-		}
-
-		return "(" + strings.Join(parts, ", ") + ")"
-	}
-
-	if _, ok := t.(*irtypes.VoidType); ok {
-		return "void"
-	}
-
-	return t.String()
 }

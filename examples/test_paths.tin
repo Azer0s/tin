@@ -8,7 +8,6 @@
 use paths
 use assert
 
-// -------------------------------------------------------------------------
 // join
 
 test "join: simple" =
@@ -38,7 +37,6 @@ test "join: multi-segment" =
 test "join: preserves extensions" =
   assert::equals(paths::join("dir", "file.txt"), "dir/file.txt")
 
-// -------------------------------------------------------------------------
 // basename
 
 test "basename: simple" =
@@ -62,7 +60,6 @@ test "basename: empty" =
 test "basename: double trailing slash" =
   assert::equals(paths::basename("foo//"), "foo")
 
-// -------------------------------------------------------------------------
 // dirname
 
 test "dirname: simple" =
@@ -89,7 +86,6 @@ test "dirname: empty" =
 test "dirname: just filename in subdir" =
   assert::equals(paths::dirname("dir/file"), "dir")
 
-// -------------------------------------------------------------------------
 // ext
 
 test "ext: simple" =

@@ -24,7 +24,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) required by tin codegen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
           clang --version
           opt --version | head -2
           ld.lld --version
@@ -148,7 +148,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) + valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
           clang --version
           opt --version | head -2
           ld.lld --version
@@ -251,9 +251,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install LLVM (opt, llc, ld64.lld)
+      - name: Install LLVM (opt, llc, ld64.lld) + mimalloc
         run: |
-          brew install llvm
+          brew install llvm mimalloc
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Build compiler

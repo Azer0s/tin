@@ -141,7 +141,7 @@ signal.
 | Crystal  |  72.8 ms  | ~73 ns  |
 | **Tin**  | **103.7 ms** | **~104 ns** |
 | Rust     | 297.8 ms  | ~298 ns |
-| Go       | 749.6 ms ± 305 ms | host-noisy |
+| Go       | 749.6 ms $\pm$ 305 ms | host-noisy |
 
 ### Pipeline - 1M passes, 4 stages (lower is better)
 
@@ -150,7 +150,7 @@ signal.
 | Crystal  | 155.6 ms  | ~156 ns |
 | **Tin**  | **259.1 ms** | **~259 ns** |
 | Rust     | 698.7 ms  | ~699 ns |
-| Go       | 1317 ms ± 511 ms | host-noisy |
+| Go       | 1317 ms $\pm$ 511 ms | host-noisy |
 
 ### MPMC - 1M messages, 4 producers + 4 consumers (higher is better)
 
@@ -186,7 +186,7 @@ signal.
 | Crystal  |  70.6 ms  | ~14.2M items/s |
 | **Tin**  | **164.9 ms** | **~6.06M items/s** |
 | Rust     | 428.8 ms  | ~2.33M items/s |
-| Go       | 744.1 ms ± 343 ms | host-noisy |
+| Go       | 744.1 ms $\pm$ 343 ms | host-noisy |
 
 </details>
 
@@ -229,7 +229,7 @@ benchmark except MPMC.
   count + faster IPC tips them to Tin; on the 8-core 9700K Crystal's
   green-thread cheapness still wins these two.
 - **Go variance on the 9700K box.** Several Go runs (pingpong, pipeline,
-  fanout) show standard deviations in the hundreds of ms (mean ±300 ms).
+  fanout) show standard deviations in the hundreds of ms (mean $\pm$300 ms).
   The host had background load during the sweep; Go's worker-startup is
   most sensitive to that. Treat those numbers as upper bounds.
 - **Rust Tokio current_thread** is single-threaded by construction, so the

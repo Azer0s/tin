@@ -8,11 +8,6 @@ package codegen
 // when clang processes the IR with -O1 or higher.
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -24,545 +19,6 @@ import (
 
 // token type: LLVM pseudo-type used only by llvm.coro.* intrinsics
 
-type coroTokenType struct{}
-
-func (t *coroTokenType) Equal(other irtypes.Type) bool {
-	_, ok := other.(*coroTokenType)
-
-	return ok
-}
-func (t *coroTokenType) String() string   { return "token" }
-func (t *coroTokenType) LLString() string { return "token" }
-func (t *coroTokenType) SetName(_ string) {}
-func (t *coroTokenType) Name() string     { return "" }
-
-var coroTokType irtypes.Type = &coroTokenType{}
-
-// coroNoneVal is the `token none` constant used in coro.suspend / coro.end.
-type coroNoneVal struct{}
-
-func (v *coroNoneVal) Type() irtypes.Type { return coroTokType }
-func (v *coroNoneVal) Ident() string      { return "none" }
-func (v *coroNoneVal) LLString() string   { return "token none" }
-func (v *coroNoneVal) String() string     { return "token none" }
-
-var coroNone value.Value = &coroNoneVal{}
-
-// Lazy intrinsic / runtime declarations
-
-func (cg *CodeGen) ensureCoroIntrinsics() {
-	if cg.coroIDFn != nil {
-		return
-	}
-
-	cg.coroIDFn = cg.ensureIntrinsic("llvm.coro.id", coroTokType, []*ir.Param{
-		ir.NewParam("", irtypes.I32),
-		ir.NewParam("", irtypes.I8Ptr),
-		ir.NewParam("", irtypes.I8Ptr),
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-	cg.coroAllocFn = cg.ensureIntrinsic("llvm.coro.alloc", irtypes.I1, []*ir.Param{
-		ir.NewParam("", coroTokType),
-	})
-	cg.coroSizeFn = cg.ensureIntrinsic("llvm.coro.size.i64", irtypes.I64, nil)
-	cg.coroBeginFn = cg.ensureIntrinsic("llvm.coro.begin", irtypes.I8Ptr, []*ir.Param{
-		ir.NewParam("", coroTokType),
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-	cg.coroSuspendFn = cg.ensureIntrinsic("llvm.coro.suspend", irtypes.I8, []*ir.Param{
-		ir.NewParam("", coroTokType),
-		ir.NewParam("", irtypes.I1),
-	})
-	cg.coroEndFn = cg.ensureIntrinsic("llvm.coro.end", irtypes.Void, []*ir.Param{
-		ir.NewParam("", irtypes.I8Ptr),
-		ir.NewParam("", irtypes.I1),
-		ir.NewParam("", coroTokType),
-	})
-	cg.coroFreeFn = cg.ensureIntrinsic("llvm.coro.free", irtypes.I8Ptr, []*ir.Param{
-		ir.NewParam("", coroTokType),
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-	cg.coroResumeFn = cg.ensureIntrinsic("llvm.coro.resume", irtypes.Void, []*ir.Param{
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-	cg.coroDoneFn = cg.ensureIntrinsic("llvm.coro.done", irtypes.I1, []*ir.Param{
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-	cg.coroDestroyFn = cg.ensureIntrinsic("llvm.coro.destroy", irtypes.Void, []*ir.Param{
-		ir.NewParam("", irtypes.I8Ptr),
-	})
-}
-
-// ensureIntrinsic declares an LLVM intrinsic on the module (declaration only).
-func (cg *CodeGen) ensureIntrinsic(name string, ret irtypes.Type, params []*ir.Param) *ir.Func {
-	for _, f := range cg.allFuncs() {
-		if f.Name() == name {
-			return f
-		}
-	}
-
-	f := cg.mod.NewFunc(name, ret, params...)
-	f.Blocks = nil
-
-	return f
-}
-
-func (cg *CodeGen) ensureFiberRuntime() {
-	if cg.fiberSpawnFn != nil {
-		return
-	}
-
-	cg.fiberSpawnFn = cg.ensureExternDecl("_tin_fiber_spawn", irtypes.I64,
-		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
-	cg.fiberSpawnJoinableFn = cg.ensureExternDecl("_tin_fiber_spawn_joinable", irtypes.I64,
-		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
-	// Stacktrace-aware spawn variants (Phase 4 of docs/plans/stacktrace-libunwind.md).
-	// Codegen routes here only when cg.stacktraceUsed; the runtime captures
-	// _current_fib's pid+generation as the new fiber's parent so a later
-	// stacktrace() can walk the spawn chain across fiber boundaries.
-	cg.fiberSpawnChainFn = cg.ensureExternDecl("_tin_fiber_spawn_chain", irtypes.I64,
-		[]*ir.Param{
-			ir.NewParam("hdl", irtypes.I8Ptr),
-			ir.NewParam("caller_ip", irtypes.I64),
-		}, false)
-	cg.fiberSpawnJoinableChainFn = cg.ensureExternDecl("_tin_fiber_spawn_joinable_chain", irtypes.I64,
-		[]*ir.Param{
-			ir.NewParam("hdl", irtypes.I8Ptr),
-			ir.NewParam("caller_ip", irtypes.I64),
-		}, false)
-	cg.fiberCompleteFn = cg.ensureExternDecl("_tin_fiber_complete", irtypes.Void,
-		[]*ir.Param{ir.NewParam("res", irtypes.I8Ptr)}, false)
-	cg.fiberJoinFn = cg.ensureExternDecl("_tin_fiber_join", irtypes.Void,
-		[]*ir.Param{ir.NewParam("pid", irtypes.I64), ir.NewParam("hdl", irtypes.I8Ptr)}, false)
-	cg.fiberGetResultFn = cg.ensureExternDecl("_tin_fiber_get_result", irtypes.I8Ptr,
-		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
-	cg.fiberGetPanicMsgFn = cg.ensureExternDecl("_tin_fiber_get_panic_msg", irtypes.I8Ptr,
-		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
-	cg.fiberYieldCoroFn = cg.ensureExternDecl("_tin_fiber_yield_coro", irtypes.Void,
-		[]*ir.Param{ir.NewParam("hdl", irtypes.I8Ptr)}, false)
-	cg.coroTakeResultFn = cg.ensureExternDecl("_tin_coro_take_result", irtypes.I8Ptr, nil, false)
-	cg.fiberInitFn = cg.ensureExternDecl("_tin_fiber_init", irtypes.Void, nil, false)
-	cg.fiberRunFn = cg.ensureExternDecl("_tin_fiber_run", irtypes.Void, nil, false)
-	cg.ioInitFn = cg.ensureExternDecl("_tin_io_init", irtypes.Void, nil, false)
-	// Auto-load runtime/builtin/ so language-defined traits (tryable,
-	// awaitable in the future, operator traits, etc.) are always in scope.
-	// Failure here is non-fatal: if the directory does not exist (e.g. a
-	// custom build), language features that depend on those traits surface
-	// their own errors at use sites.
-	_ = cg.ensureRuntimeBuiltinModules()
-
-	// Auto-load sync so Future[t] and Awaitable[t] are available
-	// for spawn/await codegen without requiring an explicit `use sync`.
-	// Error is stored; if sync fails to load, wrapPidInFuture will report it.
-	cg.syncLoadErr = cg.ensureSyncModule()
-}
-
-// ensureSyncModule loads the sync package once so that Future[t],
-// Awaitable[t], and Unit are available in scope for fiber codegen.
-// Returns the load error so callers can report it if Future[T] wrapping later fails.
-func (cg *CodeGen) ensureSyncModule() error {
-	if cg.syncModuleLoaded {
-		return nil
-	}
-
-	cg.syncModuleLoaded = true
-
-	return cg.loadPackage("sync")
-}
-
-// ensureRuntimeBuiltinModules walks runtime/builtin/ and loads every
-// .tin file found so the traits defined there are in scope for every
-// program. Idempotent. Missing directory is treated as "no built-ins"
-// rather than an error so a stripped-down compiler build still works.
-func (cg *CodeGen) ensureRuntimeBuiltinModules() error {
-	if cg.runtimeBuiltinLoaded {
-		return nil
-	}
-
-	cg.runtimeBuiltinLoaded = true
-
-	dir := cg.runtimeBuiltinBase()
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		// No directory == no built-ins. Not an error.
-		return nil
-	}
-
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tin") {
-			continue
-		}
-
-		full := filepath.Join(dir, e.Name())
-
-		dedupeKey := "file:" + full
-		if cg.importedPkgs[dedupeKey] {
-			continue
-		}
-
-		cg.importedPkgs[dedupeKey] = true
-
-		src, err := os.ReadFile(full)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", full, err)
-		}
-
-		pkgName := strings.TrimSuffix(e.Name(), ".tin")
-		if err := cg.loadPackageFromSource("builtin::"+pkgName, pkgName, full); err != nil {
-			return fmt.Errorf("load %s: %w", full, err)
-		}
-
-		_ = src
-	}
-
-	return nil
-}
-
-// Coroutine prologue helper
-
-type coroFrame struct {
-	hdl             value.Value // i8* coroutine handle
-	id              value.Value // token coroutine id
-	cleanupEntry    *ir.Block   // block to branch to for cleanup
-	finalSuspendBlk *ir.Block   // single shared block holding coro.suspend(true)
-}
-
-// emitCoroPrologue emits the standard coroutine prologue into entry.
-// Returns a coroFrame and the block where the function body should be generated.
-//
-//	entry -> [coro.alloc] -> coro.begin  (body starts here)
-func (cg *CodeGen) emitCoroPrologue(entry *ir.Block) (*coroFrame, *ir.Block) {
-	cg.ensureCoroIntrinsics()
-
-	// _tin_coro_malloc / _tin_coro_free use a per-thread frame pool to avoid
-	// system malloc/free calls on the hot path.  The pool prefixes each frame
-	// with its size (8 bytes) so frames can be matched by size on reuse.
-	// The LLVM frame pointer is ptr+8 (skipping the size prefix).
-	coroMallocFn := cg.ensureExternDecl("_tin_coro_malloc", irtypes.I8Ptr,
-		[]*ir.Param{ir.NewParam("size", irtypes.I64)}, false)
-
-	id := entry.NewCall(cg.coroIDFn,
-		constant.NewInt(irtypes.I32, 0),
-		constant.NewNull(irtypes.I8Ptr),
-		constant.NewNull(irtypes.I8Ptr),
-		constant.NewNull(irtypes.I8Ptr),
-	)
-	needAlloc := entry.NewCall(cg.coroAllocFn, id)
-
-	allocBlk := cg.newBlock("coro.alloc")
-	beginBlk := cg.newBlock("coro.begin")
-	entry.NewCondBr(needAlloc, allocBlk, beginBlk)
-
-	sz := allocBlk.NewCall(cg.coroSizeFn)
-	mem := allocBlk.NewCall(coroMallocFn, sz)
-	allocBlk.NewBr(beginBlk)
-
-	phi := beginBlk.NewPhi(
-		ir.NewIncoming(mem, allocBlk),
-		ir.NewIncoming(constant.NewNull(irtypes.I8Ptr), entry),
-	)
-	hdl := beginBlk.NewCall(cg.coroBeginFn, id, phi)
-
-	cleanupBlk := cg.newBlock("coro.cleanup")
-
-	// finalBlk holds the single coro.suspend(true) for this coroutine.
-	// LLVM requires exactly one final suspend per coroutine; all return paths
-	// branch here instead of emitting coro.suspend(true) inline.
-	finalBlk := cg.newBlock("coro.final")
-	sp := finalBlk.NewCall(cg.coroSuspendFn, coroNone, constant.NewInt(irtypes.I1, 1))
-	deadBlk := cg.newBlock("coro.after.final")
-	finalBlk.NewSwitch(sp, cleanupBlk,
-		ir.NewCase(constant.NewInt(irtypes.I8, 0), deadBlk),
-		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanupBlk),
-	)
-	deadBlk.NewUnreachable()
-
-	return &coroFrame{hdl: hdl, id: id, cleanupEntry: cleanupBlk, finalSuspendBlk: finalBlk}, beginBlk
-}
-
-// emitCoroEpilogue emits the cleanup epilogue into cleanupBlk.
-// LLVM coroutine lowering requires coro.end BEFORE coro.free:
-// the coro.free intrinsic returns null if coro.end was already called,
-// which tells the cleanup block whether to free memory.
-func (cg *CodeGen) emitCoroEpilogue(frame *coroFrame) {
-	b := frame.cleanupEntry
-	// Use _tin_coro_free (pool-aware) instead of free() directly.
-	// _tin_coro_free reads the size prefix stored 8 bytes before the LLVM frame
-	// pointer and either returns the frame to the per-thread pool or falls back
-	// to free().  Passing null (coro-elided / stack-allocated frame) is a no-op.
-	coroFreeFn := cg.ensureExternDecl("_tin_coro_free", irtypes.Void,
-		[]*ir.Param{ir.NewParam("ptr", irtypes.I8Ptr)}, false)
-	// coro.end must come first - it marks the coroutine as done.
-	b.NewCall(cg.coroEndFn, frame.hdl, constant.NewInt(irtypes.I1, 0), coroNone)
-	// coro.free returns the memory to release (null if coro-elided).
-	mem := b.NewCall(cg.coroFreeFn, frame.id, frame.hdl)
-	b.NewCall(coroFreeFn, mem)
-	b.NewRet(frame.hdl)
-}
-
-// externYieldsAfter reports whether the named runtime extern leaves
-// the calling fiber in a pending-park state, requiring a
-// coro.suspend afterwards so the worker observes the park and
-// switches to another fiber.  The list is small and tightly
-// auditable -- channel send/recv emit their own inline suspends,
-// fiber_join handles its own waiter dance, and the remaining
-// park-on-call externs are timer / future / IO primitives.
-func externYieldsAfter(name string) bool {
-	switch name {
-	case "_tin_sleep_ms":
-		return true
-	}
-
-	return false
-}
-
-// emitSuspendPoint emits a coro.suspend in block.
-// Returns: resumeBlock (execution continues there after re-resume).
-// The cleanupBlock destination must be set by the caller; we branch directly
-// to frame.cleanupEntry here.
-func (cg *CodeGen) emitSuspendPoint(block *ir.Block, frame *coroFrame) *ir.Block {
-	sp := block.NewCall(cg.coroSuspendFn, coroNone, constant.NewInt(irtypes.I1, 0))
-	resumeBlk := cg.newBlock("coro.resume")
-	cleanBrBlk := cg.newBlock("coro.cleanup.br")
-	suspBlk := cg.newBlock("coro.suspended")
-
-	block.NewSwitch(sp, suspBlk,
-		ir.NewCase(constant.NewInt(irtypes.I8, 0), resumeBlk),
-		ir.NewCase(constant.NewInt(irtypes.I8, 1), cleanBrBlk),
-	)
-	suspBlk.NewRet(frame.hdl) // coroutine is suspended; ramp returns hdl
-	cleanBrBlk.NewBr(frame.cleanupEntry)
-
-	return resumeBlk
-}
-
-// emitFinalSuspend branches to the coroutine's shared final-suspend block.
-// LLVM requires exactly one coro.suspend(true) per coroutine; all return paths
-// call this function which branches to frame.finalSuspendBlk (created once in
-// emitCoroPrologue).
-func (cg *CodeGen) emitFinalSuspend(block *ir.Block, frame *coroFrame) {
-	block.NewBr(frame.finalSuspendBlk)
-}
-
-// Callgraph coloring
-
-// isAsyncTag returns true when tags contains "async".
-func isAsyncTag(tags []string) bool {
-	for _, t := range tags {
-		if t == "async" {
-			return true
-		}
-	}
-
-	return false
-}
-
-// coroVersionName returns name + "$coro".
-func coroVersionName(name string) string { return name + "$coro" }
-
-// recordCallees walks an AST node tree and appends every directly-called
-// function name to *out. This is used to build the call graph before coloring.
-func recordCallees(n ast.Node, out *[]string) {
-	if n == nil {
-		return
-	}
-
-	switch v := n.(type) {
-	case *ast.CallExpr:
-		if id, ok := v.Func.(*ast.Identifier); ok {
-			*out = append(*out, id.Name)
-		}
-
-		recordCallees(v.Func, out)
-
-		for _, a := range v.Args {
-			recordCallees(a, out)
-		}
-	case *ast.Block:
-		for _, s := range v.Stmts {
-			recordCallees(s, out)
-		}
-	case *ast.ExprStmt:
-		recordCallees(v.Expr, out)
-	case *ast.VarDecl:
-		recordCallees(v.Value, out)
-	case *ast.ReturnStmt:
-		recordCallees(v.Value, out)
-	case *ast.AssignStmt:
-		recordCallees(v.Target, out)
-		recordCallees(v.Value, out)
-	case *ast.AugAssignStmt:
-		recordCallees(v.Target, out)
-		recordCallees(v.Value, out)
-	case *ast.IfStmt:
-		recordCallees(v.Cond, out)
-
-		for _, s := range v.Then.Stmts {
-			recordCallees(s, out)
-		}
-
-		for _, elif := range v.ElseIfs {
-			recordCallees(elif.Cond, out)
-
-			for _, s := range elif.Body.Stmts {
-				recordCallees(s, out)
-			}
-		}
-
-		if v.Else != nil {
-			for _, s := range v.Else.Stmts {
-				recordCallees(s, out)
-			}
-		}
-	case *ast.ForStmt:
-		recordCallees(v.Cond, out)
-		recordCallees(v.Init, out)
-		recordCallees(v.Post, out)
-		recordCallees(v.Iter, out)
-
-		if v.Body != nil {
-			for _, s := range v.Body.Stmts {
-				recordCallees(s, out)
-			}
-		}
-	case *ast.BinExpr:
-		recordCallees(v.Left, out)
-		recordCallees(v.Right, out)
-	case *ast.UnaryExpr:
-		recordCallees(v.Expr, out)
-	case *ast.IndexExpr:
-		recordCallees(v.Expr, out)
-		recordCallees(v.Index, out)
-	case *ast.FieldAccess:
-		recordCallees(v.Expr, out)
-	case *ast.PipeExpr:
-		recordCallees(v.Left, out)
-		recordCallees(v.Right, out)
-	case *ast.TernaryExpr:
-		recordCallees(v.Cond, out)
-		recordCallees(v.Then, out)
-		recordCallees(v.Else, out)
-	case *ast.EchoStmt:
-		recordCallees(v.Value, out)
-	case *ast.DeferStmt:
-		recordCallees(v.Call, out)
-	case *ast.SpawnExpr:
-		recordCallees(v.Call, out)
-
-		if v.DoBlock != nil {
-			for _, s := range v.DoBlock.Stmts {
-				recordCallees(s, out)
-			}
-		}
-	case *ast.AwaitExpr:
-		recordCallees(v.Future, out)
-	case *ast.LambdaExpr:
-		if v.Body != nil {
-			recordCallees(v.Body, out)
-		}
-	case *ast.WhereList:
-		for _, wc := range v.Clauses {
-			recordCallees(wc.Body, out)
-		}
-	}
-}
-
-// buildCallGraphEntry builds call-graph entries for a single function declaration
-// and all its struct methods.
-func (cg *CodeGen) buildCallGraphEntry(name string, body ast.Node) {
-	if body == nil {
-		return
-	}
-
-	var callees []string
-	recordCallees(body, &callees)
-	// deduplicate
-	seen := map[string]bool{}
-	for _, c := range callees {
-		if !seen[c] {
-			seen[c] = true
-			cg.callGraph[name] = append(cg.callGraph[name], c)
-		}
-	}
-}
-
-// colorCallGraph runs BFS from all {#async} roots and marks every reachable
-// Tin function as needing a $coro duplicate.
-func (cg *CodeGen) colorCallGraph() {
-	worklist := make([]string, 0)
-
-	for name, decl := range cg.funcDecls {
-		if isAsyncTag(decl.Tags) {
-			worklist = append(worklist, name)
-		}
-	}
-
-	for len(worklist) > 0 {
-		name := worklist[0]
-		worklist = worklist[1:]
-
-		if cg.coroCallable[name] {
-			continue
-		}
-
-		cg.coroCallable[name] = true
-		for _, callee := range cg.callGraph[name] {
-			if _, ok := cg.funcDecls[callee]; ok && !cg.coroCallable[callee] {
-				worklist = append(worklist, callee)
-			}
-		}
-	}
-	// fn main() is compiled to _tin_user_main at IR level.  If the user
-	// marked it {#async}, colorCallGraph sets coroCallable["main"] but
-	// genFuncDeclAs checks coroCallable["_tin_user_main"] (the IR name).
-	// Sync the two so the $coro variant is actually generated.
-	if cg.coroCallable["main"] {
-		cg.coroCallable["_tin_user_main"] = true
-	}
-}
-
-// $coro variant predeclaration
-
-// predeclareCoroVariant pre-declares "name$coro(...) i8*" on the module so
-// that call sites inside other coro functions can forward-reference it.
-// If hasEnv is true, an i8* env pointer is prepended as the first parameter.
-func (cg *CodeGen) predeclareCoroVariant(n *ast.FuncDecl, tinName string, hasEnv bool) error {
-	coroName := coroVersionName(tinName)
-	// Check if already declared.
-	if _, already := cg.curScope.vars[coroName]; already {
-		return nil
-	}
-	// Build param list.
-	var params []*ir.Param
-	if hasEnv {
-		params = append(params, ir.NewParam("env", irtypes.I8Ptr))
-	}
-
-	for _, p := range n.Params {
-		if p.IsVarArgs {
-			continue
-		}
-
-		pt, err := cg.tinTypeToLLVM(p.Type)
-		if err != nil {
-			return fmt.Errorf("predeclareCoroVariant %s param %s: %w", tinName, p.Name, err)
-		}
-
-		params = append(params, ir.NewParam(p.Name, pt))
-	}
-	// Ramp function always returns i8* (the coroutine handle).
-	f := cg.mod.NewFunc(coroName, irtypes.I8Ptr, params...)
-	f.Blocks = nil
-	cg.curScope.set(coroName, &scopeEntry{val: f, isAlloc: false})
-
-	return nil
-}
-
-// $coro body generation helpers
-
-// llvmSizeOf returns the size of an LLVM type as an i64 value using the GEP
-// null-pointer trick: sizeof(T) = ptrtoint(GEP (T*)null, 1).
 func (cg *CodeGen) llvmSizeOf(block *ir.Block, t irtypes.Type) value.Value {
 	nullPtr := constant.NewNull(irtypes.NewPointer(t))
 	gep := block.NewGetElementPtr(t, nullPtr, constant.NewInt(irtypes.I32, 1))
@@ -659,6 +115,10 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	prevYieldResumeBlocks := cg.yieldResumeBlocks
 	prevCurBlock := cg.curBlock
 	prevDiScope := cg.diCurrentScope
+	// Reset moved-bindings for this body's emission so the outer
+	// sync variant's moves do not poison the coro variant.
+	prevMovedBindings := cg.movedBindings
+	cg.movedBindings = nil
 
 	cg.curBlock = nil
 	cg.yieldResumeBlocks = make(map[*ir.Block]bool)
@@ -681,6 +141,57 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.ensureFiberRuntime()
 	frame, rampBlock := cg.emitCoroPrologue(entryBlk)
 
+	// Recursive lambda self-ref: when the caller plumbed
+	// `cg.lambdaSelfName` (genLambdaExpr's `#async` lambda emission
+	// path), register a fat-fn-ptr value built from this coro's IR
+	// func + its env arg under that name in the body scope so
+	// recursive calls from within the coro body resolve through
+	// callFatFn -> slot 0/1/2 -> the appropriate variant.  Mirrors
+	// the sync + $colored variants' self-ref registration in
+	// genLambdaExpr.  Cleared so nested async lambdas don't
+	// inherit the outer binding.
+	selfName := cg.lambdaSelfName
+	cg.lambdaSelfName = ""
+
+	if selfName != "" && n.RetType != nil && len(coroFn.Params) > 0 {
+		envForSelf := coroFn.Params[0]
+		// Look up the sync entry (registered earlier by
+		// genLambdaExpr) to build the fat-fn-ptr.  Falls back to
+		// using the coroFn itself if no sync entry is in scope
+		// yet (defensive; should not happen for the
+		// genLambdaExpr path).
+		var syncFn *ir.Func
+
+		if se, ok := cg.curScope.lookup(n.Name); ok {
+			if f, ok2 := se.val.(*ir.Func); ok2 {
+				syncFn = f
+			}
+		}
+
+		if syncFn != nil {
+			fatVal := cg.buildFatFnPtrValue(rampBlock, syncFn, envForSelf)
+			fatSlot := rampBlock.NewAlloca(fatVal.Type())
+			rampBlock.NewStore(fatVal, fatSlot)
+			cg.curScope.set(selfName, &scopeEntry{val: fatSlot, isAlloc: true, noDeinit: true, noRelease: true})
+		}
+	}
+
+	// Param offset: when the coro fn was predeclared with hasEnv=true,
+	// Params[0] is the env pointer and user params start at index 1.
+	// Detect by sig-arity difference vs the AST.
+	nonVarArgCount := 0
+
+	for _, astParam := range n.Params {
+		if !astParam.IsVarArgs {
+			nonVarArgCount++
+		}
+	}
+
+	paramOffset := 0
+	if len(coroFn.Params) > nonVarArgCount {
+		paramOffset = 1
+	}
+
 	// ARC: retain every parameter before the initial suspend.
 	//
 	// The ramp function returns the coroutine handle to the scheduler before
@@ -697,7 +208,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	//     define fn _fiber_retain                        -> calls that method
 	//   - plain scalars / structs with no RC data        -> no-op
 	{
-		llParam := 0
+		llParam := paramOffset
 
 		for _, astParam := range n.Params {
 			if astParam.IsVarArgs {
@@ -742,11 +253,19 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	// we must copy values to local allocas (not use the env GEP directly).
 	cg.unpackEnv(bodyStart, coroFn, envStructType, captures, false)
 
+	// Detect closure-env layout (lambda coro variant): a leading i8*
+	// dtor slot indicates the env was built via buildClosureEnv and is
+	// RC-allocated, shared across the sync/colored/coro variants.  Do
+	// NOT free() it here -- the RC dtor handles release.
+	envIsClosureLayout := envStructType != nil && len(envStructType.Fields) == len(captures)+1 && envStructType.Fields[0] == irtypes.I8Ptr
+
 	// ARC: release the env's own reference to each RC-tracked capture (the
 	// matching retain was emitted in genSpawnDoBlock before buildEnv).
 	// The coro scope now owns its own retain (from unpackEnv), so the env's
 	// reference is no longer needed.  Also free the env struct itself.
-	if len(captures) > 0 && envStructType != nil {
+	// Skip for closure-layout envs (lambda coro variant) -- the RC dtor
+	// owns release of both the env block and its inner captures.
+	if !envIsClosureLayout && len(captures) > 0 && envStructType != nil {
 		for _, c := range captures {
 			if !isRCTrackedType(c.llvmTy) {
 				continue
@@ -791,7 +310,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	// Note: RC-tracked parameters were already retained in the ramp block above
 	// (before the initial suspend) so we do NOT emit another retain here.
 	// The scope-exit release at body end provides the matching release.
-	llIdx := 0
+	llIdx := paramOffset
 
 	for _, astParam := range n.Params {
 		if astParam.IsVarArgs {
@@ -855,6 +374,7 @@ func (cg *CodeGen) genCoroFuncBody(n *ast.FuncDecl, coroName string, captures []
 	cg.yieldResumeBlocks = prevYieldResumeBlocks
 	cg.curBlock = prevCurBlock
 	cg.diCurrentScope = prevDiScope
+	cg.movedBindings = prevMovedBindings
 
 	return nil
 }
@@ -991,22 +511,103 @@ func (cg *CodeGen) genCallSiteYield(from *ir.Block) *ir.Block {
 	return afterBlk
 }
 
+// genColoredCallSiteYield is the $colored-body counterpart of
+// genCallSiteYield: the body has no coro frame of its own, so the
+// yield routes through the caller's TLS-tracked hdl via
+// `_tin_fiber_yield_coro(_tin_current_coro_hdl())`.  No suspend
+// intrinsic, no resume block split -- the runtime call simply returns
+// once the scheduler hands the fiber back.  We still emit a panic
+// check afterwards so fire-and-forget fibers' unhandled panics
+// surface on the same per-iteration cadence as the $coro path.
+//
+// Caller contract is the same as genCallSiteYield: returns the
+// (possibly advanced) block and updates cg.curBlock.
+func (cg *CodeGen) genColoredCallSiteYield(from *ir.Block) *ir.Block {
+	cg.emitColoredRuntimeYield(from)
+	afterBlk := cg.newBlock("callsite.colored.yield.after")
+	cg.emitColoredPanicCheck(from, afterBlk, "callsite.colored.yield")
+	cg.curBlock = afterBlk
+
+	return afterBlk
+}
+
+// emitColoredRuntimeYield emits the runtime yield call used by
+// $colored bodies: `_tin_fiber_yield_coro(_tin_current_coro_hdl())`.
+// The TLS lookup returns the current fiber's coro hdl (set by the
+// scheduler before resuming); passing it to _tin_fiber_yield_coro
+// suspends and reschedules.  No coro frame allocation, no intrinsics.
+// Block is NOT terminated -- the yield is a regular call instruction.
+func (cg *CodeGen) emitColoredRuntimeYield(block *ir.Block) {
+	cg.ensureFiberRuntime()
+	hdl := block.NewCall(cg.ensureCurrentCoroHdlFn())
+	block.NewCall(cg.fiberYieldCoroFn, hdl)
+}
+
+// emitColoredPanicCheck is the non-coro counterpart of emitPanicCheck:
+// terminates `from` with a conditional branch to a slow-path block
+// that drains an unhandled panic flag (matching the $coro path's
+// behavior after each resume).  Lands in `doneBlk` on the fast path
+// and on the slow path after the optional panic recovery.
+//
+// Mirrors emitPanicCheck except the panic re-raise path emits a
+// plain `_tin_panic` + `ret` instead of the coro-completion sequence
+// (no frame to complete).
+func (cg *CodeGen) emitColoredPanicCheck(from *ir.Block, doneBlk *ir.Block, suffix string) {
+	flagLoad := from.NewLoad(irtypes.I32, cg.ensurePanicFlagGlobal())
+	flagLoad.Atomic = true
+	flagLoad.Ordering = enum.AtomicOrderingMonotonic
+	flagLoad.Align = 4
+	hasFlag := from.NewICmp(enum.IPredNE, flagLoad, constant.NewInt(irtypes.I32, 0))
+	slowBlk := cg.newBlock(suffix + ".slow")
+	from.NewCondBr(hasFlag, slowBlk, doneBlk)
+
+	msg := slowBlk.NewCall(cg.ensureFiberCheckPanicFn())
+	isNotNull := slowBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	panicBlk := cg.newBlock(suffix + ".panic")
+	slowBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
+
+	panicBlk.NewCall(cg.ensurePanicFn(), msg)
+	panicBlk.NewUnreachable()
+}
+
+// ensureCurrentCoroHdlFn lazily declares _tin_current_coro_hdl() i8*.
+// Runtime helper that returns the current fiber's coro hdl from TLS.
+// Used by $colored bodies to drive yields through the caller's frame.
+func (cg *CodeGen) ensureCurrentCoroHdlFn() *ir.Func {
+	if cg.currentCoroHdlFn != nil {
+		return cg.currentCoroHdlFn
+	}
+
+	cg.currentCoroHdlFn = cg.ensureExternDecl("_tin_current_coro_hdl", irtypes.I8Ptr, nil, false)
+
+	return cg.currentCoroHdlFn
+}
+
 // genCallSiteYieldFor checks whether the named callee warrants a pre-call yield
 // and, if so, calls genCallSiteYield.  Returns the (possibly updated) block to
 // use for the actual call instruction.
 //
 // Conditions for emitting a yield:
-//   - we are inside a $coro variant (curCoroFrame != nil)
-//   - the current function allows auto-yield (curFnAutoYield)
 //   - the callee is classified as AutoYield (heavy or recursive) in funcHeuristics
+//   - the current function allows auto-yield (curFnAutoYield)
+//   - EITHER curCoroFrame != nil (inside $coro variant)
+//     OR curFnColoredSync (inside $colored variant) -- yields via runtime call
 func (cg *CodeGen) genCallSiteYieldFor(block *ir.Block, calleeName string) *ir.Block {
-	if cg.curCoroFrame == nil || !cg.curFnAutoYield {
+	if !cg.curFnAutoYield {
+		return block
+	}
+
+	if cg.curCoroFrame == nil && !cg.curFnColoredSync {
 		return block
 	}
 
 	info, ok := cg.funcHeuristics[calleeName]
 	if !ok || !info.AutoYield {
 		return block
+	}
+
+	if cg.curFnColoredSync {
+		return cg.genColoredCallSiteYield(block)
 	}
 
 	return cg.genCallSiteYield(block)
@@ -1027,6 +628,14 @@ func (cg *CodeGen) genYieldAutoAt(from *ir.Block, header *ir.Block) {
 		// The fiber just executed one suspension this iteration; adding a second
 		// autoyield at the backedge would force a redundant scheduler round-trip.
 		from.NewBr(header)
+
+		return
+	}
+
+	if cg.curFnColoredSync {
+		// $colored body: no coro frame -- yield via runtime call.
+		cg.emitColoredRuntimeYield(from)
+		cg.emitColoredPanicCheck(from, header, "autoyield.colored")
 
 		return
 	}

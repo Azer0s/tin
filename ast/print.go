@@ -381,7 +381,7 @@ func printNode(n Node, depth int) string {
 		return printMatchStmt(v, depth)
 	case *Block:
 		return printBlockInline(v, depth)
-	// Phase 0 - top-level var
+	// Top-level var
 	case *TopLevelVar:
 		if v.Value != nil {
 			return fmt.Sprintf("var %s %s = %s", v.Name, v.Type.String(), printNode(v.Value, depth))

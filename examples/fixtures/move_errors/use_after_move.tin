@@ -1,0 +1,5 @@
+// Use-after-move: a binding cannot be read after `move` consumes it.
+fn main() =
+  let s = "hello"
+  let n = len(move s)
+  echo s

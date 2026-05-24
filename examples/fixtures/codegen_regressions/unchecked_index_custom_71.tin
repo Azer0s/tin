@@ -1,0 +1,19 @@
+// Regression: -Wunchecked-index (pedantic) on a custom `::index`
+// impl fires when the access is NOT destructured.  The canonical
+// safe form `let (v, ok) = t[k]; if ok: ...` silences the warning;
+// a bare `t[k]` relies on the auto-unwrap panic at runtime.
+
+struct Bag (index[string, i64], index_set[string, i64]) =
+  keys [string]
+  vals [i64]
+
+  fn ::index(this Bag, k string) (i64, bool) =
+    return (0, false)
+
+  fn ::index_set(this *Bag, k string, v i64) =
+    return
+
+fn use_bare(b Bag) i64 =
+  return b["x"]
+
+fn main() i64 = return 0

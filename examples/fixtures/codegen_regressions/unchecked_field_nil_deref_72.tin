@@ -1,0 +1,12 @@
+// Regression: -Wunchecked-nil-deref also fires on `p.field` when
+// `p` is pointer-typed and the dataflow pass cannot prove non-nil.
+// Tin auto-dereferences pointers on field access, so the syntax
+// hides the deref; the warning surfaces it for parity with `*p`.
+
+struct Node =
+  val i64
+
+fn read(p *Node) i64 =
+  return p.val
+
+fn main() i64 = return 0

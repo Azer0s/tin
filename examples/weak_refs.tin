@@ -36,9 +36,7 @@ fn main() =
   echo "b.value = {b.value}"
   echo "weak_refs: OK"
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "node value reads correctly" =
   let n = Node{value: 42, next: nil, prev: nil}

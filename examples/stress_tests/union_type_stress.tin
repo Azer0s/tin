@@ -19,9 +19,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Union with many variants
-// ---------------------------------------------------------------------------
 
 type json_val = i64 | f64 | string | bool | bool  // note: last bool = null sentinel
 
@@ -56,9 +54,7 @@ fn json5_to_i64(v json5) i64 =
 
   return 0 - 1  // null
 
-// ---------------------------------------------------------------------------
 // 2. Union in struct field
-// ---------------------------------------------------------------------------
 
 struct tagged_value =
   name  string
@@ -67,9 +63,7 @@ struct tagged_value =
 fn describe_tagged(tv tagged_value) string =
   return "{tv.name}: {json5_type_name(tv.value)}"
 
-// ---------------------------------------------------------------------------
 // 3. Union in an array, iterated with match
-// ---------------------------------------------------------------------------
 
 fn count_ints(items [json5]) i64 =
   let count i64 = 0
@@ -94,20 +88,16 @@ fn sum_numeric(items [json5]) f64 =
 
   return total
 
-// ---------------------------------------------------------------------------
 // 4. Union assigned conditionally, later matched
 //    Tests that the union SSA value is correctly constructed at each branch
 //    merge point.
-// ---------------------------------------------------------------------------
 
 fn make_json5(flag bool, n i64) json5 =
   if flag:
     return n as json5
   return (n as f64 * 1.5) as json5
 
-// ---------------------------------------------------------------------------
 // 5. Two-level union: union of tagged unions
-// ---------------------------------------------------------------------------
 
 type num_or_str = i64 | string
 type rich_val = num_or_str | bool
@@ -123,9 +113,7 @@ fn rich_describe(v rich_val) string =
         return "yes"
       return "no"
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "json5 type names" =
   assert::equals(json5_type_name(42 as json5), "int")

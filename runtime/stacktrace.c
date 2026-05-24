@@ -42,11 +42,11 @@
 // table. No DWARF, no libdw, no debuginfod.
 //
 // The whole pclntab path is gated on TIN_STACKTRACE so programs that
-// never call stacktrace() don't pay any binary-size cost. Phase 6 of
-// docs/plans/stacktrace-libunwind.md sets this define from main.go
+// never call stacktrace() don't pay any binary-size cost.  See
+// docs/plans/stacktrace-libunwind.md.  main.go sets this define
 // conditional on cg.StacktraceUsed(), which in turn is fed by the AST
-// pre-pass detectStacktraceUsage. Programs that don't use stacktrace()
-// get the stub branch below.
+// pre-pass detectStacktraceUsage.  Programs that don't use
+// stacktrace() get the stub branch below.
 
 #include "runtime.h"
 
@@ -263,6 +263,11 @@ static int is_main_entry(const char *sym) {
     if (!sym) return 0;
     if (strcmp(sym, "main")    == 0) return 1;
     if (strcmp(sym, "_start")  == 0) return 1;
+    // macOS dyld renames the kernel entry point to plain `start`
+    // (without underscore) and that frame is always the bottom of
+    // a captured trace.  Hide it under the same flag as main / _start
+    // so HIDE_MAIN dumps stay free of the platform entry trampoline.
+    if (strcmp(sym, "start")   == 0) return 1;
     if (strncmp(sym, "__libc_start", 12) == 0) return 1;
     return 0;
 }

@@ -1,0 +1,13 @@
+// -Wsync-fn-coerced-to-async (pedantic) fires when a sync fn value
+// flows into a `fn{#async}(...)` slot.  The 4-slot fat-fn-ptr ABI
+// makes both shapes byte-compatible, but the coro wrapper synthesized
+// for slot 2 simply calls the sync body inline -- if the caller spawns
+// the value, the resulting fiber runs end-to-end without yielding.
+fn double(n i64) i64 = return n * 2
+
+fn run(cb fn{#async}(i64) i64) i64 =
+  let f = spawn cb(7)
+  return await f
+
+fn main() =
+  let _ = run(double)

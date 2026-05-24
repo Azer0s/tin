@@ -11,10 +11,35 @@ use assert
 use errors
 use { Result } from result
 
-// Note: the `is *T on borrow-form trait pointer` / `is *T
-// disambiguates between two impls` cases from the .sh harness stay
-// where they were - running them as `test` blocks here hangs
-// (pre-existing tin-test mode bug; bare `tin run` works fine).
+// -- is *T on borrow-form trait pointer --
+
+trait IsAnimal =
+  fn sound(this IsAnimal) string = virtual
+
+struct IsDog(IsAnimal) =
+  name string
+  fn IsAnimal::sound(this IsDog) string = return "woof"
+
+struct IsCat(IsAnimal) =
+  name string
+  fn IsAnimal::sound(this IsCat) string = return "meow"
+
+fn describe_animal(a *IsAnimal) string =
+  if a is *IsDog:
+    let d = a as *IsDog
+    return "dog: " ++ (*d).name
+  else if a is *IsCat:
+    let c = a as *IsCat
+    return "cat: " ++ (*c).name
+  return "unknown"
+
+test "is *T on borrow trait pointer dispatches dog" =
+  let d = &IsDog{name: "rex"}
+  assert::equals(describe_animal(d), "dog: rex")
+
+test "is *T on borrow trait pointer dispatches cat" =
+  let c = &IsCat{name: "tom"}
+  assert::equals(describe_animal(c), "cat: tom")
 
 // -- coerce[bool] interaction with implicit-bool sites --
 

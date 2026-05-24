@@ -1,0 +1,5 @@
+// `addr(...)` produces a raw `volatile *T` and requires `{#unsafe}`.
+
+fn main() =
+  let p volatile *char = addr(0xDEAD)   // rejected
+  echo p as i64

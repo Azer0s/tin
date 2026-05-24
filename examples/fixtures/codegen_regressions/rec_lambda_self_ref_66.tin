@@ -1,0 +1,19 @@
+// Regression: recursive lambda with explicit return type can reference
+// itself by name from inside its own body.  Before the fix, the body's
+// `fact(n-1)` was an "undefined function" because the let-binding name
+// was not in scope until after the lambda RHS finished evaluating.
+//
+// Fix: in stmts.go genVarDecl, when the RHS is *ast.LambdaExpr with an
+// explicit RetType, plumb the binding name through cg.lambdaSelfName.
+// genLambdaExpr then registers a fat-fn-ptr value (built from the
+// lambda's own IR func + env arg) under that name in the lambda's body
+// scope -- and mirrors the same registration in the $colored variant's
+// scope so cooperative-context recursion stays cooperative.
+
+fn main() i64 =
+  let fact = fn(n i64) i64 =
+    if n <= 1 :
+      return 1
+    return n * fact(n - 1)
+  echo fact(5)
+  return 0

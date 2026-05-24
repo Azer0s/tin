@@ -8,9 +8,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // point2 - basic mutable struct
-// ---------------------------------------------------------------------------
 
 struct point2 =
   x i32
@@ -21,9 +19,7 @@ fn set_point_x(p *point2, v i32) void = extern("set_point_x")
 fn set_point_y(p *point2, v i32) void = extern("set_point_y")
 fn same_point_ptr(a *point2, b *point2) bool = extern("same_point_ptr")
 
-// ---------------------------------------------------------------------------
 // vec2 / rect - nested cLayoutStructs
-// ---------------------------------------------------------------------------
 
 struct vec2 =
   x i64
@@ -39,9 +35,7 @@ fn set_rect_origin(r *rect, x i64, y i64) void = extern("set_rect_origin")
 fn set_rect_size(r *rect, w i64, h i64) void = extern("set_rect_size")
 fn set_rect_id(r *rect, id i64) void = extern("set_rect_id")
 
-// ---------------------------------------------------------------------------
 // color - u8 x4, used for struct literal round-trips
-// ---------------------------------------------------------------------------
 
 struct color =
   r u8
@@ -53,9 +47,7 @@ fn get_color() *color = extern("get_color")
 fn set_color(c *color, r u8, g u8, b u8, a u8) void = extern("set_color")
 fn verify_color(c *color, r u8, g u8, b u8, a u8) bool = extern("verify_color")
 
-// ---------------------------------------------------------------------------
 // Tests: mutation visibility
-// ---------------------------------------------------------------------------
 
 test "mutation visibility: initial field values" =
   let p = get_point()
@@ -88,9 +80,7 @@ test "mutation visibility: y field" =
   assert::equals((*p).y, 55)
   set_point_y(p, 20)
 
-// ---------------------------------------------------------------------------
 // Tests: nested cLayoutStructs
-// ---------------------------------------------------------------------------
 
 test "nested cLayoutStruct: initial field reads" =
   let r = get_rect()
@@ -124,9 +114,7 @@ test "nested cLayoutStruct: id field mutation" =
   assert::equals((*r).id, 99)
   set_rect_id(r, 42)
 
-// ---------------------------------------------------------------------------
 // Tests: struct literals (c_data_ptr -> stack native alloca)
-// ---------------------------------------------------------------------------
 
 test "struct literal: field reads" =
   // Use values < 128 to avoid sign-extension ambiguity when casting u8 -> i64.
@@ -147,9 +135,7 @@ test "struct literal: positional syntax" =
 
   assert::equals(verify_color(&c, 255, 0, 128, 64), true)
 
-// ---------------------------------------------------------------------------
 // Tests: non-handover color pointer
-// ---------------------------------------------------------------------------
 
 test "non-handover pointer: color field reads" =
   // g_color = {10, 20, 30, 40}; values < 128 avoid sign-extension with as i64.
@@ -175,9 +161,7 @@ test "non-handover pointer: pass back to C verify" =
 
   assert::equals(verify_color(c, 10, 20, 30, 40), true)
 
-// ---------------------------------------------------------------------------
 // Tests: union member inside a cLayoutStruct
-// ---------------------------------------------------------------------------
 
 union num_union = as_i i32 | as_f f32
 

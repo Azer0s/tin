@@ -266,7 +266,7 @@ fn arr_reverse(a [i64]) [i64] =
   let i = len(a) - 1
 
   for i >= 0:
-    out ++= a[i]
+    out ++= [a[i]]
     i--
 
   return out

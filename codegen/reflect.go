@@ -62,19 +62,14 @@ func structNameFromValue(v value.Value) string {
 func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	elemType := cg.atomType // %__atom = { i32 }
 	n := int64(len(atoms))
-	fat := irtypes.NewStruct(irtypes.NewPointer(elemType), irtypes.I64)
 
 	if n == 0 {
-		// Empty array: null data pointer, length 0.
-		alloca := block.NewAlloca(fat)
-		ptrGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-		block.NewStore(constant.NewNull(irtypes.NewPointer(elemType)), ptrGep)
-		lenGep := block.NewGetElementPtr(fat, alloca,
-			constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-		block.NewStore(constant.NewInt(irtypes.I64, 0), lenGep)
+		// Empty array: null data, len=0, cap=0.
+		zero := constant.NewInt(irtypes.I64, 0)
 
-		return block.NewLoad(fat, alloca)
+		return cg.buildFatArrayValue(block, elemType,
+			constant.NewNull(irtypes.NewPointer(elemType)),
+			zero, zero)
 	}
 
 	// Register each atom and build element constants.
@@ -113,15 +108,12 @@ func (cg *CodeGen) buildAtomArray(block *ir.Block, atoms []string) value.Value {
 	dataGEP := constant.NewGetElementPtr(hdrStructType, g, i32_0, i32_2, i64_0)
 	dataGEP.InBounds = true
 
-	fatAlloca := block.NewAlloca(fat)
-	ptrGep := block.NewGetElementPtr(fat, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 0))
-	block.NewStore(dataGEP, ptrGep)
-	lenGep := block.NewGetElementPtr(fat, fatAlloca,
-		constant.NewInt(irtypes.I32, 0), constant.NewInt(irtypes.I32, 1))
-	block.NewStore(constant.NewInt(irtypes.I64, n), lenGep)
+	// Immortal storage: cap = -1 so `++=` rejects mutation and the drop
+	// path skips RC release.
+	nConst := constant.NewInt(irtypes.I64, n)
+	borrowed := constant.NewInt(irtypes.I64, -1)
 
-	return block.NewLoad(fat, fatAlloca)
+	return cg.buildFatArrayValue(block, elemType, dataGEP, nConst, borrowed)
 }
 
 // llvmTypeName returns the tin type name string for any LLVM type,
@@ -161,7 +153,12 @@ func llvmTypeName(t irtypes.Type) string {
 	}
 
 	if at, ok := t.(*irtypes.ArrayType); ok {
-		return "[" + llvmTypeName(at.ElemType) + "]"
+		// LLVM's irtypes.ArrayType always represents Tin's *fixed*-size
+		// form `[T; N]` -- fat arrays `[T]` lower to a struct, not an
+		// IR array.  Include the length so the rendered name round-trips
+		// through parseTypeParamStr and so wildcard guards can distinguish
+		// `[_; 3]` from `[_; 4]`.
+		return fmt.Sprintf("[%s; %d]", llvmTypeName(at.ElemType), at.Len)
 	}
 
 	if vt, ok := t.(*irtypes.VectorType); ok {
@@ -176,6 +173,15 @@ func llvmTypeName(t irtypes.Type) string {
 		}
 
 		if st.Name() != "" {
+			// Trait fat-pointer struct (`Show_iface`): strip the
+			// `_iface` suffix and return the bare trait name
+			// (`Show`) so monomorphization-key strings round-trip
+			// through the type resolver (`*Show` rather than the
+			// un-resolvable `*Show_iface`).  isTraitFatPtrShape
+			// confirms the {i8*, *<name>_vtable} structural shape.
+			if isTraitFatPtrShape(t) && strings.HasSuffix(st.Name(), "_iface") {
+				return strings.TrimSuffix(st.Name(), "_iface")
+			}
 			// User-defined struct / data type: use struct name as atom.
 			return st.Name()
 		}
@@ -196,7 +202,7 @@ func llvmTypeName(t irtypes.Type) string {
 		}
 
 		if isFatArrayPtr(t) {
-			if len(st.Fields) == 2 {
+			if len(st.Fields) == 3 {
 				if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
 					return "[" + llvmTypeName(pt.ElemType) + "]"
 				}
@@ -455,8 +461,8 @@ func (cg *CodeGen) genFieldnames(block *ir.Block, e *ast.FieldnamesExpr) (value.
 // to pick the right one.  The result type is always {%__atom*, i64}.
 func (cg *CodeGen) runtimeAtomArraySelectByTypeID(block *ir.Block, typeIDVal value.Value,
 	table map[int32][]string) value.Value {
-	// Fat-pointer type for [atom]: {%__atom*, i64}.
-	fatType := irtypes.NewStruct(irtypes.NewPointer(cg.atomType), irtypes.I64)
+	// Fat-pointer type for [atom]: {%__atom*, i64 len, i64 cap}.
+	fatType := fatArrayPtrType(cg.atomType)
 
 	// Build default (empty array).
 	def := cg.buildAtomArray(block, nil)
@@ -653,7 +659,7 @@ func (cg *CodeGen) genGetfieldFromAny(block *ir.Block, anyVal value.Value, field
 		sn := st0.name
 		typeID := st0.id
 
-		st := cg.structTypes[sn]
+		st := cg.structTypeFor(CanonKey(sn))
 		if st == nil {
 			continue
 		}
@@ -736,7 +742,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 	fieldNames := cg.structFields[sn]
 	fieldTypes := cg.structFieldLLVMTypes[sn]
 
-	st := cg.structTypes[sn]
+	st := cg.structTypeFor(CanonKey(sn))
 	if st == nil || len(fieldNames) == 0 {
 		return zeroAny, nil
 	}
@@ -812,7 +818,7 @@ func (cg *CodeGen) genSetfieldOnAny(block *ir.Block, anyAlloca value.Value, fiel
 		sn := st0.name
 		typeID := st0.id
 
-		st := cg.structTypes[sn]
+		st := cg.structTypeFor(CanonKey(sn))
 		if st == nil {
 			continue
 		}

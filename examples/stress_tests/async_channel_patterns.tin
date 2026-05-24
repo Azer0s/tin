@@ -51,9 +51,7 @@ fn{#async} sum_range_async(lo i64, hi i64, out sync::Channel[i64]) =
 
   await out.send(acc)
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "fan-out: one producer, multiple consumers" =
   // Producer sends 6 values; 3 consumers each read 2

@@ -1,0 +1,18 @@
+// Regression: a sync fn whose body is a single `await spawn f()`
+// expression (no `return` keyword -- "implicit return" form)
+// crashed the compiler with "missing terminator in basic block
+// 'await.ok'".  Pre-fix the ExprStmt-body handler emitted the
+// `ret` on the original `block` argument, but await splits
+// control flow so `cg.curBlock` had moved on to the `await.ok`
+// success-path block.  The original entry block was already
+// terminated by the conditional branch into await.ok/await.panic,
+// so emitTerminator's `b.Term != nil` early-return fired and NO
+// terminator landed anywhere.  The dangling `await.ok` block
+// panicked during IR serialization in mod.String().
+//
+// Fix: prefer cg.curBlock (the block where the awaited result is
+// live) over the stale `block` arg for the terminator.
+
+fn{#async} dbl(n i64) i64 = return n + n
+
+fn main() i64 = await spawn dbl(5)

@@ -151,7 +151,7 @@
         {
           "comment": "Control flow keywords",
           "name": "keyword.control.tin",
-          "match": "\\b(if|else|for|in|match|case|default|break|return|do|defer|where|yield|await|spawn|try)\\b"
+          "match": "\\b(if|else|for|in|match|case|default|break|return|do|defer|where|yield|await|spawn|try|move)\\b"
         },
         {
           "comment": "Declaration keywords",
@@ -162,6 +162,11 @@
           "comment": "Expression keywords",
           "name": "keyword.operator.word.tin",
           "match": "\\b(as|is|sizeof|addr|typeof|traitof|fieldnames|fieldtypes|fieldtag|getfield|setfield|isrc)\\b"
+        },
+        {
+          "comment": "Builtin functions (len, cap, copy, nlen, nrect, panic, recover, stacktrace, sourcepos, default)",
+          "name": "support.function.builtin.tin",
+          "match": "\\b(len|cap|copy|nlen|nrect|panic|recover|stacktrace|sourcepos|default)(?=\\s*\\()"
         },
         {
           "comment": "Statement keywords",

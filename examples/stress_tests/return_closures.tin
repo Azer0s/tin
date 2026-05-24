@@ -14,9 +14,7 @@
 
 use assert
 
-// ---------------------------------------------------------------------------
 // 1. Return a closure that closes over a primitive
-// ---------------------------------------------------------------------------
 
 fn make_threshold_check(threshold i64) fn(i64) bool =
   return fn(x i64) bool = return x > threshold
@@ -24,9 +22,7 @@ fn make_threshold_check(threshold i64) fn(i64) bool =
 fn make_range_check(lo i64, hi i64) fn(i64) bool =
   return fn(x i64) bool = return x >= lo && x <= hi
 
-// ---------------------------------------------------------------------------
 // 2. Return a closure that closes over an array (heap lifetime)
-// ---------------------------------------------------------------------------
 
 fn make_lookup(table [string]) fn(i64) string =
   return fn(idx i64) string =
@@ -34,9 +30,7 @@ fn make_lookup(table [string]) fn(i64) string =
       return ""
     return table[idx]
 
-// ---------------------------------------------------------------------------
 // 3. Return a closure from a generic function
-// ---------------------------------------------------------------------------
 
 fn make_default_returner[t](default_val t) fn() t =
   return fn() t = return default_val
@@ -46,14 +40,11 @@ fn make_mapper[t, r](f fn(t) r) fn([t]) [r] =
     let out [r] = []
 
     for let v t in arr:
-      out ++= f(v)
-
+      out ++= [f(v)]
     return out
 
-// ---------------------------------------------------------------------------
 // 4. Function returning a closure that returns a closure
 //    (produces a fn type whose return type is also a fn type)
-// ---------------------------------------------------------------------------
 
 fn make_adder_factory() fn(i64) fn(i64) i64 =
   return fn(base i64) fn(i64) i64 =
@@ -63,9 +54,7 @@ fn make_multiplier_factory() fn(i64) fn(i64) i64 =
   return fn(factor i64) fn(i64) i64 =
     return fn(x i64) i64 = return factor * x
 
-// ---------------------------------------------------------------------------
 // 5. Closure returned from a method on a struct
-// ---------------------------------------------------------------------------
 
 struct scaler =
   factor i64
@@ -76,10 +65,8 @@ struct scaler =
   fn get_offset_fn(this scaler, offset i64) fn(i64) i64 =
     return fn(x i64) i64 = return x * this.factor + offset
 
-// ---------------------------------------------------------------------------
 // 6. Return closure that mutates captured state
 //    (tests that heap-allocated env survives across multiple calls)
-// ---------------------------------------------------------------------------
 
 fn make_accumulator(start i64) fn(i64) i64 =
   let acc i64 = start
@@ -87,21 +74,16 @@ fn make_accumulator(start i64) fn(i64) i64 =
     acc = acc + delta
     return acc
 
-// ---------------------------------------------------------------------------
 // 7. Array of returned closures - all with different captured environments
-// ---------------------------------------------------------------------------
 
 fn make_offset_checks(thresholds [i64]) [fn(i64) bool] =
   let fns [fn(i64) bool] = []
 
   for let t i64 in thresholds:
-    fns ++= make_threshold_check(t)
-
+    fns ++= [make_threshold_check(t)]
   return fns
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "threshold check returns correct bool" =
   let above10 = make_threshold_check(10)

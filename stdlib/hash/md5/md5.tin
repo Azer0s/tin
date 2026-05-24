@@ -220,7 +220,7 @@ fn md5(data *u8, len i64) [u8; 16] =
   let i i64 = 0
 
   for i + 64 <= len:
-    let s [u32; 4] = md5_process_block(addr(data[i]), a, b, c, d)
+    let s [u32; 4] = md5_process_block(&data[i], a, b, c, d)
 
     a = s[0]
     b = s[1]
@@ -258,7 +258,7 @@ fn md5(data *u8, len i64) [u8; 16] =
   buf[off + 7] = ((bit_len >> 56) & 0xff) as u8
 
   // Process the final block(s).
-  let s [u32; 4] = md5_process_block(addr(buf[0]), a, b, c, d)
+  let s [u32; 4] = md5_process_block(&buf[0], a, b, c, d)
 
   a = s[0]
   b = s[1]
@@ -266,7 +266,7 @@ fn md5(data *u8, len i64) [u8; 16] =
   d = s[3]
 
   if remaining >= 56:
-    let s2 [u32; 4] = md5_process_block(addr(buf[64]), a, b, c, d)
+    let s2 [u32; 4] = md5_process_block(&buf[64], a, b, c, d)
 
     a = s2[0]
     b = s2[1]
@@ -276,10 +276,10 @@ fn md5(data *u8, len i64) [u8; 16] =
   // Write digest as 16 little-endian bytes.
   let digest [u8; 16]
 
-  md5_write_le(addr(digest[0]), 0, a)
-  md5_write_le(addr(digest[0]), 4, b)
-  md5_write_le(addr(digest[0]), 8, c)
-  md5_write_le(addr(digest[0]), 12, d)
+  md5_write_le(&digest[0], 0, a)
+  md5_write_le(&digest[0], 4, b)
+  md5_write_le(&digest[0], 8, c)
+  md5_write_le(&digest[0], 12, d)
 
   return digest
 
@@ -308,7 +308,7 @@ fn md5_hex(data *u8, len i64) string =
 
 // Overload: md5(string) - convenience overload accepting a string directly.
 fn md5(s string) string =
-  return md5_hex(addr(s[0]), len(s))
+  return md5_hex(&s[0], len(s))
 
 export {
   md5, md5_hex, md5_hex_from_digest
