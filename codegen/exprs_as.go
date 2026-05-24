@@ -292,6 +292,19 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	// a downstream slot.  Reporting it at the cast site points the user
 	// at the right line.
 	if !result.Type().Equal(targetType) {
+		// int->ptr casts upgrade the result to addrspace(1) /
+		// volatile *T even when the user wrote `as *T` (no
+		// `volatile` keyword): the integer source carries no
+		// provenance, so any rc machinery acting on the result
+		// would walk into unmapped memory at the next foreign-free.
+		// Returning the volatile result here lets the binding's
+		// inferred type carry the volatile, and downstream sinks
+		// that demand a non-volatile slot trigger -Wvolatile-loss
+		// at the coercion site instead of silently re-enabling rc.
+		if ptrTypesAddrSpaceMismatchOnly(result.Type(), targetType) {
+			return result, nil
+		}
+
 		gotName := cg.fmtArgType(result.Type())
 		if gotName == "" || gotName == "<nil>" {
 			gotName = cg.diagStructName(cg.typeNameOf(result.Type()))

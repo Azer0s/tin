@@ -613,6 +613,21 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 	} else if irtypes.IsPointer(rt) && !irtypes.IsPointer(lt) {
 		left = constant.NewNull(rt.(*irtypes.PointerType))
 	}
+	// Pointer comparison across address spaces: demote the volatile
+	// side to the non-volatile side's space so LLVM's icmp accepts a
+	// matched-type pair.  Comparison is identity-only; no rc work
+	// fires here, so the cast is purely about IR well-formedness.
+	if lpt, lok := left.Type().(*irtypes.PointerType); lok {
+		if rpt, rok := right.Type().(*irtypes.PointerType); rok && lpt.AddrSpace != rpt.AddrSpace {
+			if lpt.AddrSpace == volatileAddrSpace {
+				left = block.NewAddrSpaceCast(left,
+					&irtypes.PointerType{ElemType: lpt.ElemType, AddrSpace: rpt.AddrSpace})
+			} else {
+				right = block.NewAddrSpaceCast(right,
+					&irtypes.PointerType{ElemType: rpt.ElemType, AddrSpace: lpt.AddrSpace})
+			}
+		}
+	}
 
 	return block.NewICmp(pred, left, right)
 }

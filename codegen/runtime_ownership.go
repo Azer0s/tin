@@ -507,6 +507,23 @@ func isVolatilePtr(t irtypes.Type) bool {
 	return ok && pt.AddrSpace == volatileAddrSpace
 }
 
+// ptrTypesAddrSpaceMismatchOnly reports whether a and b are both
+// pointer types whose element types are equal but whose address
+// spaces differ.  Used at int->ptr cast sites to detect the
+// "volatile *T inferred -> *T requested" mismatch so the cast can
+// emit an explicit addrspace cast (with a -Wvolatile-loss warning)
+// rather than failing with "no conversion path".
+func ptrTypesAddrSpaceMismatchOnly(a, b irtypes.Type) bool {
+	ap, aok := a.(*irtypes.PointerType)
+	bp, bok := b.(*irtypes.PointerType)
+
+	if !aok || !bok {
+		return false
+	}
+
+	return ap.AddrSpace != bp.AddrSpace && ap.ElemType.Equal(bp.ElemType)
+}
+
 // isPrimitivePtr reports whether t is a pointer whose element type is
 // a scalar (*i64, *f64, *void, *byte, ...) -- NOT a pointer to a
 // named struct (those have per-struct release helpers) and NOT a

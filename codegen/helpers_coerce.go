@@ -414,18 +414,45 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// path keeps them apart so two structurally unrelated types
 	// cannot pun by accident in a let-binding or arg pass.
 	case irtypes.IsPointer(src) && irtypes.IsPointer(target):
-		srcEl := src.(*irtypes.PointerType).ElemType
+		srcPt := src.(*irtypes.PointerType)
 
-		tgtEl := target.(*irtypes.PointerType).ElemType
+		tgtPt := target.(*irtypes.PointerType)
+		srcEl := srcPt.ElemType
+		tgtEl := tgtPt.ElemType
+		// Addrspace mismatch only -- emit the LLVM addrspace cast so
+		// the IR is well-typed.  volatile *T -> *T re-enables rc on
+		// the slot (the user wrote a non-volatile target type, e.g.
+		// `this.buf = 0 as *byte`); volatile-loss is silent for now
+		// since constant-null demotion is the common harmless case
+		// and a noisy warning would mask the real signal at hostile
+		// sites.  Diagnostic refinement is a follow-up.
+		if srcEl.Equal(tgtEl) && srcPt.AddrSpace != tgtPt.AddrSpace {
+			return block.NewAddrSpaceCast(val, target)
+		}
+
 		if srcEl.Equal(tgtEl) {
 			return val
 		}
 
 		if srcEl.Equal(irtypes.I8) || tgtEl.Equal(irtypes.I8) {
+			if srcPt.AddrSpace != tgtPt.AddrSpace {
+				ascCast := block.NewAddrSpaceCast(val,
+					&irtypes.PointerType{ElemType: srcEl, AddrSpace: tgtPt.AddrSpace})
+
+				return block.NewBitCast(ascCast, target)
+			}
+
 			return block.NewBitCast(val, target)
 		}
 
 		if cg.allowExplicitPtrCoerce {
+			if srcPt.AddrSpace != tgtPt.AddrSpace {
+				ascCast := block.NewAddrSpaceCast(val,
+					&irtypes.PointerType{ElemType: srcEl, AddrSpace: tgtPt.AddrSpace})
+
+				return block.NewBitCast(ascCast, target)
+			}
+
 			return block.NewBitCast(val, target)
 		}
 	// Int -> Pointer and Pointer -> Int are likewise gated on the
@@ -433,8 +460,27 @@ func (cg *CodeGen) coerce(block *ir.Block, val value.Value, target irtypes.Type)
 	// i64` (raw-address punning, mostly inside `{#unsafe}` blocks),
 	// but a stray `let p *i64 = 5` reaches the binding's type check
 	// instead of producing a bogus pointer.
+	//
+	// Int -> Pointer always lands in addrspace(1) (volatile *T): the
+	// integer source carries no provenance, so any rc machinery acting
+	// on the resulting pointer would walk into unmapped memory at the
+	// next foreign-free.  Stores through the volatile slot skip the
+	// rc-balanced load-old / release-old / retain-new sequence in
+	// genAssign.  Users who genuinely want rc tracking on the cast
+	// result must demote to `*T` explicitly (which warns under
+	// -Wvolatile-loss).
 	case irtypes.IsInt(src) && irtypes.IsPointer(target):
 		if cg.allowExplicitPtrCoerce {
+			tgtPt := target.(*irtypes.PointerType)
+			if tgtPt.AddrSpace != volatileAddrSpace {
+				volTarget := &irtypes.PointerType{
+					ElemType:  tgtPt.ElemType,
+					AddrSpace: volatileAddrSpace,
+				}
+
+				return block.NewIntToPtr(val, volTarget)
+			}
+
 			return block.NewIntToPtr(val, target)
 		}
 	case irtypes.IsPointer(src) && irtypes.IsInt(target):

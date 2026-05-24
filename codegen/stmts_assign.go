@@ -219,6 +219,18 @@ func (cg *CodeGen) genAssign(block *ir.Block, s *ast.AssignStmt) (*ir.Block, err
 			"cannot assign value of type %s (declared type %s)",
 			cg.tinTypeDisplay(srcType), cg.tinTypeDisplay(ptrType.ElemType))
 	}
+	// Volatile slot (addrspace 1): the LHS pointer was produced by an
+	// int->ptr cast or addr() and carries no provenance.  The slot's
+	// previous bytes are uninitialized libc-malloc output, which may
+	// alias unmapped memory after a free; loading + releasing it would
+	// fault inside _tin_is_managed's header probe.  Skip the
+	// rc-balanced store entirely -- the user took the {#unsafe} oath
+	// and owns the slot's lifetime.
+	if isVolatilePtr(ptrType) {
+		block.NewStore(val, ptr)
+
+		return block, nil
+	}
 	// ARC: for RC-tracked types, retain new value (if copy) then release old.
 	// Skip retain if coerce just boxed a non-any value to any: the new box is
 	// a fresh _tin_rc_alloc (rc=1) and is already owned.

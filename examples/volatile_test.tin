@@ -7,6 +7,7 @@
 // out of scope is well-defined for bogus addresses too.
 
 use assert
+use mem
 
 test "addr(hex) yields volatile *char" =
   {#unsafe} {
@@ -21,3 +22,39 @@ test "addr(arr[i]) yields volatile *T (warns)" =
     let q volatile *i64 = addr(xs[1])
     assert::ok((q as i64) != 0)
   }
+
+// Regression for the build_argv-style segfault: `int as *T` must
+// produce a volatile pointer so the rc-balanced store skips the
+// release-of-old-slot probe at `*slotp = p`.  On Linux glibc the
+// freed page's preceding bytes are unmapped, so probing
+// `(slot_value) - sizeof(TinRCHdr)` for the magic header faults;
+// macOS keeps freed pages mapped so the bug stayed invisible.  The
+// fix flows `int as *T` -> `volatile *T` and the rc-balanced store
+// short-circuits when the lvalue is volatile.
+test "int->ptr cast over freshly-malloc'd buffer stores cleanly" =
+  let argc i64 = 3
+  let arr = mem::malloc((argc + 1) * 8) as **char
+  let i i64 = 0
+
+  for i < argc:
+    let bufp = mem::malloc(8) as *char
+    let slot  = (arr as i64) + i * 8
+    let slotp = slot as **char
+
+    *slotp = bufp
+    i = i + 1
+  // Read back to confirm the stores landed without crashing on
+  // uninit-slot release_ptr.
+  let j i64 = 0
+
+  for j < argc:
+    let s     = (arr as i64) + j * 8
+    let sp    = s as **char
+    let p     = *sp
+
+    assert::ok((p as i64) != 0)
+
+    mem::free(p as *void)
+    j = j + 1
+
+  mem::free(arr as *void)
