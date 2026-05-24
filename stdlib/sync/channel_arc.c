@@ -38,6 +38,11 @@ void _tin_release_any(int32_t tag, void *data);
 void _tin_release_closure(void *env);
 void _tin_panic(const char *msg);
 
+// Set once in fiber.c::_tin_fiber_init from TINMAXPROCS; 1 when >1 worker
+// thread exists, 0 otherwise.  Used to elide the Peterson MFENCE in the
+// channel fast paths when no concurrent fiber on another core is possible.
+extern int _tin_mt_active;
+
 // rc_kind values must mirror codegen/runtime.go rcKind. Channel uses
 // the kind discriminator to pick the right shape inside each slot:
 //   0 = none, 1 = leading-pointer, 2 = any (ptr@8), 3 = fn (env@8)
@@ -548,7 +553,10 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
             // on x86 (release stores don't drain the buffer, seq_cst
             // loads are plain MOVs), letting both sides miss each other
             // -> deadlock under cap=2 SPMC stress on linux x86_64 GHA.
-            atomic_thread_fence(memory_order_seq_cst);
+            // Single-thread builds (TINMAXPROCS=1) have no concurrent
+            // fibers on another core, so the race window doesn't exist;
+            // skip the fence on the hot path.
+            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_recv(ch);
@@ -668,7 +676,7 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
         if (data) {
             // Peterson missed-wakeup protection -- see twin fence in
             // _tin_channel_send_blocking's fast path.
-            atomic_thread_fence(memory_order_seq_cst);
+            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
@@ -767,7 +775,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
         if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
             // Peterson missed-wakeup protection -- see twin fence in
             // _tin_channel_send_blocking's fast path.
-            atomic_thread_fence(memory_order_seq_cst);
+            if (_tin_mt_active) atomic_thread_fence(memory_order_seq_cst);
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);

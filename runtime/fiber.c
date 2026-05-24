@@ -629,6 +629,12 @@ void  _tin_clear_preregistered_ch(void) {
 static pthread_t *_workers    = NULL;
 static int        _worker_cnt = 0;
 
+// Cross-TU flag for "more than one worker exists" -- read by channel_arc.c
+// to elide the Peterson MFENCE when there can be no concurrent fiber on
+// another core (TINMAXPROCS=1).  Set once at fiber init, never updated
+// thereafter, so a relaxed load is safe in the channel hot path.
+int _tin_mt_active = 0;
+
 // Returns 1 if the calling thread is one of the M:N worker threads.
 // Used to decide whether to access _current_pid (a __thread variable) inside
 // _tin_fiber_join: accessing a __thread variable for the first time on a thread
@@ -1100,7 +1106,8 @@ void _tin_fiber_init(void) {
         if (nworkers <= 0) nworkers = 1;
     }
 
-    _worker_cnt = nworkers;
+    _worker_cnt   = nworkers;
+    _tin_mt_active = (nworkers > 1) ? 1 : 0;
     _workers    = (pthread_t *)malloc((size_t)nworkers * sizeof(pthread_t));
     if (!_workers) { fputs("tin: worker alloc OOM\n", stderr); exit(1); }
 
