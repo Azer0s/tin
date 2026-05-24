@@ -244,6 +244,11 @@ typedef struct TinChannel {
     int64_t          elem_size;
     atomic_bool      closed;
     int              rc_kind;
+    // single_thread: snapshot of !_tin_mt_active at channel creation.
+    // Adjacent to cap_mask/elem_size/rc_kind so it shares the
+    // already-hot cache line that every lf_op loads.  Branch in
+    // lf_enqueue/lf_dequeue selects plain head-tail vs Vyukov.
+    int              single_thread;
 
     // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
     // path: if 0, no wakeup is needed and wq_fmu is never touched.
@@ -254,20 +259,16 @@ typedef struct TinChannel {
     TinWaiterQueue   send_wq;    // protected by wq_fmu
 
     // Vyukov MPMC ring buffer state.
-    // enq_pos and deq_pos are on separate cache lines to prevent producer-
-    // consumer false sharing.  The 56-byte pads round each out to 64 bytes.
-    _Atomic(int64_t) enq_pos;
+    // enq_pos and deq_pos sit on separate cache lines to prevent
+    // producer/consumer false sharing.  Use alignas(64) so layout
+    // changes to earlier fields don't drift the alignment.
+    _Alignas(64) _Atomic(int64_t) enq_pos;
     char             _pad_enq[56];
-    _Atomic(int64_t) deq_pos;
+    _Alignas(64) _Atomic(int64_t) deq_pos;
     char             _pad_deq[56];
 
     _Atomic(int64_t) *seq_buf;   // cap entries; seq[i] initialized to i
     char             *data_buf;  // cap * elem_size bytes
-    // Single-thread snapshot of !_tin_mt_active at channel creation, read
-    // by lf_enqueue/lf_dequeue to dispatch the cheap plain-store path vs
-    // the Vyukov MPMC path.  Trailing placement so it doesn't disturb the
-    // cache-line padding around enq_pos/deq_pos.
-    int              single_thread;
 } TinChannel;
 
 // ---------------------------------------------------------------------------
