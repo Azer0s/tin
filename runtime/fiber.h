@@ -160,3 +160,8 @@ void  _tin_fiber_set_direct_recv(void *fib);
 // fiber so the worker puts it in LQ instead of selfnext on the next yield,
 // letting the receiver (already in runnext) run immediately.
 void  _tin_fiber_mark_handoff_yield(void);
+
+// Symmetric transfer: directly resume `fib` on the current worker's
+// stack, bypassing unpark -> queue -> worker-loop -> resume.  Returns
+// 1 if direct resume happened, 0 if caller must fall back.
+int   _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl);

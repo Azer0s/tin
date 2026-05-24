@@ -115,6 +115,7 @@ extern __thread int _direct_recv_flag;
 void _tin_fiber_set_direct_recv(void *fib);
 void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
 void _tin_fiber_mark_handoff_yield(void);
+int  _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl);
 void  _tin_set_recv_hint(void *ch, void *out);
 void *_tin_get_recv_hint_ch(void);
 void *_tin_get_recv_hint_out(void);
@@ -653,10 +654,12 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         void *rout = ch->recv_wq.outs ? ch->recv_wq.outs[idx] : NULL;
 
         if (rout && ch->cap == 1) {
-            // cap=1 recv_direct: direct delivery + handoff yield.
-            // Handoff lets the receiver run immediately; the sender parks on its
-            // next recv (which is always empty for cap=1 pipelines).
-            // This reduces round-trip parks from 2 to 1 for latency-sensitive paths.
+            // cap=1 recv_direct: direct delivery.  Try symmetric transfer
+            // first (E): resume the receiver inline on this worker's
+            // stack so the sender doesn't have to yield + be rescheduled.
+            // Falls back to unpark + handoff_yield (returning 2) when
+            // already nested in a direct resume or the receiver isn't
+            // in a BLOCKED state we can seize.
             ch->recv_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
             int64_t rpid = ch->recv_wq.pids[idx];
@@ -668,6 +671,14 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
             rc_retain_slot(rout, rc_kind);
             tin_fmutex_unlock(&ch->wq_fmu);
             _tin_fiber_set_direct_recv(rfib);
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+            // Symmetric transfer is an ARM-only win.  On x86 it
+            // regresses pipeline/fanout by 3-8% (it serializes a chain
+            // that would otherwise run in parallel across workers).
+            if (_tin_fiber_direct_resume(rfib, rpid, rhdl)) {
+                return 0;
+            }
+#endif
             _tin_fiber_unpark_fib(rfib, rpid, rhdl);
             _tin_fiber_mark_handoff_yield();
             return 2;

@@ -728,6 +728,205 @@ void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     _fib_unlock(f);
 }
 
+// Symmetric transfer (E): resume `f` directly from the caller's worker
+// stack, bypassing unpark -> queue -> worker-loop -> resume.  The caller
+// stays alive on the C stack; when `f` next yields, control returns
+// here and the caller continues.  Used by send_blocking's direct-handoff
+// path so the sender doesn't have to yield/be-rescheduled after waking
+// the receiver -- the receiver runs inline, then control flows back to
+// the sender's send() return.
+//
+// Returns 1 if the direct resume happened, 0 if we bailed out (caller
+// must fall back to the normal unpark + handoff_yield path).
+//
+// ARM-only: on x86 the chain serialization regresses pipeline/fanout
+// 3-8% (those benches benefit from worker-level parallelism that E
+// folds into one thread).  Gated at compile time so the function and
+// its TLS slot don't even exist on x86.
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+static __thread int _in_direct_resume = 0;
+
+// Forward decls -- both are defined further down in this file.
+static void _fire_done_waiters(TinFiber *f);
+static int  _free_slot_push(int64_t pid);
+
+int _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl) {
+    TinFiber *f = (TinFiber *)fib;
+    if (!f || !_is_worker || _in_direct_resume) return 0;
+
+    // Per-chain gate: if any chain work is already queued on this
+    // worker, don't pile more synchronous work on top.  Lets multiple
+    // outstanding chains drain in parallel via the scheduler.
+    if (_handoff_q.head != _handoff_q.tail) return 0;
+    if (_worker_runnext_pid >= 0) return 0;
+
+    _fib_lock(f);
+    if (f->status != FIBER_BLOCKED) {
+        // RUNNING or RUNNABLE: another path already owns this fiber.
+        _fib_unlock(f);
+        return 0;
+    }
+    f->status = FIBER_RUNNING;
+    int drf = f->direct_recv_done;
+    f->direct_recv_done = 0;
+    _fib_unlock(f);
+
+    // Save caller worker TLS so we can restore on return.
+    TinFiber *prev_fib  = _current_fib;
+    int64_t   prev_pid  = _current_pid;
+    void     *prev_hdl  = _current_hdl;
+    int       prev_drf  = _direct_recv_flag;
+    void     *prev_dc   = _tin_defer_chain;
+    int       prev_irm  = _inline_result_mode;
+    int       prev_cd   = _coro_done;
+    void     *prev_cr   = _coro_result;
+
+    // Install target as the current fiber.
+    _current_fib        = f;
+    _current_pid        = pid;
+    _current_hdl        = hdl;
+    _direct_recv_flag   = drf;
+    _tin_defer_chain    = f->saved_defer_chain;
+    _inline_result_mode = 0;
+    _coro_done          = 0;
+    _coro_result        = NULL;
+    f->spawned_child    = 0;
+    f->handoff_yield    = 0;
+
+    _in_direct_resume = 1;
+    _tin_panic_catch_begin();
+    _coro_resume(hdl);
+    const char *panicked = _tin_panic_catch_end();
+    _in_direct_resume = 0;
+
+    // Save target's defer chain back into its TinFiber; mirror worker
+    // loop's order at line 1082.
+    f->saved_defer_chain = _tin_defer_chain;
+    _tin_defer_chain     = NULL;
+
+    TinRunnable r = { hdl, pid };
+    int target_done   = _coro_done;
+    void *target_result = _coro_result;
+
+    if (__builtin_expect(panicked != NULL, 0)) {
+        // Mirror worker_loop's panic branch (look for the
+        // `panicked != NULL` arm in worker_loop below).  Target's TLS
+        // is still active here.
+        _direct_recv_flag = 0;
+        if (target_result) {
+            _tin_inline_result_free(target_result);
+            target_result = NULL;
+            _coro_result  = NULL;
+        }
+        _tin_coro_free(hdl);
+        pthread_mutex_lock(&_table_mu);
+        size_t plen = strlen(panicked);
+        char *pmsg_buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
+        memcpy(pmsg_buf, panicked, plen + 1);
+        f->panic_msg = pmsg_buf;
+        atomic_store(&_has_unhandled_panics, 1);
+        f->status    = FIBER_DONE;
+        atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
+        _fire_done_waiters(f);
+        pthread_mutex_lock(&f->done_mu);
+        pthread_cond_broadcast(&f->done_cv);
+        pthread_mutex_unlock(&f->done_mu);
+        pthread_mutex_unlock(&_table_mu);
+        goto restore;
+    }
+
+    if (__builtin_expect(target_done, 0)) {
+        // Mirror worker_loop's _coro_done branch (look for the
+        // `_coro_done` true arm in worker_loop below).
+        _tin_coro_free(hdl);
+        if (f->preregistered_ch) {
+            _tin_chan_remove_recv_waiter(f->preregistered_ch, f->pid);
+            f->preregistered_ch = NULL;
+        }
+        pthread_mutex_lock(&_table_mu);
+        f->result = target_result;
+        f->status = FIBER_DONE;
+        atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
+        int had_waiters = (f->waiter_cnt > 0) || (f->os_waiter_cnt > 0) || f->prejoined;
+        _fire_done_waiters(f);
+        pthread_mutex_lock(&f->done_mu);
+        pthread_cond_broadcast(&f->done_cv);
+        pthread_mutex_unlock(&f->done_mu);
+        if (!had_waiters && !f->panic_msg) {
+            free(f->result);
+            f->result = NULL;
+            if (_free_slot_push(f->pid))
+                _fiber_struct_reclaim(f);
+        }
+        pthread_mutex_unlock(&_table_mu);
+        goto restore;
+    }
+
+    // Mirror worker_loop's "yielded / parked / joined" branch (the
+    // else arm where neither panicked nor target_done fired).
+    // IMPORTANT: handle pending_join before pending_park to match
+    // worker_loop semantics.
+    _fib_lock(f);
+    if (__builtin_expect(f->pending_join, 0)) {
+        f->pending_join = 0;
+        int wake = f->pending_wakeup;
+        if (wake) f->pending_wakeup = 0;
+        if (wake) {
+            f->status = FIBER_RUNNABLE;
+            _fib_unlock(f);
+            _lq_push(r, f);
+        } else {
+            f->status = FIBER_BLOCKED;
+            _fib_unlock(f);
+        }
+    } else if (f->pending_park) {
+        f->pending_park = 0;
+        if (f->pending_wakeup) {
+            f->pending_wakeup = 0;
+            f->status = FIBER_RUNNABLE;
+            _fib_unlock(f);
+            _lq_push(r, f);
+        } else {
+            f->status = FIBER_BLOCKED;
+            _fib_unlock(f);
+        }
+    } else if (f->status == FIBER_RUNNING) {
+        int had_spawn   = f->spawned_child;
+        int had_handoff = f->handoff_yield;
+        f->spawned_child = 0;
+        f->handoff_yield = 0;
+        f->status = FIBER_RUNNABLE;
+        _fib_unlock(f);
+        if (__builtin_expect(had_spawn, 0)) {
+            _yield_to_global(r);
+        } else if (had_handoff) {
+            _handoff_push(r, f);
+        } else if (_worker_selfnext_pid < 0) {
+            _worker_selfnext_pid = r.pid;
+            _worker_selfnext_hdl = r.hdl;
+            _worker_selfnext_fib = f;
+        } else {
+            _lq_push(r, f);
+        }
+    } else {
+        _fib_unlock(f);
+    }
+
+restore:
+    // Restore caller TLS last (worker loop sets _current_pid=-1 / _hdl=NULL
+    // at the END of each iter, AFTER post-resume processing).
+    _current_fib        = prev_fib;
+    _current_pid        = prev_pid;
+    _current_hdl        = prev_hdl;
+    _direct_recv_flag   = prev_drf;
+    _tin_defer_chain    = prev_dc;
+    _inline_result_mode = prev_irm;
+    _coro_done          = prev_cd;
+    _coro_result        = prev_cr;
+    return 1;
+}
+#endif // ARM-only E
+
 // _enqueue_waiter wakes wpid (already locked under _table_mu).
 // Caller must hold w's state_lock; this function releases it.
 static void _enqueue_waiter(int64_t wpid, TinFiber *w) {
