@@ -263,6 +263,11 @@ typedef struct TinChannel {
 
     _Atomic(int64_t) *seq_buf;   // cap entries; seq[i] initialized to i
     char             *data_buf;  // cap * elem_size bytes
+    // Single-thread snapshot of !_tin_mt_active at channel creation, read
+    // by lf_enqueue/lf_dequeue to dispatch the cheap plain-store path vs
+    // the Vyukov MPMC path.  Trailing placement so it doesn't disturb the
+    // cache-line padding around enq_pos/deq_pos.
+    int              single_thread;
 } TinChannel;
 
 // ---------------------------------------------------------------------------
@@ -299,6 +304,7 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     ch->elem_size = elem_size;
     atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
     ch->rc_kind   = rc_kind;
+    ch->single_thread = _tin_mt_active ? 0 : 1;
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->enq_pos, 0, memory_order_relaxed);
@@ -367,6 +373,23 @@ void _tin_channel_free(void *ptr) {
 // ---------------------------------------------------------------------------
 
 static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc_kind) {
+    // Single-thread fast path: with no concurrent worker, the producer
+    // and consumer cannot interleave inside this function (no yield
+    // points), so the Vyukov CAS + per-slot seq machinery is overkill.
+    // A plain head-tail check suffices.  Saves the LOCK CMPXCHG and the
+    // acquire load on x86 per op.
+    if (__builtin_expect(ch->single_thread, 0)) {
+        int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        if (enq - deq >= ch->cap) return 0;  // full
+        void *dst = ch->data_buf + (enq & ch->cap_mask) * (int64_t)esz;
+        rc_release_slot(dst, rc_kind);
+        _chan_elem_copy(dst, val, esz);
+        rc_retain_slot(dst, rc_kind);
+        atomic_store_explicit(&ch->enq_pos, enq + 1, memory_order_relaxed);
+        return 1;
+    }
+
     int64_t pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
@@ -396,6 +419,17 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
 }
 
 static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind) {
+    if (__builtin_expect(ch->single_thread, 0)) {
+        int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        if (deq >= enq) return 0;  // empty
+        void *src = ch->data_buf + (deq & ch->cap_mask) * (int64_t)esz;
+        _chan_elem_copy(out, src, esz);
+        if (rc_kind != TIN_RC_NONE) memset(src, 0, esz);
+        atomic_store_explicit(&ch->deq_pos, deq + 1, memory_order_relaxed);
+        return 1;
+    }
+
     int64_t pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
