@@ -83,6 +83,15 @@ typedef struct {
     // Fibers waiting for this one to finish (protected by _table_mu).
     int64_t  waiters[FIBER_MAX_WAITERS];
     int      waiter_cnt;
+    // Park/unpark hot cluster, isolated on its own cache line:
+    // every _fib_lock/_fib_unlock CASes state_lock and then reads or
+    // writes pending_wakeup / pending_park / pending_join / status.
+    // Keeping them contiguous and aligned to 64 bytes means a single
+    // cache line covers the whole transition, and cross-core unparks
+    // (sender thread writing pending_wakeup, worker thread reading
+    // it) don't invalidate unrelated fields like done_mu / done_cv /
+    // waiters that share TinFiber.  state_lock leads the cluster.
+    _Alignas(64) _Atomic(uint32_t) state_lock;
     // pending_wakeup: set by _tin_fiber_unpark when the fiber is still RUNNING
     // (its coro.suspend hasn't fired yet).  The worker loop checks and clears
     // this flag after _coro_resume returns; if set, it re-enqueues instead of
@@ -97,6 +106,22 @@ typedef struct {
     // also safe.  The worker loop now checks it inside state_lock (state_lock
     // is acquired first; _table_mu is NOT taken for this check).
     int      pending_join;
+    // pending_park: set by _tin_fiber_park (called from async I/O / timer C
+    // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
+    // pending_join: the fiber sets pending_park, continues to its next yield,
+    // and the worker blocks it after _coro_resume returns.  Without this,
+    // the wakeup can fire between _tin_fiber_park and the yield, see BLOCKED,
+    // and enqueue a concurrent resume - causing a double-resume race.
+    // Protected by _table_mu.
+    int      pending_park;
+    // Set to 1 by _tin_fiber_set_direct_recv when a channel sender delivers data
+    // directly to this fiber's recv `out` buffer (bypassing the ring buffer).
+    // The worker loop propagates this to _direct_recv_flag TLS before resuming,
+    // allowing recv_direct's fast path to return 0 without acquiring the mutex.
+    // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
+    // provides release); read by worker after _fib_lock (acquire), safe.
+    // Kept in the cluster because the sender writes it through state_lock too.
+    int      direct_recv_done;
     // os_waiter_cnt: number of non-fiber (OS) threads currently blocked in
     // _tin_fiber_join waiting on done_cv.  Incremented (under _table_mu) before
     // releasing _table_mu for the OS-blocking wait; decremented after the wait.
@@ -109,14 +134,6 @@ typedef struct {
     // even if the fiber completes before _tin_fiber_join is reached.
     // os_waiter_cnt is separate: it is 0 until the OS-blocking wait actually starts.
     int      prejoined;
-    // pending_park: set by _tin_fiber_park (called from async I/O / timer C
-    // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
-    // pending_join: the fiber sets pending_park, continues to its next yield,
-    // and the worker blocks it after _coro_resume returns.  Without this,
-    // the wakeup can fire between _tin_fiber_park and the yield, see BLOCKED,
-    // and enqueue a concurrent resume - causing a double-resume race.
-    // Protected by _table_mu.
-    int      pending_park;
     // If the fiber panicked and the panic was caught by the worker loop,
     // this field holds the message as an ARC-managed buffer (via _tin_rc_alloc)
     // so it can be safely wrapped in a TinString by the awaiting fiber.
@@ -126,13 +143,6 @@ typedef struct {
     // Set to 1 when _tin_fiber_get_panic_msg reads a non-NULL panic_msg.
     // Used at shutdown to detect fire-and-forget panics nobody awaited.
     int      panic_checked;
-    // Set to 1 by _tin_fiber_set_direct_recv when a channel sender delivers data
-    // directly to this fiber's recv `out` buffer (bypassing the ring buffer).
-    // The worker loop propagates this to _direct_recv_flag TLS before resuming,
-    // allowing recv_direct's fast path to return 0 without acquiring the mutex.
-    // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
-    // provides release); read by worker after _fib_lock (acquire), safe.
-    int      direct_recv_done;
     // Set by _tin_fiber_spawn when this fiber spawns a child while running on a
     // worker.  Cleared by the worker loop at the start of each resume and again
     // when the yield path reads it.  Causes the first post-spawn yield to go to
@@ -157,12 +167,6 @@ typedef struct {
     // recv_direct if data wasn't delivered before the LQ pop.  Cleared on recv
     // fast-path, on re-park, and on fiber completion (to remove stale entry).
     void    *preregistered_ch;
-    // Per-fiber spinlock: protects status, pending_park, and pending_wakeup
-    // in the park/unpark hot path.  Replacing the global _table_mu for these
-    // transitions eliminates cross-core cache-line bouncing between workers
-    // when each worker is running a different fiber (e.g. TINMAXPROCS=2).
-    // Lock ordering: _table_mu (outer) -> state_lock (inner) - never reverse.
-    _Atomic(uint32_t) state_lock;
     // Set by _tin_fiber_join_any when a fiber is waiting for any of N targets.
     // _fire_done_waiters checks this to do a CAS-based single-winner wakeup.
     // Protected by _table_mu.
