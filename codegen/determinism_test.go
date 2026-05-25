@@ -24,7 +24,7 @@ func TestIRDeterminism(t *testing.T) {
 
 	tinBin := filepath.Join(repoRoot, "tin")
 	if !fileExists(tinBin) {
-		t.Skipf("tin binary not found at %s; build with `go build -o tin .` first", tinBin)
+		t.Skipf("tin binary not found at %s; build with `go build -o tin ./cmd/tin` first", tinBin)
 	}
 
 	// One file per category of codegen path that has historically harbored

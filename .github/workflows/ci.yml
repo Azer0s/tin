@@ -30,7 +30,7 @@ jobs:
           ld.lld --version
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Verify inline channel fast path is generated
         run: |
@@ -154,7 +154,7 @@ jobs:
           ld.lld --version
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Verify inline channel fast path is generated
         run: |
@@ -257,7 +257,7 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Run example tests
         run: ./tin test examples/...

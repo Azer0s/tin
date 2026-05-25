@@ -3,7 +3,7 @@ WORKDIR /app
 COPY . /app
 RUN go mod tidy
 ENV CGO_ENABLED=1
-RUN go build .
+RUN go build ./cmd/tin
 
 FROM ubuntu:latest
 WORKDIR /app

@@ -75,7 +75,7 @@ libffi. See [Dependencies](#dependencies) for the full list.
 ```sh
 git clone <this-repo>
 cd tin
-go build -o tin .
+go build -o tin ./cmd/tin
 
 ./tin run examples/hello.tin
 ```
