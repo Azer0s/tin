@@ -76,6 +76,28 @@ func (cg *CodeGen) ensureStrcmp() *ir.Func {
 	return cg.strcmpFn
 }
 
+// ensureTinStrMemcmp declares the length-aware string equality helper
+// _tin_str_memcmp(a, a_len, b, b_len) -> 0 if equal, 1 otherwise.
+// Used in place of strcmp for Tin string equality because Tin strings
+// are not NUL-terminated at the slice boundary (substring slices reuse
+// the parent buffer with a smaller len), so strcmp would read past the
+// allocation.
+func (cg *CodeGen) ensureTinStrMemcmp() *ir.Func {
+	if cg.tinStrMemcmpFn != nil {
+		return cg.tinStrMemcmpFn
+	}
+
+	cg.tinStrMemcmpFn = cg.ensureExternDecl("_tin_str_memcmp", irtypes.I32,
+		[]*ir.Param{
+			ir.NewParam("a", irtypes.I8Ptr),
+			ir.NewParam("a_len", irtypes.I64),
+			ir.NewParam("b", irtypes.I8Ptr),
+			ir.NewParam("b_len", irtypes.I64),
+		}, false)
+
+	return cg.tinStrMemcmpFn
+}
+
 // newGlobalString creates a private unnamed_addr constant for a string,
 // returning a pointer to its first byte.  The global is wrapped in a
 // { i64, i64, [N x i8] } struct where the first i64 holds TIN_IMMORTAL_RC (-1)

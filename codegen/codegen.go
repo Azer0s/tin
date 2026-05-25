@@ -587,6 +587,10 @@ type CodeGen struct {
 
 	// strcmpFn: lazily declared C strcmp
 	strcmpFn *ir.Func
+	// tinStrMemcmpFn: lazily declared _tin_str_memcmp (length-aware
+	// string equality; used for Tin string == /!= so we don't read
+	// past the slice boundary like strcmp would).
+	tinStrMemcmpFn *ir.Func
 	// anyEqFn: lazily declared _tin_any_eq runtime helper
 	anyEqFn *ir.Func
 

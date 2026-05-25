@@ -579,12 +579,14 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 		return block.NewICmp(pred, lcode, rcode)
 	}
 
-	// atom <-> string: convert atom to string, then strcmp.
+	// atom <-> string: convert atom to string, then length-aware compare.
 	if isAtomType(lt) && isFatPtrType(rt) {
 		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, left))
 		lptr := cg.extractStringPtr(block, strVal)
+		llen := cg.extractStringLen(block, strVal)
 		rptr := cg.extractStringPtr(block, right)
-		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		rlen := cg.extractStringLen(block, right)
+		cmp := block.NewCall(cg.ensureTinStrMemcmp(), lptr, llen, rptr, rlen)
 
 		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
 	}
@@ -592,17 +594,22 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 	if isFatPtrType(lt) && isAtomType(rt) {
 		strVal := block.NewCall(cg.ensureAtomToString(), cg.extractAtomCode(block, right))
 		lptr := cg.extractStringPtr(block, left)
+		llen := cg.extractStringLen(block, left)
 		rptr := cg.extractStringPtr(block, strVal)
-		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		rlen := cg.extractStringLen(block, strVal)
+		cmp := block.NewCall(cg.ensureTinStrMemcmp(), lptr, llen, rptr, rlen)
 
 		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
 	}
 
-	// String equality/inequality: compare via strcmp.
+	// String equality/inequality: length-aware compare honours TinString.len
+	// instead of running off the slice into adjacent memory like strcmp would.
 	if isFatPtrType(lt) {
 		lptr := cg.extractStringPtr(block, left)
+		llen := cg.extractStringLen(block, left)
 		rptr := cg.extractStringPtr(block, right)
-		cmp := block.NewCall(cg.ensureStrcmp(), lptr, rptr)
+		rlen := cg.extractStringLen(block, right)
+		cmp := block.NewCall(cg.ensureTinStrMemcmp(), lptr, llen, rptr, rlen)
 
 		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
 	}
