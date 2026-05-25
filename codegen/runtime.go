@@ -44,7 +44,12 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
-		block.NewCall(cg.ensureRetain(), rcPtr)
+		// Provenance-aware: the data ptr of an `any` or trait fat-ptr can
+		// come from mem::malloc / addr() / static memory just as easily
+		// as from a Tin allocator.  Route through _tin_retain_ptr so
+		// foreign pointers short-circuit at the arena range check
+		// instead of corrupting allocator metadata.
+		block.NewCall(cg.ensureRetainPtr(), rcPtr)
 
 		return
 	}
@@ -86,15 +91,19 @@ func (cg *CodeGen) emitRetain(block *ir.Block, val value.Value) {
 // and must be retained so that scope-exit releases stay balanced.
 func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) {
 	t := fieldVal.Type()
-	// Owning pointer to a known Tin struct OR a trait fat-ptr iface struct:
-	// retain via _tin_retain.  Iface structs live in cg.traitFatPtrTypes
-	// (not cg.structTypes), so detect them via shape.
+	// Owning pointer to a known Tin struct OR a trait fat-ptr iface struct.
+	// Route through the provenance-aware retain so wrapping a libc-allocated
+	// pointer (mem::malloc -> *T -> trait fat-ptr) does not stomp the
+	// allocator metadata that lives just before the user's block.  The
+	// arena range check + magic probe short-circuits before any rc-header
+	// field is touched on foreign pointers, which both fixes the latent
+	// memory corruption AND silences the corresponding valgrind reports.
 	if pt, ok := t.(*irtypes.PointerType); ok {
 		if innerSt, ok2 := pt.ElemType.(*irtypes.StructType); ok2 && innerSt.Name() != "" {
 			isTinStruct := cg.structTypeFor(CanonKey(innerSt.Name())) != nil
 			if isTinStruct || isTraitFatPtrShape(innerSt) {
 				ptrI8 := block.NewBitCast(fieldVal, irtypes.I8Ptr)
-				block.NewCall(cg.ensureRetain(), ptrI8)
+				block.NewCall(cg.ensureRetainPtr(), ptrI8)
 
 				return
 			}
@@ -336,7 +345,8 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 
 	rcPtr := cg.extractRCDataPtr(block, val, t)
 	if rcPtr != nil {
-		block.NewCall(cg.ensureRelease(), rcPtr)
+		// Provenance-aware; mirror of the retain side above.
+		block.NewCall(cg.ensureReleasePtr(), rcPtr)
 
 		return
 	}
