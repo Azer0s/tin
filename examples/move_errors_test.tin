@@ -19,8 +19,8 @@ test "use after move: subsequent read is a compile error" =
 test "move of function parameter rejected with fix-it" =
   expect_diagnostic("move_parameter.tin", "cannot move `s` (parameter")
 
-test "move of for-loop iterator binding rejected with fix-it" =
-  expect_diagnostic("move_iterator.tin", "cannot move `item` (iterator binding")
+test "move of for-ref iterator binding rejected with fix-it" =
+  expect_diagnostic("move_iterator.tin", "cannot move `item` (ref-iterator binding")
 
 test "move of undefined name is a clean error" =
   expect_diagnostic("move_undefined.tin", "cannot move `not_a_thing`")

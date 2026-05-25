@@ -581,6 +581,14 @@ type CodeGen struct {
 	// musttail calls for mutual tail recursion (non-RC params/return, no defers).
 	mutualTCOEligible bool
 
+	// curIsRefIterGet is true while compiling a `fn ref_iter::get` impl.
+	// Switches the entry retain of `this` and the return retain of the
+	// `*T` result off: the caller of these methods is a for-ref loop
+	// (or a loop-like context) that already pins the source container,
+	// so the borrow they emit is a pure no-op that costs four atomic
+	// ops per iteration on the hot path.
+	curIsRefIterGet bool
+
 	// tcoReportFn is called when a TCO transformation is applied.
 	// caller is the function being compiled; callee is the target (empty for self-TCO).
 	tcoReportFn func(caller, callee string)

@@ -286,36 +286,66 @@ func (cg *CodeGen) initBuiltinTupleTemplates() {
 }
 
 // registerBuiltinTraits pre-populates cg.traits with synthetic declarations for
-// built-in special traits (iter[t]) so structs can implement them without an
-// explicit "trait iter[t] = ..." declaration in the source file.
+// built-in special traits (iter[t], ref_iter[t]) so structs can implement them
+// without an explicit "trait iter[t] = ..." declaration in the source file.
 func (cg *CodeGen) registerBuiltinTraits() {
-	if cg.traitFor(CanonKey("iter")) != nil {
-		return // already declared by user
+	if cg.traitFor(CanonKey("iter")) == nil {
+		// iter[t]: fn len(this iter[t]) i64 = virtual
+		//          fn get(this iter[t], i i64) t = virtual
+		selfType := &ast.GenericType{Name: "iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
+		lenMethod := &ast.FuncDecl{
+			Name:      "len",
+			IsVirtual: true,
+			Params:    []ast.Param{{Name: "this", Type: selfType}},
+			RetType:   &ast.SimpleType{Name: "i64"},
+		}
+		getMethod := &ast.FuncDecl{
+			Name:      "get",
+			IsVirtual: true,
+			Params: []ast.Param{
+				{Name: "this", Type: selfType},
+				{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
+			},
+			RetType: &ast.SimpleType{Name: "t"},
+		}
+		iterTrait := &ast.TraitDecl{
+			Name:       "iter",
+			TypeParams: []string{"t"},
+			Methods:    []*ast.FuncDecl{lenMethod, getMethod},
+		}
+		cg.recordTrait(CanonKey("iter"), iterTrait)
 	}
-	// iter[t]: fn len(this iter[t]) i64 = virtual
-	//          fn get(this iter[t], i i64) t = virtual
-	selfType := &ast.GenericType{Name: "iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
-	lenMethod := &ast.FuncDecl{
-		Name:      "len",
-		IsVirtual: true,
-		Params:    []ast.Param{{Name: "this", Type: selfType}},
-		RetType:   &ast.SimpleType{Name: "i64"},
+
+	if cg.traitFor(CanonKey("ref_iter")) == nil {
+		// ref_iter[t]: fn len(this ref_iter[t]) i64 = virtual
+		//              fn get(this ref_iter[t], i i64) *t = virtual
+		//
+		// Like iter[t] but get returns a pointer into the source storage
+		// so the loop body can mutate elements through `for ref x in xs`.
+		// Required for ref-iteration over a custom container.
+		selfType := &ast.GenericType{Name: "ref_iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
+		lenMethod := &ast.FuncDecl{
+			Name:      "len",
+			IsVirtual: true,
+			Params:    []ast.Param{{Name: "this", Type: selfType}},
+			RetType:   &ast.SimpleType{Name: "i64"},
+		}
+		getMethod := &ast.FuncDecl{
+			Name:      "get",
+			IsVirtual: true,
+			Params: []ast.Param{
+				{Name: "this", Type: selfType},
+				{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
+			},
+			RetType: &ast.PointerType{Elem: &ast.SimpleType{Name: "t"}},
+		}
+		refIterTrait := &ast.TraitDecl{
+			Name:       "ref_iter",
+			TypeParams: []string{"t"},
+			Methods:    []*ast.FuncDecl{lenMethod, getMethod},
+		}
+		cg.recordTrait(CanonKey("ref_iter"), refIterTrait)
 	}
-	getMethod := &ast.FuncDecl{
-		Name:      "get",
-		IsVirtual: true,
-		Params: []ast.Param{
-			{Name: "this", Type: selfType},
-			{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
-		},
-		RetType: &ast.SimpleType{Name: "t"},
-	}
-	iterTrait := &ast.TraitDecl{
-		Name:       "iter",
-		TypeParams: []string{"t"},
-		Methods:    []*ast.FuncDecl{lenMethod, getMethod},
-	}
-	cg.recordTrait(CanonKey("iter"), iterTrait)
 }
 
 // registerBuiltinOpTraits pre-populates cg.traits with synthetic alias-form

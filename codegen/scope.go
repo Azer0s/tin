@@ -173,11 +173,12 @@ type scopeEntry struct {
 	// rules for each ownership state.
 	ownership ownership
 
-	// isForIterator marks for-loop iteration bindings (`for x in xs`
-	// and friends).  The slot is filled fresh each iteration; an
-	// explicit `move x` on it is rejected with a non-owning-binding
-	// error so the per-iteration retain/release pair stays balanced.
-	isForIterator bool
+	// isForRefIterator marks `for ref x in xs` bindings only.  The slot
+	// aliases storage in the source container; `move x` would steal
+	// from the container and leave a dangling slot, so it is rejected.
+	// Value-form iteration (`for x in xs`) makes a per-iteration copy
+	// and is move-eligible like any other local.
+	isForRefIterator bool
 }
 
 // ownership is the borrow optimizer's per-binding classification.

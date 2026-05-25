@@ -273,6 +273,23 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		return nil, err
 	}
 
+	// ref_iter[t] trait: `for ref x in xs` dispatches through ref_iter when
+	// xs is a custom struct.  Builtin arrays / slices take their own ref
+	// path above (line ~365); this branch only fires for custom types.
+	if s.IsRef {
+		if iterFatPtr, instKey, ok, ownsData := cg.tryCoerceToRefIter(block, iterVal); ok {
+			return cg.genForRefIterTrait(block, s, iterFatPtr, instKey, ownsData)
+		}
+		// Struct impls iter[T] but not ref_iter[T]: `for ref` needs a
+		// pointer-returning accessor.  Error out explicitly rather than
+		// silently falling through to iter (which would lose the ref
+		// semantics the user asked for).
+		if _, _, ok, _ := cg.tryCoerceToIter(block, iterVal); ok {
+			return nil, cg.nodeErr(s, "for ref: type %s implements iter but not ref_iter; add a ref_iter[T] impl with `fn ref_iter::get(this *T, i i64) *T` to allow ref-iteration",
+				cg.typeNameOf(iterVal.Type()))
+		}
+	}
+
 	// iter[t] trait: struct (or fat-ptr) implementing iter[T] - use vtable.
 	if iterFatPtr, instKey, ok, ownsData := cg.tryCoerceToIter(block, iterVal); ok {
 		return cg.genForIterTrait(block, s, iterFatPtr, instKey, ownsData)
@@ -377,8 +394,8 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 				// noRelease=true: the slot lives in the source
 				// array, not in scope-local storage. Releasing
 				// here would double-free when the array drops.
-				noRelease:     true,
-				isForIterator: true,
+				noRelease:        true,
+				isForRefIterator: true,
 			})
 			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 		}
@@ -395,7 +412,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		}
 
 		if s.VarName != "" {
-			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos(), isForIterator: true})
+			cg.curScope.set(s.VarName, &scopeEntry{val: elemAlloca, isAlloc: true, isRC: isElemRC, declPos: s.Pos()})
 			cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 		}
 	}
@@ -574,7 +591,7 @@ func (cg *CodeGen) genForInStringRunes(block *ir.Block, s *ast.ForStmt, iterVal 
 
 	// body: expose loop variable, run user statements
 	cg.curScope = newScope(cg.curScope)
-	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos(), isForIterator: true})
+	cg.curScope.set(s.VarName, &scopeEntry{val: runeAlloca, isAlloc: true, isRC: false, declPos: s.Pos()})
 	cg.warnIfBuiltinShadow("for-in", s.VarName, s.Pos())
 
 	cg.pushBreakTarget(afterBlock)
@@ -655,7 +672,7 @@ func (cg *CodeGen) genForRange(block *ir.Block, s *ast.ForStmt, rng *ast.RangeEx
 	// Body.
 	cg.curScope = newScope(cg.curScope)
 	if s.VarName != "" {
-		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos(), isForIterator: true})
+		cg.curScope.set(s.VarName, &scopeEntry{val: loopVar, isAlloc: true, declPos: s.Pos()})
 		cg.warnIfBuiltinShadow("for", s.VarName, s.Pos())
 	}
 

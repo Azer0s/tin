@@ -295,7 +295,7 @@ func (cg *CodeGen) genReturn(block *ir.Block, s *ast.ReturnStmt) error {
 			}
 		}
 	} else if isCopyExpr(s.Value) && !cg.isFreshBytesAlloc(val) && !cg.isFreshCallResult(val) &&
-		!cg.isDerefOfRawVoidPtrCast(s.Value) && !isFreshSliceExpr(s.Value) {
+		!cg.isDerefOfRawVoidPtrCast(s.Value) && !isFreshSliceExpr(s.Value) && !cg.curIsRefIterGet {
 		// Returning a borrowed value (field access, index) whose RC lifetime is
 		// tied to a local/parameter that will be released by emitAllScopeReleases.
 		// Retain first so the caller gets one owned reference, then scope cleanup

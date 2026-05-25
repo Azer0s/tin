@@ -1,0 +1,55 @@
+// Demonstrates the `ref_iter[t]` trait: a struct that lets `for ref x in xs`
+// alias slots in its internal storage so the loop body can mutate in place.
+// `iter[t]` (value access) and `ref_iter[t]` (pointer access) coexist on the
+// same struct.
+
+trait iter[t] =
+  fn len(this iter[t]) i64 = virtual
+  fn get(this iter[t], i i64) t = virtual
+
+trait ref_iter[t] =
+  fn len(this ref_iter[t]) i64 = virtual
+  fn get(this ref_iter[t], i i64) *t = virtual
+
+struct nums(iter[i64], ref_iter[i64]) =
+  vals [i64]
+  size i64
+
+  fn iter::len(this nums) i64 = return this.size
+  fn iter::get(this nums, i i64) i64 = return this.vals[i]
+
+  fn ref_iter::len(this nums) i64 = return this.size
+  fn ref_iter::get(this nums, i i64) *i64 = return &this.vals[i]
+
+use assert
+
+test "value-form copies; source unchanged" =
+  let n = nums{vals: [1, 2, 3], size: 3}
+
+  for x in n:
+    x = x * 100 // overwrites the local copy only
+
+  assert::equals(n.vals[0], 1)
+  assert::equals(n.vals[1], 2)
+  assert::equals(n.vals[2], 3)
+
+test "ref-form aliases storage; mutations persist" =
+  let n = nums{vals: [1, 2, 3], size: 3}
+
+  for ref x in n:
+    x = x * 10
+
+  assert::equals(n.vals[0], 10)
+  assert::equals(n.vals[1], 20)
+  assert::equals(n.vals[2], 30)
+
+test "move in value-form iter binding is allowed" =
+  let xs = ["a", "b", "c"]
+  let taken [string] = []
+
+  for s in xs:
+    taken ++= [move s]
+
+  assert::equals(len(taken), 3)
+  assert::equals(taken[0], "a")
+  assert::equals(taken[2], "c")

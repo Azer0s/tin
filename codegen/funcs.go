@@ -796,6 +796,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevTCOLoopTop := cg.tcoLoopTop
 	prevTCOParams := cg.tcoParams
 	prevMutualTCO := cg.mutualTCOEligible
+	prevIsRefIterGet := cg.curIsRefIterGet
+	// Mark functions implementing `ref_iter::get` so the entry retain
+	// of `this` and the return retain of the `*T` result are both
+	// suppressed -- the caller (for-ref loop) already holds the source
+	// container alive via dataPtr, so the +1 the borrow would otherwise
+	// add is pure overhead that the matching loop-level release pays.
+	cg.curIsRefIterGet = isRefIterGetImpl(n)
 
 	defer func() {
 		cg.curFn = prevFn
@@ -815,6 +822,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.tcoLoopTop = prevTCOLoopTop
 		cg.tcoParams = prevTCOParams
 		cg.mutualTCOEligible = prevMutualTCO
+		cg.curIsRefIterGet = prevIsRefIterGet
 	}()
 
 	// Register function in current scope so recursion works.
@@ -890,6 +898,15 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// params keep today's owned model so the assign rc machinery
 		// has a +1 to release-old against.
 		paramBorrowed := isRC && !paramMutatedSet[astParam.Name]
+		// ref_iter::get's `this` is always a pure borrow: the body's
+		// only job is to hand back `&this.field[...]`.  The caller
+		// (for-ref loop) keeps the source container alive while the
+		// iface lives, so the entry retain + scope-exit release pair
+		// the borrow analyzer would otherwise emit is dead weight on
+		// every iteration -- 4 atomic ops per loop trip on a hot path.
+		if cg.curIsRefIterGet && astParam.Name == "this" {
+			paramBorrowed = true
+		}
 		if !paramBorrowed {
 			cg.emitRetain(entry, p)
 		}
