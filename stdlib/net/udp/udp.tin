@@ -117,6 +117,7 @@ fn{#async} accept_impl(fd i32) Result[Conn, errors::Err] =
     host:     host,
     port:     port,
     data_buf: data,
+    owns_fd:  false,
   })
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
@@ -151,6 +152,7 @@ struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   host     string
   port     i32
   data_buf [byte]                    // received datagram (accept); empty for dial
+  owns_fd  bool                      // true for dial-based; false for accept (fd is server-owned)
 
   // read implements io::AsyncReader.
   // Accept-based: serves bytes from the received datagram, returns 0 at EOF.
@@ -168,7 +170,13 @@ struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   fn write(this Conn, data [byte]) Future[i64] =
     return spawn send_to_impl(this.fd, data, this.host, this.port)
 
-  fn Closeable::close(this Conn) = io::close(this.fd)
+  // Accept-based Conn shares the Server's fd -- skipping io::close here keeps
+  // the parent listener alive for subsequent accepts.  Dial-based owns its fd
+  // and forwards to io::close.  Idempotency under repeated .close() is handled
+  // by io::close itself (POSIX close on an already-closed fd is a no-op error).
+  fn Closeable::close(this Conn) =
+    if this.owns_fd:
+      io::close(this.fd)
 
   fn valid(this Conn) bool = return this.fd >= 0
 
@@ -207,6 +215,7 @@ fn dial(host string, port i32) Result[Conn, errors::Err] =
     host:     host,
     port:     port,
     data_buf: [],
+    owns_fd:  true,
   })
 
 export { Server, Conn, UdpError, listen, dial } as udp

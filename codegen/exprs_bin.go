@@ -602,7 +602,7 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 		return block.NewICmp(pred, cmp, constant.NewInt(irtypes.I32, 0))
 	}
 
-	// String equality/inequality: length-aware compare honours TinString.len
+	// String equality/inequality: length-aware compare honors TinString.len
 	// instead of running off the slice into adjacent memory like strcmp would.
 	if isFatPtrType(lt) {
 		lptr := cg.extractStringPtr(block, left)

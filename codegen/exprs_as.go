@@ -20,6 +20,7 @@ func isPtrArithSyntax(n ast.Node) bool {
 	if !ok || bin == nil {
 		return false
 	}
+
 	return bin.Op == "+" || bin.Op == "-"
 }
 
@@ -58,6 +59,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	// view's lifetime past the expression.
 	prevTransient := cg.transientPtrAllowed
 	mayBePtrArith := irtypes.IsInt(targetType) && isPtrArithSyntax(e.Expr)
+
 	if mayBePtrArith {
 		cg.transientPtrAllowed = true
 	}
@@ -67,6 +69,7 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	if mayBePtrArith {
 		cg.transientPtrAllowed = prevTransient
 	}
+
 	if err != nil {
 		return nil, err
 	}
