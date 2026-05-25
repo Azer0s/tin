@@ -15,15 +15,14 @@
 //     case Ok(c): await ioutil::write_string(c, "hello\n")
 //     case Err(e): echo e.message()
 //
-// Ownership: the file descriptor lives behind an *rc::Cell so copies of
-// Conn / Server share ownership instead of double-closing on scope exit.
-// Dial-based Conn owns its fd (cell dtor is io::close). Accept-based Conn
-// shares the Server's fd (cell dtor is a no-op; the Server's own cell
-// closes the fd at last drop). Calling .close() is optional and idempotent.
+// Ownership: the fd lives behind an *rc::Cell so copies of Conn / Server
+// share ownership.  Dial-based Conn / Server use io::close as the cell
+// dtor; accept-based Conn shares the Server's fd and uses no_close so
+// the Server's own cell owns the close.  The .fd field is cached at
+// construction; reads are zero-cost.
 
 use { loop } from macros
 use io
-use mem
 use rc
 use sync
 use errors
@@ -31,8 +30,6 @@ use result
 use { Result } from result
 
 // UdpError enumerates the failure modes the udp stdlib can surface.
-// Implements errors::Err so calls return Result[T, errors::Err] and
-// unify with the rest of the typed-error ecosystem.
 data UdpError(errors::Err, print) =
   CannotBind(port i32)
   CannotConnect(host string, port i32)
@@ -53,9 +50,9 @@ fn tin_udp_recvfrom_c(fd i32, buf *byte, n i64, host_out *string, port_out *i32)
 fn tin_udp_sendto_c(fd i32, buf *byte, n i64, host string, port i32) i64              = extern("_tin_udp_sendto")
 fn tin_io_blocked_val_c() i64                                                         = extern("_tin_io_blocked_val")
 
-// noop_close is the rc::Cell dtor for accept-based Conns whose fd is owned
-// by the parent Server; dropping the Conn must NOT close the shared fd.
-fn noop_close(_fd i32) = pass
+// no_close is the cell dtor for accept-based Conns whose fd is owned by
+// the parent Server; dropping the Conn must NOT close the shared fd.
+fn no_close(fd i32) = pass
 
 // Internal async implementations
 
@@ -83,10 +80,12 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
     // breaks the accept loop on amd64 GitHub runners (heap corruption
     // in glibc's tcache on subsequent free).
 
-// read_buf_impl copies bytes from a received datagram into out, advancing the cursor.
-// Returns 0 when all bytes have been consumed (signals EOF to AsyncReader callers).
-fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
-  let p     = *read_pos
+// read_buf_impl copies bytes from a received datagram into out, advancing
+// the cursor.  Returns 0 when all bytes have been consumed (signals EOF
+// to AsyncReader callers).  cursor is shared across Conn copies via the
+// Atomic's inner rc::Cell.
+fn{#async} read_buf_impl(data [byte], cursor sync::Atomic[i64], out *byte, n i64) i64 =
+  let p     = cursor.load()
   let total = len(data)
 
   if p >= total:
@@ -101,7 +100,7 @@ fn{#async} read_buf_impl(data [byte], read_pos *i64, out *byte, n i64) i64 =
     out[i] = data[p + i]
     i = i + 1
 
-  *read_pos = p + avail
+  cursor.store(p + avail)
 
   return avail
 
@@ -110,9 +109,15 @@ fn{#async} accept_impl(fd i32) Result[Conn, errors::Err] =
 
   if len(data) == 0:
     return Err(AcceptFailed)
-  let pos = mem::calloc(1, 8) as *i64
 
-  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, noop_close), host: host, port: port, data_buf: data, read_pos: pos, owns_fd: false})
+  return Ok(Conn{
+    fd:       fd,
+    cell:     rc::Cell[i32].new(fd, no_close),
+    cursor:   sync::Atomic[i64].new(0),
+    host:     host,
+    port:     port,
+    data_buf: data,
+  })
 
 fn{#async} send_to_raw_impl(fd i32, buf *byte, n i64, host string, port i32) i64 =
   let blocked = tin_io_blocked_val_c()
@@ -137,58 +142,47 @@ fn{#async} send_to_impl(fd i32, data [byte], host string, port i32) i64 =
 //
 // Dial-based Conn reads from the connected UDP socket directly.
 //
-// .close() is optional and idempotent; the fd is auto-closed at last drop
+// .close() is optional; the fd is auto-closed at the cell's last drop
 // (only for dial-based Conns; accept-based share the Server's fd).
 struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
-  _fd_cell *rc::Cell[i32]
+  fd       i32                       // cached at construction; zero-cost reads
+  cell     *rc::Cell[i32]            // dial: io::close at last drop; accept: no_close
+  cursor   sync::Atomic[i64]         // accept-only read cursor; 0 for dial
   host     string
   port     i32
-  data_buf [byte]   // received datagram (accept-based); empty for dial-based
-  read_pos *i64     // heap-alloc'd read cursor into data_buf; null for dial-based
-  owns_fd  bool     // false for accept-based (server fd is shared); true for dial-based
-
-  // fd returns the raw underlying file descriptor.
-  fn fd(this Conn) i32 = return this._fd_cell.payload()
+  data_buf [byte]                    // received datagram (accept); empty for dial
 
   // read implements io::AsyncReader.
   // Accept-based: serves bytes from the received datagram, returns 0 at EOF.
   // Dial-based: reads from the connected UDP socket.
   fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
     if len(this.data_buf) > 0:
-      return spawn read_buf_impl(this.data_buf, this.read_pos, buf, n)
-    return spawn io::async_read(this.fd(), buf, n)
+      return spawn read_buf_impl(this.data_buf, this.cursor, buf, n)
+    return spawn io::async_read(this.fd, buf, n)
 
   // write sends buf[0..n] to the peer (AsyncWriter interface).
   fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn send_to_raw_impl(this.fd(), buf, n, this.host, this.port)
+    return spawn send_to_raw_impl(this.fd, buf, n, this.host, this.port)
 
   // write sends data to the peer (slice convenience overload).
   fn write(this Conn, data [byte]) Future[i64] =
-    return spawn send_to_impl(this.fd(), data, this.host, this.port)
+    return spawn send_to_impl(this.fd, data, this.host, this.port)
 
-  // close releases the read cursor and, for dial-based connections, closes
-  // the fd early. Idempotent - safe to call multiple times.
-  fn Closeable::close(this Conn) =
-    if this.owns_fd:
-      io::close(this.fd())
-    mem::free(this.read_pos as *void)
+  fn Closeable::close(this Conn) = io::close(this.fd)
 
-  fn valid(this Conn) bool =
-    return this.fd() >= 0
+  fn valid(this Conn) bool = return this.fd >= 0
 
 // Server listens for incoming UDP datagrams.
 // Create with udp::listen(port).
 struct Server (io::Closeable) =
-  _fd_cell *rc::Cell[i32]
-
-  fn fd(this Server) i32 = return this._fd_cell.payload()
+  fd   i32
+  cell *rc::Cell[i32]
 
   // accept waits for the next datagram and returns a Conn to the sender.
   fn accept(this Server) Future[Result[Conn, errors::Err]] =
-    return spawn accept_impl(this.fd())
+    return spawn accept_impl(this.fd)
 
-  fn Closeable::close(this Server) =
-    io::close(this.fd())
+  fn Closeable::close(this Server) = io::close(this.fd)
 
 // listen creates a bound UDP socket on the given port.
 fn listen(port i32) Result[Server, errors::Err] =
@@ -197,7 +191,7 @@ fn listen(port i32) Result[Server, errors::Err] =
   if fd < 0:
     return Err(CannotBind(port))
 
-  return Ok(Server{_fd_cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close)})
 
 // dial creates a connected UDP socket to host:port.
 fn dial(host string, port i32) Result[Conn, errors::Err] =
@@ -206,6 +200,13 @@ fn dial(host string, port i32) Result[Conn, errors::Err] =
   if fd < 0:
     return Err(CannotConnect(host, port))
 
-  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close), host: host, port: port, data_buf: [], read_pos: nil, owns_fd: true})
+  return Ok(Conn{
+    fd:       fd,
+    cell:     rc::Cell[i32].new(fd, io::close),
+    cursor:   sync::Atomic[i64].new(0),
+    host:     host,
+    port:     port,
+    data_buf: [],
+  })
 
 export { Server, Conn, UdpError, listen, dial } as udp

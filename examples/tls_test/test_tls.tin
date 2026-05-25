@@ -19,7 +19,7 @@ fn{#async} main() =
   if errors::is_err(err):
     panic(err.message())
 
-  let tls_r = await tls::connect("localhost", conn.fd())
+  let tls_r = await tls::connect("localhost", conn.fd)
 
   match tls_r:
     case Err(e):

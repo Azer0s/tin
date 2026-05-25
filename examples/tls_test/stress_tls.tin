@@ -19,7 +19,7 @@ async worker(id i64, msgs i64, done sync::Channel[i64]) =
 
     return
 
-  let (tls_conn, tls_err) = await tls::connect("localhost", conn.fd())
+  let (tls_conn, tls_err) = await tls::connect("localhost", conn.fd)
 
   if errors::is_err(tls_err):
     echo "worker {id}: tls handshake failed: {tls_err}"
