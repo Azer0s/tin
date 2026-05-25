@@ -13,10 +13,12 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	tags := p.parseTags()
 	_ = tags
 
-	// If parseTags() consumed a {#tag} block, the next token is the body opener.
-	// Build the TaggedBlock using the already-parsed tags.
+	// `{#tag} { body }` C-brace tagged blocks were removed; the tags
+	// already got consumed by parseTags above, so a bare LBRACE here
+	// means the user wrote the legacy form.  Surface the new syntax
+	// instead of letting expression parsing emit a generic error.
 	if len(tags) > 0 && p.check(lexer.LBRACE) {
-		return p.parseTaggedBlockWithTags(tags)
+		return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
 	}
 
 	// Check for #no_parens macro invocation (same as parseTopLevel).
@@ -94,6 +96,8 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 		return &ast.BreakStmt{}, nil
 	case lexer.KW_DEFER:
 		return p.parseDeferStmt()
+	case lexer.KW_DO:
+		return p.parseDoBlock()
 	case lexer.KW_IF:
 		return p.parseIfStmt()
 	case lexer.KW_FOR:
@@ -127,9 +131,10 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 
 		return wl, nil
 	case lexer.LBRACE:
-		// { #tag } { body }  tagged block - tags not yet parsed (legacy path)
+		// `{ #tag } { body }` is no longer accepted; use `do{#tag}: body`
+		// (indent-based block) or `do{#tag}: stmt` (single-stmt inline).
 		if p.peekAt(1).Type == lexer.CONTROL_TAG {
-			return p.parseTaggedBlock()
+			return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
 		}
 
 		return p.parseExprStatement()
@@ -197,6 +202,65 @@ func (p *Parser) parseReturnStmt() (*ast.ReturnStmt, error) {
 	node.SetPos(pos)
 
 	return node, nil
+}
+
+// parseDoBlock parses a `do[{#tag ...}]: body` statement.  Two shapes:
+//
+//   - `do: body`               -> plain indented (or inline) statement block.
+//   - `do{#tag1 #tag2}: body`  -> TaggedBlock with the listed control tags.
+//
+// Replaces the legacy `{#tag} { body }` C-brace form that was removed when
+// indented blocks became the only statement-block syntax in Tin.
+func (p *Parser) parseDoBlock() (ast.Node, error) {
+	pos := p.curPos()
+	p.advance() // consume `do`
+
+	tags := p.parseTags()
+
+	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+
+	body, err := p.parseColonBody()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(tags) == 0 {
+		return body, nil
+	}
+
+	tb := &ast.TaggedBlock{Tags: tags, Body: body}
+	tb.SetPos(pos)
+
+	return tb, nil
+}
+
+// parseColonBody parses the body after a `:` -- either an indented block on
+// the next line(s), or a single inline statement on the same line.  Returns
+// an *ast.Block in both cases.
+func (p *Parser) parseColonBody() (*ast.Block, error) {
+	if p.check(lexer.NEWLINE) {
+		p.advance()
+		p.skipNewlines()
+
+		if p.check(lexer.INDENT) {
+			return p.parseBlock()
+		}
+
+		return &ast.Block{}, nil
+	}
+
+	stmt, err := p.parseStatement()
+	if err != nil {
+		return nil, err
+	}
+
+	if stmt == nil {
+		return &ast.Block{}, nil
+	}
+
+	return &ast.Block{Stmts: []ast.Node{stmt}}, nil
 }
 
 func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {

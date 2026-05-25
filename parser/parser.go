@@ -330,10 +330,11 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 	// Collect leading control tags: fn{#pure #recurse} ...
 	tags := p.parseTags()
 
-	// If parseTags() consumed a {#tag} block, the next token must be a body brace
-	// for a tagged block statement.
+	// `{#tag} { body }` C-brace tagged blocks were removed; use
+	// `do{#tag}: body` at statement scope instead.  Top-level tags
+	// still attach to the following fn/struct/macro/etc decl below.
 	if len(tags) > 0 && p.check(lexer.LBRACE) {
-		return p.parseTaggedBlockWithTags(tags)
+		return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
 	}
 
 	switch p.peek().Type {

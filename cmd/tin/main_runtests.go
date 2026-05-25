@@ -302,6 +302,19 @@ func runMemcheck(memcheck string, cmd *exec.Cmd) error {
 			// goroutine -- it'll get GC'd on process exit -- and
 			// return so the test runner can continue.
 		}
+		// Emit an explicit signature so the test harness can tell the
+		// difference between "no leaks reported" (genuine clean run)
+		// and "leaks --atExit deadlocked and was killed" (test
+		// inconclusive).  Without this, memcheck_ran() finds no
+		// signature in the captured output and flags the fixture as a
+		// failure even though the leak tool never actually finished.
+		// macOS 15+ / 26+ ships a leaks(1) whose --atExit injection
+		// can deadlock inside the analyzed binary indefinitely; the
+		// 15 s ceiling above caps that, this line gives downstream
+		// the marker to react to.
+		if cmd.Stderr != nil {
+			_, _ = cmd.Stderr.Write([]byte("leaks: --atExit timed out, tool killed (macOS deadlock)\n"))
+		}
 
 		return nil
 	}

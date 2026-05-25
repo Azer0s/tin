@@ -1,0 +1,49 @@
+// Acceptance test for `do[{#tag ...}]: body` -- the indented-block
+// replacement for the old C-brace `{ #tag } { body }` syntax.
+//
+//   - `do{#unsafe}:` enables pointer arithmetic + addr(int)
+//   - `do{#allow_sideffect}:` permits #sideffect calls inside a #pure fn
+//   - bare `do:` is a plain indented block (useful for grouping)
+//   - inline form `do{#tag}: stmt` accepts a single statement on the same line
+
+use assert
+use { unsafe } from macros
+
+fn{#pure} traced(n i64) i64 =
+  let r i64 = n * 2
+  do{#allow_sideffect}: echo "traced({n}) = {r}"
+  return r
+
+fn write_from(buf *byte, n i64) i64 =
+  let head i64 = 0
+  do{#unsafe}:
+    head = *buf as i64
+    let tail = buf + n
+    head = head + (*tail as i64)
+  return head
+
+test "do{#unsafe}: enables pointer arithmetic + addr" =
+  do{#unsafe}:
+    let p volatile *char = addr(0xDEAD)
+    assert::equals(p as i64, 0xDEAD)
+
+test "do{#allow_sideffect}: inline form" =
+  assert::equals(traced(7), 14)
+
+test "do{#unsafe}: pointer arithmetic in nested call" =
+  let xs [byte] = [0x10 as byte, 0x20 as byte, 0x30 as byte]
+  let v = write_from(&xs[0], 2)
+  assert::equals(v, 0x40)
+
+test "bare do: is a plain indented block" =
+  let outer = 5
+  let result i64 = 0
+  do:
+    let inner = outer * 2
+    result = inner + 1
+  assert::equals(result, 11)
+
+test "unsafe macro expands to do{#unsafe}" =
+  unsafe:
+    let p volatile *char = addr(0xCAFE)
+    assert::equals(p as i64, 0xCAFE)

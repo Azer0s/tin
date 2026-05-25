@@ -4,7 +4,6 @@
 // promise and is rejected.
 
 fn main() =
-  { #unsafe } {
+  do{#unsafe}:
     let p *char = addr(0xDEAD)   // rejected: volatile *char does not coerce to *char
     echo p as i64
-  }

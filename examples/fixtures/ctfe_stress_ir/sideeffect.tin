@@ -1,8 +1,7 @@
 fn{#pure} traced_double(n i64) i64 =
   let r i64 = n * 2
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "n={n}"
-  }
   return r
 
 fn main() i64 = return traced_double(21)

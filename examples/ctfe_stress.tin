@@ -197,9 +197,8 @@ test "shadow: param masks top-level var" =
 fn{#pure} traced_double(n i64) i64 =
   let r i64 = n * 2
 
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "traced_double({n}) = {r}"
-  }
 
   return r
 

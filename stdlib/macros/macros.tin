@@ -20,6 +20,11 @@ macro{#no_parens #no_excl} async() = `fn{#async}`
 // like `_2`, `_3`) when several throwaway calls sit next to each other.
 macro{#no_parens #no_excl} discard() = `let _ =`
 
+// unsafe - shorthand for `do{#unsafe}` block prefix.
+// `unsafe:` expands to `do{#unsafe}:` so the rest of the indented body
+// inherits the unsafe context (pointer arithmetic, addr(int)).
+macro{#no_parens #no_excl} unsafe() = `do{#unsafe}`
+
 // todo!() - panic with "not yet implemented" at the call site.
 macro todo!() = `panic("not yet implemented")`
 
@@ -67,7 +72,7 @@ macro try_some!(o) = `match {o}:
   case None:    return None`
 
 export {
-  loop, async, discard,
+  loop, async, discard, unsafe,
   todo!, unreachable!,
   min!, max!, abs!, clamp!,
   dbg!,

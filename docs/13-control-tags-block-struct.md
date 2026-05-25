@@ -2,8 +2,10 @@
 
 ## Block tags
 
-Block tags appear on a `{ #tag } { body }` construct. The body is a
-brace-delimited block that inherits the tag's semantics.
+Block tags appear on a `do{#tag}: body` construct. The body is an
+indented statement block (or a single inline statement on the same
+line as the `:`) that inherits the tag's semantics. A bare `do: body`
+without tags is a plain indented block, useful for grouping.
 
 ### `#allow_sideffect`
 
@@ -13,9 +15,8 @@ isolate a small side-effectful region inside an otherwise pure function.
 
 ```rust
 fn{#pure} mostly_pure(n i64) i64 =
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "debug: n = {n}"
-  }
   return n * n
 
 // The function is still considered pure by callers; the echo is an
@@ -27,14 +28,12 @@ appear in the same function:
 
 ```rust
 fn{#pure} logging_compute(n i64) i64 =
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "start"
     echo "n = {n}"
-  }
   let result i64 = n * n * n
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "result = {result}"
-  }
   return result
 ```
 
@@ -44,31 +43,30 @@ Calling a `#sideffect` function is also permitted inside the block:
 fn{#sideffect} trace(msg string) = echo "[trace] {msg}"
 
 fn{#pure} guarded(n i64) i64 =
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     trace("entering guarded")   // OK  -  inside allow_sideffect
-  }
   return n * n
 ```
 
 ### `#unsafe`
 
-Raw-pointer operations are rejected at compile time outside an `{#unsafe}`
-block. The block opts the inner code in to two things:
+Raw-pointer operations are rejected at compile time outside a
+`do{#unsafe}:` block. The block opts the inner code in to two things:
 
 - **Pointer arithmetic** - `ptr + n` / `ptr - n` (any `*T` plus an integer).
 - **`addr(int_literal)`** - interpreting a constant integer as a raw address.
 
 ```rust
 fn write_from(buf *byte, n i64) =
-  { #unsafe } {
+  do{#unsafe}:
     let head = buf + 0
     let tail = buf + n
     // ... use head/tail ...
-  }
 ```
 
 The check is lexical: nested calls do not inherit the unsafe context. Each
-function must declare its own `{#unsafe}` block where it does pointer work.
+function must declare its own `do{#unsafe}:` block where it does pointer
+work.
 
 ---
 

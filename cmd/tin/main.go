@@ -318,9 +318,10 @@ var optLevelOverride string
 // the binary cache key. Without these the cache would silently reuse a
 // non-debug `-O2` build for a `-g` request, or vice versa.
 var (
-	debugBuild  bool
-	useMimalloc bool
-	extraCFlags []string
+	debugBuild    bool
+	useMimalloc   bool
+	valgrindBuild bool
+	extraCFlags   []string
 	// staticLink is set by -static. On Linux it forwards `-static` to
 	// clang at link time so libc/libm/etc. are pulled in as archives.
 	// On macOS the flag is accepted but nothing extra is forwarded --
@@ -519,6 +520,12 @@ doneFlags:
 	// can pass `--mimalloc`; the runtime then reserves a TINMAXHEAP
 	// virtual range and routes rc allocations through it.
 	useMimalloc = false
+	// valgrindBuild flips on when --valgrind appears in the args.
+	// Triggers -DTIN_VALGRIND=1 on runtime.c so the magic probe wraps
+	// the out-of-bounds read in vbits client requests; csrc cache is
+	// argv-keyed, so default builds stay clean of valgrind overhead
+	// and the two flavors don't trample each other's .o cache slot.
+	valgrindBuild = false
 
 	var stdlibOverride string
 
@@ -569,6 +576,12 @@ doneFlags:
 			// with this flag.  Reserved for future degraded-mode
 			// work (sanitizer builds, bare-metal).
 			useMimalloc = false
+		case "--valgrind":
+			// Compile runtime.c with TIN_VALGRIND so the magic
+			// probe issues vbits client requests around the
+			// intentional out-of-bounds read.  Cached as a
+			// distinct .o (csrc cache is argv-keyed).
+			valgrindBuild = true
 		case "--color":
 			// --color=<auto|always|never>. Defaults to `auto` which
 			// turns ANSI escapes on when stderr is a terminal. The

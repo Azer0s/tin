@@ -1,7 +1,7 @@
 // Volatile pointer smoke tests.
 //
 // `addr(int_literal)` returns `volatile *char`; `addr(arr[i])` (in
-// `{#unsafe}`) returns `volatile *T`.  Volatile pointers live in
+// `do{#unsafe}:`) returns `volatile *T`.  Volatile pointers live in
 // LLVM addrspace(1); the rc machinery treats them as opaque and
 // emits no retain/release, so binding them to a let and dropping
 // out of scope is well-defined for bogus addresses too.
@@ -10,18 +10,16 @@ use assert
 use mem
 
 test "addr(hex) yields volatile *char" =
-  {#unsafe} {
+  do{#unsafe}:
     let p volatile *char = addr(0xDEADBEEF)
     let n i64 = p as i64
     assert::equals(n, 0xDEADBEEF)
-  }
 
 test "addr(arr[i]) yields volatile *T (warns)" =
-  {#unsafe} {
+  do{#unsafe}:
     let xs [i64] = [10, 20, 30]
     let q volatile *i64 = addr(xs[1])
     assert::ok((q as i64) != 0)
-  }
 
 // Regression for the build_argv-style segfault: `int as *T` must
 // produce a volatile pointer so the rc-balanced store skips the

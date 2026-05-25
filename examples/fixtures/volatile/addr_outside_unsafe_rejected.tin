@@ -1,4 +1,4 @@
-// `addr(...)` produces a raw `volatile *T` and requires `{#unsafe}`.
+// `addr(...)` produces a raw `volatile *T` and requires `do{#unsafe}:`.
 
 fn main() =
   let p volatile *char = addr(0xDEAD)   // rejected

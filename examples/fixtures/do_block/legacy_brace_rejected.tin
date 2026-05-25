@@ -1,0 +1,9 @@
+// The C-brace `{ #tag } { body }` form was replaced with `do{#tag}: body`;
+// the legacy spelling is rejected at parse time so users get pointed at the
+// new syntax rather than a generic "unexpected `{`" error.
+
+fn main() =
+  { #unsafe } {
+    let p volatile *char = addr(0xDEAD)
+    echo p as i64
+  }

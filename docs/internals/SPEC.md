@@ -212,14 +212,13 @@ fn subsequences[t](l [t]) [[t]] =
 
 ```rust
 fn write_string(color i32, s string) =
-  { #unsafe } {
+  do{#unsafe}:
     let video_mem *char = addr(0xB8000).(*char)
     for let c char in s:
       *video_mem = c
       video_mem += 1
       *video_mem = color
       video_mem += 1
-  }
 ```
 
 ### Iterators & traits
@@ -261,9 +260,8 @@ struct{ #pure@fn #const@field } str(size, print,
   // Alias trait implementations use fn ::traitName.
   static fn ::implicit[[char]](val [char]) str =
     let len size_t = 0
-    { #allow_sideffect } {
+    do{#allow_sideffect}:
       len = strlen(val)
-    }
     return str{v: val, s: len}
 
   static fn ::implicit[char](val char) str =
@@ -285,7 +283,7 @@ struct{ #pure@fn #const@field } str(size, print,
 
   fn for_each(this str, f fn(c char)) =
     for let i size_t = 0; i < this.s; i++:
-      { #allow_sideffect } { f(this.v[i]) }
+      do{#allow_sideffect}: f(this.v[i])
 
 let h str = "Hello world"
 echo h

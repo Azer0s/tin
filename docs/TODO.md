@@ -25,7 +25,7 @@ that allocation as an array of T cannot do so cleanly:
 in this session because it cannot be implemented without one of the
 above casts.  Users that need an array of bytes today drop down to
 `mem::malloc(bytes)` and walk the buffer with pointer arithmetic
-inside an `{#unsafe}` block.
+inside a `do{#unsafe}:` block.
 
 ### Proposed shape
 

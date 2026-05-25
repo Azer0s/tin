@@ -1,5 +1,5 @@
 // Acceptance tests for the transient-pointer rule set
-// (task #76).  Pointer arithmetic is permitted outside `{#unsafe}`
+// (task #76).  Pointer arithmetic is permitted outside `do{#unsafe}:`
 // only when the result is consumed in-place; the rejected-shape
 // counterparts live as fixtures under fixtures/transient_ptr/.
 
