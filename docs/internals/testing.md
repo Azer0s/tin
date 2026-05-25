@@ -135,7 +135,7 @@ use in CI pipelines.
 
 ## Directory mode
 
-`tin test <dir>` calls `runDirTests(dir, extraFlags)` in `main.go`. It reads
+`tin test <dir>` calls `runDirTests(dir, extraFlags)` in `cmd/tin/main.go`. It reads
 the directory entries once, skips non-`.tin` files, and skips files whose
 parsed AST has no test blocks (`!cg.HasTests()`).
 

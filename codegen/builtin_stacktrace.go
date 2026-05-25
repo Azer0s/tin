@@ -7,7 +7,7 @@ package codegen
 // form documented in docs/plans/stacktrace-libunwind.md ("Atom format").
 //
 // Codegen here is intentionally lean: it sets cg.stacktraceUsed (so
-// main.go can flip on `-funwind-tables` / `-rdynamic` / `-lunwind` post-
+// cmd/tin/main.go can flip on `-funwind-tables` / `-rdynamic` / `-lunwind` post-
 // Generate), allocates a heap buffer of i32 atom codes via the ARC
 // allocator, calls the runtime helper to fill it, then assembles the
 // {%__atom*, i64} fat-pointer that Tin code reads as `[atom]`.
@@ -219,7 +219,7 @@ func (cg *CodeGen) parseStacktraceOpts(arg ast.Node) (int32, error) {
 // translation table without buying anything (the filter set is small
 // and stable).
 //
-// Marking cg.stacktraceUsed = true here is what tells main.go to flip on
+// Marking cg.stacktraceUsed = true here is what tells cmd/tin/main.go to flip on
 // libunwind / unwind-tables / -rdynamic at link time.
 func (cg *CodeGen) genBuiltinStacktrace(block *ir.Block, capArg, optsArg ast.Node, _ ast.Pos) (value.Value, error) {
 	cg.stacktraceUsed = true

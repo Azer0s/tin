@@ -16,7 +16,7 @@ User terminal
      |
      | readline / raw stdin
      v
-tin repl  (Go, main.go "repl" subcommand)
+tin repl  (Go, cmd/tin/main.go "repl" subcommand)
      |
      | protocol over stdin/stdout pipe pair
      v
@@ -161,7 +161,7 @@ FunctionPassManager fpm1 = pb1.buildFunctionSimplificationPipeline(
 ```
 
 The exact pass sequence must match what Tin's `compileIR` function does in
-`main.go`. If they diverge, async functions will malfunction silently or crash.
+`cmd/tin/main.go`. If they diverge, async functions will malfunction silently or crash.
 
 The LLVM ORC C API exposes `LLVMOrcCreateNewThreadSafeModule` and
 `LLVMOrcIRTransformLayerSetTransform` for this. The transform callback
@@ -367,7 +367,7 @@ repl/
 codegen/
   repl.go            REPL codegen: top-level binding promotion, extern decls,
                      NewTopLevelBindings(), cell IR structure
-main.go              new "repl" subcommand: spawn JIT host, readline loop,
+cmd/tin/main.go              new "repl" subcommand: spawn JIT host, readline loop,
                      multi-line detection, pipe management
 ```
 

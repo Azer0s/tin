@@ -18,7 +18,7 @@ package codegen
 //      automatically inserts a `declare` in any consumer module that
 //      still references the symbol.
 //
-// The build driver (main.go) reads cg.MonoModules() and compiles each
+// The build driver (cmd/tin/main.go) reads cg.MonoModules() and compiles each
 // to a content-addressed cache entry under .build/mono/<hash>/bin.o.
 
 import (
@@ -31,7 +31,7 @@ import (
 )
 
 // MonoModules returns the dedicated content-addressed modules carrying
-// monomorphized fn bodies. main.go feeds each into pkgCacheLookup +
+// monomorphized fn bodies. cmd/tin/main.go feeds each into pkgCacheLookup +
 // clang -c so identical (template, type-args) pairs reuse one .o.
 func (cg *CodeGen) MonoModules() []*ir.Module {
 	if len(cg.monoMods) == 0 {

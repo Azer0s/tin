@@ -219,7 +219,7 @@ func (cg *CodeGen) debugDumpUnterminated() {
 //
 // This is the prerequisite for stripping mergeRoutedPkgMods: once
 // every per-pkg module is self-sufficient (declares everything it
-// references but doesn't define), main.go can serialize each pkg
+// references but doesn't define), cmd/tin/main.go can serialize each pkg
 // module to its own .ll and compile in parallel.
 func (cg *CodeGen) addCrossModuleDeclares() {
 	if len(cg.pkgMods) == 0 && len(cg.monoMods) == 0 {

@@ -461,7 +461,7 @@ type CodeGen struct {
 	// monoMods holds dedicated content-addressed modules carrying
 	// monomorphized fn bodies (step 5 of incremental compilation).
 	// Keyed by mono_hash; populated by extractMonoModules during
-	// finalize. main.go reads these via MonoModules() to drive
+	// finalize. cmd/tin/main.go reads these via MonoModules() to drive
 	// .build/mono/<hash>/bin.o caching.
 	monoMods map[string]*ir.Module
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
@@ -698,7 +698,7 @@ type CodeGen struct {
 	pureFoldDisabled bool
 
 	// stacktraceUsed is set when codegen recognizes a `stacktrace()`
-	// builtin call. main.go branches on the post-Generate value to decide
+	// builtin call. cmd/tin/main.go branches on the post-Generate value to decide
 	// whether to emit unwind tables, link libunwind, and pass `-rdynamic`
 	// (see docs/plans/stacktrace-libunwind.md "Conditional unwind-table
 	// emission"). When false the program pays zero binary-size or runtime

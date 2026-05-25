@@ -167,7 +167,7 @@ func (cg *CodeGen) SetPureFoldBudget(n int) {
 }
 
 // StacktraceUsed reports whether any reachable call site referenced the
-// `stacktrace()` builtin. main.go consults this after Generate() returns
+// `stacktrace()` builtin. cmd/tin/main.go consults this after Generate() returns
 // to decide whether to link libunwind, emit unwind tables, and pass
 // `-rdynamic` (the conditional-emission story in
 // docs/plans/stacktrace-libunwind.md). Stable through the rest of the
@@ -179,10 +179,10 @@ func (cg *CodeGen) StacktraceUsed() bool { return cg.stacktraceUsed }
 // loaded any pkg, OR when mergeRoutedPkgMods has folded everything
 // back into cg.mod (which happens at the end of Generate today).
 //
-// main.go uses this to drive per-pkg .o compilation in parallel; the
+// cmd/tin/main.go uses this to drive per-pkg .o compilation in parallel; the
 // linker then combines them with cg.mod into the final binary.
 // Currently returns nil because the merge step still folds everything
-// into cg.mod for the legacy single-module compile path; once main.go
+// into cg.mod for the legacy single-module compile path; once cmd/tin/main.go
 // is wired to compile each module separately, the merge step gets
 // removed and this returns the live per-pkg modules.
 func (cg *CodeGen) PkgModules() []*ir.Module {

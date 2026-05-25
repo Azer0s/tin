@@ -55,7 +55,7 @@ func (cg *CodeGen) loadPackageFromFilePath(rawPath string) error {
 
 	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros from `use { name } from pkg` so the parser
-	// can do token substitution before parsing (same pattern as main.go).
+	// can do token substitution before parsing (same pattern as cmd/tin/main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
