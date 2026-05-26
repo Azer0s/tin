@@ -907,6 +907,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		if cg.curIsRefIterGet && astParam.Name == "this" {
 			paramBorrowed = true
 		}
+
 		if !paramBorrowed {
 			cg.emitRetain(entry, p)
 		}

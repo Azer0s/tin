@@ -263,6 +263,7 @@ func (cg *CodeGen) genForRefIterTrait(block *ir.Block, s *ast.ForStmt, iterFatPt
 	vtableSt := cg.vtableFor(CanonKey(instKey))
 
 	getFnType := vtableSt.Fields[getSlot].(*irtypes.PointerType).ElemType.(*irtypes.FuncType)
+
 	elemPtrType, ok := getFnType.RetType.(*irtypes.PointerType)
 	if !ok {
 		return nil, cg.nodeErr(s, "ref_iter::get must return a pointer; got %s", getFnType.RetType.String())
