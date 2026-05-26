@@ -20,8 +20,14 @@
 #  include <mimalloc.h>
 #endif
 
+// Launder ptr before subtracting sizeof(TinRCHdr) so LLVM cannot trace
+// the result back to a potential alloca and reason its way to UB.  All
+// retain/release/struct-free paths funnel through here, so every reader
+// of the header gets the laundered view.  See runtime.h for the full
+// rationale on _tin_pointer_launder.
 static inline TinRCHdr *_rc_hdr(void *ptr) {
-    return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    return (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
 }
 
 #if TIN_USE_MIMALLOC

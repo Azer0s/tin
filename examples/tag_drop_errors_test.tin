@@ -1,0 +1,18 @@
+// Statement-scope tags are only valid before `fn` or `struct`.  Before
+// the fix, parseStatement consumed leading tags and silently dropped
+// them, hiding typos like `#async let x = 5`.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_tag_drop_error(fixture string) =
+  let r = run_tin("run", "examples/fixtures/tag_drop/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "tags here are only valid"))
+
+test "stray tag on let rejected" =
+  expect_tag_drop_error("stray_tag_on_let.tin")
+
+test "stray tag on return rejected" =
+  expect_tag_drop_error("stray_tag_on_return.tin")

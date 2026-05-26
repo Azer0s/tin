@@ -170,7 +170,8 @@ int _tin_is_managed(void *ptr) {
         if (addr - base >= _tin_arena_size) return 0;
         if (addr - base < sizeof(TinRCHdr))  return 0;
     }
-    TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    TinRCHdr *hdr = (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
     return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
@@ -243,7 +244,8 @@ __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
 // rc-tracking entirely in codegen, so they never reach this function.
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
-    TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    TinRCHdr *hdr = (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
     return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 

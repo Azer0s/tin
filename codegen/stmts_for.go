@@ -285,7 +285,7 @@ func (cg *CodeGen) genForIn(block *ir.Block, s *ast.ForStmt) (*ir.Block, error) 
 		// silently falling through to iter (which would lose the ref
 		// semantics the user asked for).
 		if _, _, ok, _ := cg.tryCoerceToIter(block, iterVal); ok {
-			return nil, cg.nodeErr(s, "for ref: type %s implements iter but not ref_iter; add a ref_iter[T] impl with `fn ref_iter::get(this *T, i i64) *T` to allow ref-iteration",
+			return nil, cg.nodeErr(s, "for ref: type %s implements iter but not ref_iter; add a ref_iter[T] impl with `fn ref_iter::get(this T, i i64) *T` to allow ref-iteration",
 				cg.typeNameOf(iterVal.Type()))
 		}
 	}

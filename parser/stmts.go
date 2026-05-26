@@ -11,7 +11,6 @@ import (
 
 func (p *Parser) parseStatement() (ast.Node, error) {
 	tags := p.parseTags()
-	_ = tags
 
 	// `{#tag} { body }` C-brace tagged blocks were removed; the tags
 	// already got consumed by parseTags above, so a bare LBRACE here
@@ -19,6 +18,17 @@ func (p *Parser) parseStatement() (ast.Node, error) {
 	// instead of letting expression parsing emit a generic error.
 	if len(tags) > 0 && p.check(lexer.LBRACE) {
 		return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
+	}
+
+	// Tags at statement scope only attach to `fn{#...}` and `struct{#...}`
+	// declarations; everywhere else they were silently dropped, which hid
+	// e.g. `#async let x = ...` as a real but ignored typo.  `do` reads
+	// its own tag list after the keyword, so the count here is 0 for it.
+	if len(tags) > 0 {
+		t := p.peek().Type
+		if t != lexer.KW_FN && t != lexer.KW_STRUCT {
+			return nil, p.errorf("tags here are only valid before `fn` or `struct`; got %s", p.peek().Literal)
+		}
 	}
 
 	// Check for #no_parens macro invocation (same as parseTopLevel).

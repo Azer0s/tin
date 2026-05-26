@@ -407,10 +407,14 @@ typedef struct {
     // thief side (CASing top) and the owner side (writing bottom) don't
     // false-share.  Previously this was hand-rolled with `_pad0[56]`,
     // which broke whenever sizeof(int64_t) or earlier struct fields
-    // drifted; the alignas form is layout-stable.
+    // drifted; the alignas form is layout-stable.  buf[] also takes a
+    // cache-line boundary - without it, `bottom` (8 bytes at offset 64)
+    // shares its line with `buf[0..2]`, and a steal of slot 0 racing
+    // with an owner push at the wrap point dirties the owner's bottom
+    // line.
     _Alignas(64) _Atomic(int64_t) top;     // steal pointer (thieves read/CAS)
     _Alignas(64) _Atomic(int64_t) bottom;  // owner pointer (owner reads/writes)
-    TinRunnable      buf[WORKER_LQ_SIZE];
+    _Alignas(64) TinRunnable      buf[WORKER_LQ_SIZE];
     TinFiber        *fibs[WORKER_LQ_SIZE];
 } WorkerLocalQueue;
 
@@ -1290,6 +1294,19 @@ static void *_worker_thread(void *_) {
 // Public API
 
 void _tin_fiber_init(void) {
+    // Idempotent: only the first call spawns workers and inits I/O.  A
+    // second call would leak the previous _workers array and re-enter
+    // pthread_create N more times, which under pathological CI conditions
+    // (e.g. accidental main re-entry from an LTO bug) fork-bombs the host
+    // with EAGAIN.  Belt-and-braces - the codegen-side LTO fix in
+    // heap_arena.c is the primary defence; this is the seatbelt.  The
+    // one-shot atomic is preferred over probing _workers because the
+    // pointer is set late in this function (after _rq_init / worker
+    // spawn / I/O init); a probe would let two callers both pass it.
+    static atomic_int _init_once = 0;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong(&_init_once, &expected, 1)) return;
+
     pthread_mutex_lock(&_table_mu);
     if (!_fibers) {
         const char *env = getenv("TINMAXFIBERS");
