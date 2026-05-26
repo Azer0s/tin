@@ -641,6 +641,16 @@ type CodeGen struct {
 	// computeImplicitMoveSites; reset at function boundary.
 	implicitMoveSites map[*ast.Identifier]bool
 
+	// methodMayMutateReceiverByType: structName -> methodName -> true
+	// when that specific (struct, method) pair has a pointer receiver
+	// and can therefore mutate `this`.  collectMutatedTargets prefers
+	// this map when it can resolve the receiver expression's type:
+	// distinguishing (A, foo) from (B, foo) lets value-receiver
+	// foo-on-A skip the autocopy even when foo-on-B has a *B
+	// receiver.  Falls back to the bare-name map (over-approximate)
+	// when the receiver type cannot be inferred from the call site.
+	methodMayMutateReceiverByType map[string]map[string]bool
+
 	// methodMayMutateReceiver: method base name -> true if any
 	// definition with this base name takes a pointer receiver (and
 	// therefore could mutate the receiver's storage through `*this`).

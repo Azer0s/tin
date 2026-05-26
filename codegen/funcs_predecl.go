@@ -183,12 +183,22 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	cg.funcDecls[key] = m
 	// Track receiver shape so the borrow analyzer can keep `t` as a
 	// candidate borrow when every method named `m.Name` takes a value
-	// receiver.  A single pointer-receiver definition (mutating) flips
-	// the flag for that name globally -- conservative: we only need
-	// one definition to potentially mutate before we refuse to borrow.
+	// receiver.  The bare-name map flips conservatively on the first
+	// pointer-receiver definition (used when the call site's receiver
+	// type can't be inferred); the per-type map records the precise
+	// (structName, methodName) shape so resolvable call sites avoid
+	// the over-approximation -- e.g. value-receiver `foo` on A keeps
+	// its candidate borrow even when pointer-receiver `foo` on B
+	// exists elsewhere.
 	if len(m.Params) > 0 {
 		if _, isPtr := m.Params[0].Type.(*ast.PointerType); isPtr {
 			cg.methodMayMutateReceiver[m.Name] = true
+
+			if cg.methodMayMutateReceiverByType[structName] == nil {
+				cg.methodMayMutateReceiverByType[structName] = map[string]bool{}
+			}
+
+			cg.methodMayMutateReceiverByType[structName][m.Name] = true
 		}
 	}
 

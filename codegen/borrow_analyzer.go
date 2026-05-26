@@ -22,6 +22,8 @@ package codegen
 // for the rollout.
 
 import (
+	irtypes "github.com/llir/llvm/ir/types"
+
 	"github.com/Azer0s/tin/ast"
 )
 
@@ -548,17 +550,44 @@ func (cg *CodeGen) collectMutatedTargets(node ast.Node) map[string]bool {
 			}
 			// Method calls (`t.method(...)`) on a pointer-receiver
 			// method may mutate `t` through `*this`; only those
-			// definitions land in cg.methodMayMutateReceiver.  When
-			// every method with this base name has a value
+			// definitions land in cg.methodMayMutateReceiver*.
+			// When every method with this base name has a value
 			// receiver the call cannot mutate the caller's binding,
 			// so the analyzer can keep `t` as a candidate borrow
 			// (sound: value-receiver methods receive a copy and
 			// any mutation lives in the callee's stack frame).
 			//
+			// When the receiver expression's type can be inferred,
+			// dispatch through the per-type map so a value-receiver
+			// `foo` on struct A keeps its borrow even if some other
+			// struct B has a pointer-receiver `foo`.  Fall back to
+			// the bare-name map when inference fails (conservative).
+			//
 			// Free function calls (`f(t)`, Func not a FieldAccess)
 			// fall through and do not feed recordTargetRoot.
 			if fa, ok := v.Func.(*ast.FieldAccess); ok && fa != nil {
-				if cg.methodMayMutateReceiver[fa.Field] {
+				mutates := false
+
+				if recvType := cg.astInferType(fa.Expr); recvType != nil {
+					recvName := cg.typeNameOf(recvType)
+					if recvName == "" {
+						if pt, isPtr := recvType.(*irtypes.PointerType); isPtr {
+							recvName = cg.typeNameOf(pt.ElemType)
+						}
+					}
+
+					if recvName != "" {
+						if perType, ok := cg.methodMayMutateReceiverByType[recvName]; ok {
+							mutates = perType[fa.Field]
+						}
+					} else {
+						mutates = cg.methodMayMutateReceiver[fa.Field]
+					}
+				} else {
+					mutates = cg.methodMayMutateReceiver[fa.Field]
+				}
+
+				if mutates {
 					recordTargetRoot(fa.Expr, out)
 				}
 			}
