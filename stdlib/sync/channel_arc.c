@@ -336,7 +336,15 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
     ch->rc_kind   = rc_kind;
 #if defined(__x86_64__) || defined(_M_X64)
-    ch->single_thread = _tin_mt_active ? 0 : 1;
+    // ST fast path skips per-slot CAS and uses memory_order_relaxed.
+    // That's only safe when the user explicitly opts in to single-
+    // threading via TINMAXPROCS=1.  Inferring it from _tin_mt_active
+    // is unsafe: foreign C threads (FFI callbacks, signal handlers,
+    // pthread_create from a linked C library) can race the worker.
+    // The env probe runs once per channel; the cost is amortized over
+    // the channel's lifetime.
+    const char *mp = getenv("TINMAXPROCS");
+    ch->single_thread = (mp && mp[0] == '1' && mp[1] == '\0') ? 1 : 0;
 #endif
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
