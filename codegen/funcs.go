@@ -867,6 +867,29 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// store does not decrement the caller's shared buffer rc.
 	paramMutatedSet := cg.collectMutatedTargets(n.Body)
 
+	// -Wparam-mutation: flag bodies that write to a parameter.  Now
+	// that autocopy isolates the mutation from the caller's binding,
+	// the write is silently a no-op as far as the caller sees -- the
+	// warning surfaces the discrepancy so users either switch to a
+	// pointer receiver (`*T`) or explicitly own the local copy.
+	// Receivers named `this` are exempt (idiomatic method shape) and
+	// so are parameters already declared `*T` (intent is explicit).
+	for _, astParam := range n.Params {
+		if astParam.IsVarArgs || astParam.Name == "" || astParam.Name == "this" {
+			continue
+		}
+
+		if _, isPtr := astParam.Type.(*ast.PointerType); isPtr {
+			continue
+		}
+
+		if paramMutatedSet[astParam.Name] {
+			cg.warn(DiagParamMutation, n.Pos(),
+				"parameter `%s` of `%s` is mutated inside the body but caller's binding is untouched (autocopy); switch to a `*T` receiver if the caller should see the write",
+				astParam.Name, n.Name)
+		}
+	}
+
 	// Alloca parameters and register them in scope.
 	// Iterate tin params; skip varargs (no LLVM parameter), but register a
 	// null placeholder so the name is defined inside the body.
