@@ -140,25 +140,38 @@ func (cg *CodeGen) genTestRunner() error {
 	for i, td := range cg.testDecls {
 		name := fmt.Sprintf("__tin_test_%d", i)
 		fn := cg.mod.NewFunc(name, irtypes.Void)
-		// noinline + optnone keep each `__tin_test_N` as its own distinct
-		// addressable callsite.  Without these attributes, the LTO
-		// MergeFunctions pass has been observed to fold test bodies into
-		// the user's `fn main()` when their inlined+optimized forms
-		// happen to collapse to the same machine code, leaving each
-		// `__tin_test_N` as a zero-byte alias for `main`. The test
+		// noinline keeps each `__tin_test_N` as its own distinct
+		// addressable callsite.  Without it, the LTO MergeFunctions pass
+		// has been observed to fold test bodies into the user's
+		// `fn main()` when their inlined+optimized forms happen to
+		// collapse to the same machine code, leaving each
+		// `__tin_test_N` as a zero-byte alias for `main`.  The test
 		// runner then calls main repeatedly through the test pointer
 		// table -- each invocation re-runs the user's main body
 		// (including `_tin_fiber_init` from the C-main wrapper) and
 		// spawns a fresh batch of worker pthreads, eventually
 		// exhausting the per-process thread limit (EAGAIN from
-		// pthread_create) on constrained runners. The attributes
-		// preserve a unique body shape per test so MergeFunctions
-		// leaves them alone.
-		fn.FuncAttrs = append(fn.FuncAttrs,
-			enum.FuncAttrNoInline,
-			enum.FuncAttrOptNone,
-		)
+		// pthread_create) on constrained runners.  We intentionally
+		// do NOT add `optnone` here: the unoptimized RC sequence on
+		// some test bodies (md5/sha1 on Linux x86_64 LTO) hangs the
+		// binary on test entry.  A unique per-test marker (below)
+		// gives MergeFunctions distinct bodies to refuse to fold
+		// without disabling optimization.
+		fn.FuncAttrs = append(fn.FuncAttrs, enum.FuncAttrNoInline)
 		entry := fn.NewBlock("entry")
+		// Per-test unique marker: a constant-int global initialized with
+		// `i` so each test function's IR begins with a distinct
+		// `volatile load` of a distinct symbol.  MergeFunctions hashes
+		// function bodies; making the very first instruction reference
+		// a per-test symbol guarantees no two test bodies hash the
+		// same way, so the pass has nothing to fold.  The volatile load
+		// also blocks LLVM from constant-folding the read away.
+		markerName := fmt.Sprintf("__tin_test_%d_marker", i)
+		markerGlobal := cg.mod.NewGlobalDef(markerName,
+			constant.NewInt(irtypes.I32, int64(i)))
+		markerGlobal.Visibility = enum.VisibilityHidden
+		markerLoad := entry.NewLoad(irtypes.I32, markerGlobal)
+		markerLoad.Volatile = true
 
 		prevFn := cg.curFn
 		prevScope := cg.curScope
