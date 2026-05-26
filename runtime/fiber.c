@@ -1325,7 +1325,14 @@ void _tin_fiber_init(void) {
         int rc = pthread_create(&_workers[i], NULL, _worker_thread, NULL);
         if (rc != 0) {
             fprintf(stderr, "tin: pthread_create worker %d: %d\n", i, rc);
-            exit(1);
+            // _exit, not exit: earlier iterations may have already
+            // spawned workers that are now running.  Calling atexit
+            // handlers + flushing stdio from this half-initialised
+            // state has been observed to deadlock the test runner
+            // (CI hung 30 min after EAGAIN on a constrained runner).
+            // _exit bypasses both and lets `tin test` see a clean
+            // exit-code-1 child.
+            _exit(1);
         }
     }
 
