@@ -45,8 +45,11 @@ type w2 = i16 | u16
 type w1 = i8 | u8 | bool
 type primitive = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8 | f64 | f32 | bool
 
-// Generic slot allocator (calloc-zero) for primitives.
-fn tin_atomic_alloc(size i64) *void                  = extern("_tin_atomic_alloc")
+// Fused alloc + initial-store. Used by Atomic.new so the foreign block
+// can flow straight into rc::Cell.new without naming a temp; binding
+// the raw *void to a local triggers a spurious retain on a non-arc
+// pointer (see _tin_atomic_alloc_init in sync_helpers.c).
+fn tin_atomic_alloc_init(size i64, initial *void) *void = extern("_tin_atomic_alloc_init")
 fn tin_atomic_free(p *void)                          = extern("_tin_atomic_free")
 
 // Per-width load/store.
@@ -72,7 +75,8 @@ fn tin_atomic_cas_i8(a *void, old i8, nw i8) i8      = extern("_tin_atomic_cas_i
 // Mutex-backed slot for non-primitive t. The kind discriminator picks
 // the shape inside the slot (string/array vs any vs fn) so store/load
 // retain/release the embedded payload pointer at the right offset.
-fn tin_atomic_obj_new(size i64, rc_kind i32) *void   = extern("_tin_atomic_obj_new")
+// Fused obj_new + initial-store: see tin_atomic_alloc_init.
+fn tin_atomic_obj_new_init(size i64, rc_kind i32, initial *void) *void = extern("_tin_atomic_obj_new_init")
 fn tin_atomic_obj_free(p *void)                      = extern("_tin_atomic_obj_free")
 fn tin_atomic_obj_load(p *void, out *void)           = extern("_tin_atomic_obj_load")
 fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_store")
@@ -93,39 +97,19 @@ struct Atomic[t] =
   // --- new ----------------------------------------------------------
 
   static fn new(v t) Atomic[t] where t is w8 =
-    let raw = tin_atomic_alloc(8)
-
-    tin_atomic_store_64(raw, &v as *void)
-
-    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(tin_atomic_alloc_init(8, &v as *void), tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w4 =
-    let raw = tin_atomic_alloc(4)
-
-    tin_atomic_store_32(raw, &v as *void)
-
-    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(tin_atomic_alloc_init(4, &v as *void), tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w2 =
-    let raw = tin_atomic_alloc(2)
-
-    tin_atomic_store_16(raw, &v as *void)
-
-    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(tin_atomic_alloc_init(2, &v as *void), tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is w1 =
-    let raw = tin_atomic_alloc(1)
-
-    tin_atomic_store_8(raw, &v as *void)
-
-    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(tin_atomic_alloc_init(1, &v as *void), tin_atomic_free)}
 
   static fn new(v t) Atomic[t] where t is not primitive =
-    let raw = tin_atomic_obj_new(sizeof(t), isrc(t))
-
-    tin_atomic_obj_store(raw, &v as *void)
-
-    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_obj_free)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(tin_atomic_obj_new_init(sizeof(t), isrc(t), &v as *void), tin_atomic_obj_free)}
 
   // --- load ---------------------------------------------------------
 

@@ -291,6 +291,17 @@ void *_tin_atomic_alloc(int64_t size) {
     if (!p) { fputs("tin: atomic alloc failed\n", stderr); exit(1); }
     return p;
 }
+// Alloc + initial-store fused so the Tin side can chain the result
+// straight into rc::Cell.new without naming a `let raw = ...` temp.
+// Binding the foreign block to a local triggers a spurious _tin_retain_ptr
+// on a non-arc pointer; threading the call through one expression keeps
+// the value in the borrow path and matches the Mutex/Cond/RWMutex shape.
+void *_tin_atomic_alloc_init(int64_t size, const void *initial) {
+    void *p = calloc(1, (size_t)size);
+    if (!p) { fputs("tin: atomic alloc failed\n", stderr); exit(1); }
+    if (initial) memcpy(p, initial, (size_t)size);
+    return p;
+}
 void _tin_atomic_free(void *a) { free(a); }
 
 // load: __atomic_load_n on a typed pointer issues the right-width MOV
@@ -507,6 +518,18 @@ void *_tin_atomic_obj_new(int64_t size, int rc_kind) {
     o->rc_kind = rc_kind;
     memset(o->payload, 0, (size_t)size);
 
+    return o;
+}
+// Companion to _tin_atomic_alloc_init for the obj path: copies the
+// initial payload and retains its rc-slot under the protocol that
+// _tin_atomic_obj_store would, but skips the lock (no other thread can
+// observe this slot before the constructor returns).
+void *_tin_atomic_obj_new_init(int64_t size, int rc_kind, const void *initial) {
+    _tin_atomic_obj *o = (_tin_atomic_obj *)_tin_atomic_obj_new(size, rc_kind);
+    if (initial) {
+        rc_retain_slot((void *)initial, o->rc_kind);
+        memcpy(o->payload, initial, (size_t)size);
+    }
     return o;
 }
 
