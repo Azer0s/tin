@@ -181,24 +181,31 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Register in funcDecls so that #pure tag checking applies to methods too.
 	key := methodScopeName(structName, m)
 	cg.funcDecls[key] = m
-	// Track receiver shape so the borrow analyzer can keep `t` as a
-	// candidate borrow when every method named `m.Name` takes a value
-	// receiver.  The bare-name map flips conservatively on the first
-	// pointer-receiver definition (used when the call site's receiver
-	// type can't be inferred); the per-type map records the precise
-	// (structName, methodName) shape so resolvable call sites avoid
-	// the over-approximation -- e.g. value-receiver `foo` on A keeps
-	// its candidate borrow even when pointer-receiver `foo` on B
+	// Track receiver-mutation so the borrow analyzer can keep `t` as a
+	// candidate borrow when no method named `m.Name` actually writes to
+	// `this`.  The bare-name map is the conservative fallback for call
+	// sites where the receiver type can't be inferred; the per-type map
+	// records the precise (structName, methodName) shape so resolvable
+	// sites avoid the over-approximation -- e.g. value-receiver `foo`
+	// on A keeps its borrow even when pointer-receiver `foo` on B
 	// exists elsewhere.
-	if len(m.Params) > 0 {
+	//
+	// Pointer-receiver alone does NOT imply mutation: methods like
+	// `fn payload(this *Cell[T]) T = return this._payload` borrow
+	// `this` to dodge an autocopy but never write through it.  Probe
+	// the body for an actual mutation rooted at the receiver name.
+	if len(m.Params) > 0 && m.Body != nil {
 		if _, isPtr := m.Params[0].Type.(*ast.PointerType); isPtr {
-			cg.methodMayMutateReceiver[m.Name] = true
+			recv := m.Params[0].Name
+			if recv != "" && cg.collectMutatedTargets(m.Body)[recv] {
+				cg.methodMayMutateReceiver[m.Name] = true
 
-			if cg.methodMayMutateReceiverByType[structName] == nil {
-				cg.methodMayMutateReceiverByType[structName] = map[string]bool{}
+				if cg.methodMayMutateReceiverByType[structName] == nil {
+					cg.methodMayMutateReceiverByType[structName] = map[string]bool{}
+				}
+
+				cg.methodMayMutateReceiverByType[structName][m.Name] = true
 			}
-
-			cg.methodMayMutateReceiverByType[structName][m.Name] = true
 		}
 	}
 
