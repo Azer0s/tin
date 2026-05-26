@@ -77,7 +77,7 @@ jobs:
             examples/fibers/yield_cpu.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=full "/tmp/tin_fiber_vg_${name}"
           done
 
@@ -87,7 +87,7 @@ jobs:
             [[ "$(basename "$f")" == fiber_* ]] && continue
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            ./tin build --valgrind "$f" -o "/tmp/tin_arc_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_arc_${name}"
           done
 
@@ -128,7 +128,7 @@ jobs:
           for f in examples/io_stress/*.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_io_${name}.test" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done
 
@@ -191,7 +191,7 @@ jobs:
             examples/fibers/yield_cpu.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=full "/tmp/tin_fiber_vg_${name}"
           done
 
@@ -201,7 +201,7 @@ jobs:
             [[ "$(basename "$f")" == fiber_* ]] && continue
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            ./tin build --valgrind "$f" -o "/tmp/tin_arc_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_arc_${name}"
           done
 
@@ -234,7 +234,7 @@ jobs:
           for f in examples/io_stress/*.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_io_${name}.test" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done
 

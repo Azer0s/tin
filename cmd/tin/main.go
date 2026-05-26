@@ -449,7 +449,7 @@ func main() {
 		a := os.Args[fileArgIdx]
 		switch a {
 		case "-g", "-static", "--fast", "--no-pure-fold", "-fno-pure-fold", "--no-runtime-checks", "--explain-ownership",
-			"--mimalloc", "--no-mimalloc":
+			"--mimalloc", "--no-mimalloc", "--valgrind":
 			fileArgIdx++
 		case "--stdlib", "--lib-root", "-target", "-j", "--color", "--error-format":
 			fileArgIdx += 2
