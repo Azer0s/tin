@@ -31,127 +31,42 @@
 
 #include "runtime.h"
 
-#include <setjmp.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 // Valgrind client requests for marking the magic probe as intentional
 // out-of-bounds.  Compiled in ONLY when the user passes --valgrind to
 // `tin run`/`tin test`; the build driver injects -DTIN_VALGRIND=1 and
-// the csrc cache produces a distinct runtime.o that carries this code.
-// Default builds get a clean fast path with no rolq sequences, no
-// RUNNING_ON_VALGRIND probes, and zero runtime overhead from valgrind.
+// the binary's cache key includes the flag so the produced .o is
+// kept distinct from default builds.  Default builds get a clean fast
+// path with no inline rolq sequences, no RUNNING_ON_VALGRIND probes,
+// and zero runtime overhead from valgrind support.
 #ifdef TIN_VALGRIND
 #  include <valgrind/memcheck.h>
 #endif
 
-// A foreign pointer can sit within sizeof(TinRCHdr) bytes of a page
-// boundary; reading 8 bytes at ptr-8 then crosses into the prior page,
-// which may be unmapped (different VMA from a separate mmap region).
-// A SIGBUS handler with a sigsetjmp landing pad catches the fault and
-// returns "not managed" instead of crashing the process.  The handler
-// is installed once at startup; the per-call cost is a thread-local
-// load + sigsetjmp (~10 ns) and fires only on the page-boundary slow
-// path -- the common, page-interior case stays a plain load.
-static __thread sigjmp_buf _tin_probe_jmpbuf;
-static __thread int        _tin_probe_active;
-
-static struct sigaction _tin_prev_sigsegv;
-static struct sigaction _tin_prev_sigbus;
-
-static void _tin_probe_signal_handler(int sig, siginfo_t *si, void *ctx) {
-    if (_tin_probe_active) {
-        // The fault came from inside a probe; jump back to the safe
-        // pad in _tin_probe_magic_slow so we can report "not managed".
-        siglongjmp(_tin_probe_jmpbuf, 1);
-    }
-    // Genuine SIGSEGV / SIGBUS from user code: forward to whatever was
-    // installed before us (debugger, the program's own handler, or the
-    // default which terminates the process with the same signal).
-    struct sigaction *prev = (sig == SIGBUS) ? &_tin_prev_sigbus : &_tin_prev_sigsegv;
-    if (prev->sa_flags & SA_SIGINFO) {
-        if (prev->sa_sigaction != NULL) {
-            prev->sa_sigaction(sig, si, ctx);
-            return;
-        }
-    } else if (prev->sa_handler != SIG_DFL && prev->sa_handler != SIG_IGN) {
-        prev->sa_handler(sig);
-        return;
-    }
-    // Default: re-raise with SIG_DFL so the kernel can produce the crash report.
-    struct sigaction dfl = {0};
-    dfl.sa_handler = SIG_DFL;
-    sigaction(sig, &dfl, NULL);
-    raise(sig);
-}
-
-__attribute__((constructor(95)))
-static void _tin_install_probe_handler(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = _tin_probe_signal_handler;
-    sa.sa_flags = SA_SIGINFO | SA_NODEFER;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &_tin_prev_sigsegv);
-    sigaction(SIGBUS,  &sa, &_tin_prev_sigbus);
-}
-
-static uint64_t _tin_probe_magic_slow(const TinRCHdr *hdr) {
-    uint64_t pad = 0;
-    _tin_probe_active = 1;
-    if (sigsetjmp(_tin_probe_jmpbuf, 1) == 0) {
-        pad = hdr->_pad;
-    } // else: fault path; pad stays 0, _tin_is_managed returns 0
-    _tin_probe_active = 0;
-    return pad;
-}
-
 // _tin_probe_magic reads the 8-byte _pad slot in the would-be
-// TinRCHdr at `ptr - sizeof(TinRCHdr)`.  When running under valgrind
-// the surrounding bytes may be NOACCESS (allocator metadata) or even
-// in a freed region; the probe is intentional and known to land
-// outside the user's allocation for foreign pointers, so save the
-// vbits, mark the slot defined for the read, then restore the vbits
-// so memcheck still flags genuine use-after-frees of nearby memory
-// from elsewhere.  The valgrind dance is only needed when the read
-// might touch foreign bytes; for the in-page interior fast path the
-// callers below do a direct load and reach this function only on the
-// page-boundary slow path.
-// Page-boundary slow path: ptr's hdr might straddle into an unmapped
-// prior page (foreign mmap region).  Under valgrind we save the vbits
-// of the probe slot, mark it defined for the read, then restore the
-// vbits so memcheck still flags genuine use-after-frees of nearby
-// memory from elsewhere.  This matches the pre-gated machinery the
-// magic-probe shipped with before TIN_VALGRIND existed -- vbits cover
-// uninit reads of allocator metadata AND silence the "invalid read"
-// flag on foreign blocks, both of which are intentional for the
-// foreign-pointer probe.
-static uint64_t _tin_probe_magic_slow_path(const TinRCHdr *hdr) {
+// TinRCHdr at `ptr - sizeof(TinRCHdr)`.  Under TIN_VALGRIND the
+// surrounding bytes may be NOACCESS (allocator metadata) or in a
+// freed region; the probe is intentional and known to land outside
+// the user's allocation for foreign pointers, so save the vbits,
+// mark the slot defined for the read, then restore the vbits so
+// memcheck still flags genuine use-after-frees of nearby memory
+// from elsewhere.  Default builds emit a plain load.
+static inline uint64_t _tin_probe_magic(const TinRCHdr *hdr) {
 #ifdef TIN_VALGRIND
     unsigned char vbits[sizeof(hdr->_pad)];
     int saved = (VALGRIND_GET_VBITS(&hdr->_pad, vbits, sizeof(hdr->_pad)) == 0);
     (void)VALGRIND_MAKE_MEM_DEFINED(&hdr->_pad, sizeof(hdr->_pad));
-    uint64_t pad = _tin_probe_magic_slow(hdr);
+    uint64_t pad = hdr->_pad;
     if (saved) (void)VALGRIND_SET_VBITS(&hdr->_pad, vbits, sizeof(hdr->_pad));
     return pad;
 #else
-    return _tin_probe_magic_slow(hdr);
+    return hdr->_pad;
 #endif
 }
-
-// _tin_probe_might_cross_page: 1 iff the would-be TinRCHdr (16 bytes
-// ending at ptr) might straddle a page boundary into a possibly-unmapped
-// prior page.  4 KiB is the smaller of the host page sizes we target
-// (linux 4K, macOS arm64 16K) -- if 4K covers the read, 16K covers it
-// too.  Branch is heavily biased toward "no" (page interior = ~99% of
-// pointers), so callers use __builtin_expect to keep the slow path off
-// the hot ifetch.
-#define _tin_probe_might_cross_page(ptr) \
-    (((uintptr_t)(ptr) & 0xFFFULL) < sizeof(TinRCHdr))
 
 #if TIN_USE_MIMALLOC
 
@@ -256,21 +171,7 @@ int _tin_is_managed(void *ptr) {
         if (addr - base < sizeof(TinRCHdr))  return 0;
     }
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
-    // Fast path: ptr's page is the same as hdr's page, so the read can
-    // never fault.  In a default (non-valgrind) build this lowers to a
-    // single load + compare with no signal-handler dance and no
-    // RUNNING_ON_VALGRIND inline asm.
-#ifdef TIN_VALGRIND
-    // Valgrind build: even the in-page read of a foreign pointer would
-    // flag "conditional jump on uninitialised value", so route every
-    // probe through the vbits-protected slow path.
-    return _tin_probe_magic_slow_path(hdr) == TIN_RC_HDR_MAGIC;
-#else
-    if (__builtin_expect(!_tin_probe_might_cross_page(ptr), 1)) {
-        return hdr->_pad == TIN_RC_HDR_MAGIC;
-    }
-    return _tin_probe_magic_slow_path(hdr) == TIN_RC_HDR_MAGIC;
-#endif
+    return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
 // _tin_mi_default_heap returns a usable heap for allocations that
@@ -343,14 +244,7 @@ __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
     TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
-#ifdef TIN_VALGRIND
-    return _tin_probe_magic_slow_path(hdr) == TIN_RC_HDR_MAGIC;
-#else
-    if (__builtin_expect(!_tin_probe_might_cross_page(ptr), 1)) {
-        return hdr->_pad == TIN_RC_HDR_MAGIC;
-    }
-    return _tin_probe_magic_slow_path(hdr) == TIN_RC_HDR_MAGIC;
-#endif
+    return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
 #endif // TIN_USE_MIMALLOC

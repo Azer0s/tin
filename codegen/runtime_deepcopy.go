@@ -102,7 +102,13 @@ func (cg *CodeGen) deepCopyFieldValue(block *ir.Block, val value.Value, t irtype
 
 		return val
 	case *irtypes.PointerType:
-		_ = ft
+		// Volatile pointer field (addrspace 1, the `volatile *T` escape
+		// hatch): RC-opted-out, no retain.  A bitcast across address
+		// spaces is also an LLVM verifier error, so the unguarded path
+		// below would refuse to compile even if we did want to probe.
+		if ft.AddrSpace == volatileAddrSpace {
+			return val
+		}
 
 		ptrI8 := block.NewBitCast(val, irtypes.I8Ptr)
 		block.NewCall(cg.ensureRetainPtr(), ptrI8)
