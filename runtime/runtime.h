@@ -138,7 +138,7 @@ int   _tin_is_managed(void *ptr);
 // the full diagnosis.  Volatile is load-bearing: without it later
 // LLVM/clang releases may notice the asm is empty and pure and dissolve
 // the barrier.
-static inline void *_tin_pointer_launder(void *p) {
+static inline __attribute__((always_inline)) void *_tin_pointer_launder(void *p) {
     void *r;
     __asm__ __volatile__("" : "=r"(r) : "0"(p));
     return r;

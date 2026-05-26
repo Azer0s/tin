@@ -24,6 +24,13 @@
 //
 // Reference: Dmitry Vyukov, "1024cores Bounded MPMC Queue".
 
+// posix_memalign requires _POSIX_C_SOURCE >= 200112L on strict POSIX
+// builds; without it some toolchains warn/error on implicit declaration
+// under -Werror.  Must come before stdlib.h.
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>

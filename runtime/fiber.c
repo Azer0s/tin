@@ -418,6 +418,18 @@ typedef struct {
     TinFiber        *fibs[WORKER_LQ_SIZE];
 } WorkerLocalQueue;
 
+// Lock the cache-line layout that the steal-bounce comments above
+// promise: top at 0, bottom at 64, buf at 128.  A future field
+// insertion or removed _Alignas would silently drop bottom and buf[0]
+// back into the same line, restoring the false-sharing that motivated
+// the padding.  Caught at C-compile time instead.
+_Static_assert(offsetof(WorkerLocalQueue, top) == 0,
+               "WLQ: top must be at offset 0");
+_Static_assert(offsetof(WorkerLocalQueue, bottom) == 64,
+               "WLQ: bottom must own cache line at offset 64");
+_Static_assert(offsetof(WorkerLocalQueue, buf) == 128,
+               "WLQ: buf must own cache line at offset 128");
+
 // Per-entry alignment so adjacent workers' queues start on cache-line
 // boundaries.  Without this, worker N's `top` could share a line with
 // worker N-1's `fibs[63]` -- every steal would bounce the neighbour's
@@ -1293,20 +1305,7 @@ static void *_worker_thread(void *_) {
 
 // Public API
 
-void _tin_fiber_init(void) {
-    // Idempotent: only the first call spawns workers and inits I/O.  A
-    // second call would leak the previous _workers array and re-enter
-    // pthread_create N more times, which under pathological CI conditions
-    // (e.g. accidental main re-entry from an LTO bug) fork-bombs the host
-    // with EAGAIN.  Belt-and-braces - the codegen-side LTO fix in
-    // heap_arena.c is the primary defence; this is the seatbelt.  The
-    // one-shot atomic is preferred over probing _workers because the
-    // pointer is set late in this function (after _rq_init / worker
-    // spawn / I/O init); a probe would let two callers both pass it.
-    static atomic_int _init_once = 0;
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&_init_once, &expected, 1)) return;
-
+static void _tin_fiber_init_once(void) {
     pthread_mutex_lock(&_table_mu);
     if (!_fibers) {
         const char *env = getenv("TINMAXFIBERS");
@@ -1357,6 +1356,17 @@ void _tin_fiber_init(void) {
     _tin_io_init();
     // Start the timer thread.
     _tin_timer_init();
+}
+
+// _tin_fiber_init: idempotent + thread-safe.  Concurrent callers (REPL
+// dlsym path, accidental main re-entry from an LTO bug, foreign C
+// threads calling into the runtime) all serialize through pthread_once,
+// which is futex-backed - the losers block in the kernel rather than
+// spinning, which matters on 1-vCPU CI runners where sched_yield on
+// SCHED_OTHER is effectively a no-op since glibc 2.32.
+void _tin_fiber_init(void) {
+    static pthread_once_t _init_once = PTHREAD_ONCE_INIT;
+    pthread_once(&_init_once, _tin_fiber_init_once);
 }
 
 // Reclaim a TinFiber struct: update live-count stats, apply peak decay every
