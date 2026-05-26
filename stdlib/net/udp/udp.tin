@@ -83,8 +83,8 @@ fn{#async} recv_from_impl(fd i32) ([byte], string, i32) =
 // read_buf_impl copies bytes from a received datagram into out, advancing
 // the cursor.  Returns 0 when all bytes have been consumed (signals EOF
 // to AsyncReader callers).  cursor is shared across Conn copies via the
-// Atomic's inner rc::Cell.
-fn{#async} read_buf_impl(data [byte], cursor sync::Atomic[i64], out *byte, n i64) i64 =
+// standard tin pointer-ARC on *sync::Atomic[i64].
+fn{#async} read_buf_impl(data [byte], cursor *sync::Atomic[i64], out *byte, n i64) i64 =
   let p     = cursor.load()
   let total = len(data)
 
@@ -148,7 +148,7 @@ fn{#async} send_to_impl(fd i32, data [byte], host string, port i32) i64 =
 struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   fd       i32                       // cached at construction; zero-cost reads
   cell     *rc::Cell[i32]            // dial: io::close at last drop; accept: no_close
-  cursor   sync::Atomic[i64]         // accept-only read cursor; 0 for dial
+  cursor   *sync::Atomic[i64]        // accept-only read cursor; 0 for dial
   host     string
   port     i32
   data_buf [byte]                    // received datagram (accept); empty for dial

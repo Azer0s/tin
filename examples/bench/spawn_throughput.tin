@@ -16,7 +16,7 @@ use io
 
 fn _tin_now_ms() i64 = extern("_tin_now_ms")
 
-var g_counter sync::Atomic[i64]
+var g_counter *sync::Atomic[i64]
 var g_done    sync::Channel[i64]
 
 fn{#async} worker() =
