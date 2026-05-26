@@ -8,11 +8,11 @@ Syntax highlighting and language support for the [Tin programming language](../.
 
 - Syntax highlighting for `.tin` files
   - Keywords (control flow, declarations, expressions)
-  - Built-in types (`i8`, `i64`, `f64`, `bool`, `string`, …)
+  - Built-in types (`i8`, `i64`, `f64`, `bool`, `string`, ...)
   - Atom literals (`'ok`, `'err`)
   - String literals with interpolation (`"{expr}"`)
   - Numbers (decimal, hex, binary, octal, float)
-  - Control tags (`#inline`, `#export`, …)
+  - Control tags (`#inline`, `#export`, ...)
   - Operators, brackets, and punctuation
 - `//` line comment toggling (`Ctrl+/`)
 - Bracket matching for `{}`, `[]`, `()`
@@ -38,6 +38,6 @@ The output zip is at `build/distributions/tin-intellij-<version>.zip`.
 ## Installing
 
 1. Open your IDE
-2. Go to **Settings -> Plugins -> ⚙ -> Install Plugin from Disk…**
+2. Go to **Settings -> Plugins -> (gear) -> Install Plugin from Disk...**
 3. Select `build/distributions/tin-intellij-<version>.zip`
 4. Restart the IDE

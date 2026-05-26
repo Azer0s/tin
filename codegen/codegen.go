@@ -926,6 +926,15 @@ type CodeGen struct {
 	// doesn't accidentally bless deeper non-transient uses.
 	transientPtrAllowed bool
 
+	// identExprContext lets genIdentifier give a fix-it that matches the
+	// shape the bare type name actually appeared in: an array-literal
+	// element vs a match-case pattern vs a generic expression.  Callers
+	// set the value, recurse into genExpr, then restore on the way out.
+	// Without this, the diagnostic falls back to the "match by type"
+	// hint -- which is wrong for the much more common gh#27 case of
+	// `[*Leaf] * n` where the user wanted a multi-init array fill.
+	identExprContext string
+
 	// dfSuppressWarnings is non-zero while the dataflow pass is iterating
 	// a loop body to fixpoint. The first few iterations see a transient
 	// state where loop-modified locals still appear to hold their init

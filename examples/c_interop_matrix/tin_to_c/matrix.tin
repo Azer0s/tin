@@ -22,7 +22,7 @@ test "T1: scalar i32 round trip" =
 test "T2: f64 with two args" =
   assert::ok(math::fabs(c_sub_f64(3.5, 1.25) - 2.25) < 1e-9)
 
-test "T3: bool ABI (i1 ↔ i8)" =
+test "T3: bool ABI (i1 <-> i8)" =
   assert::ok(c_negate_bool(true) == false)
   assert::ok(c_negate_bool(false) == true)
 
@@ -110,7 +110,7 @@ struct pt_big =
 fn c_pt_big_sum(p pt_big) i64 = extern("c_pt_big_sum")
 fn c_pt_big_make(a i64, b i64, c i64) pt_big = extern("c_pt_big_make")
 
-test "T16: small struct (≤16B) by value" =
+test "T16: small struct (<=16B) by value" =
   let p = pt_small{x: 10, y: 32}
   assert::equals(c_pt_small_sum(p), 42)
 
@@ -166,7 +166,7 @@ struct {#packed} packed_pt =
 
 fn c_packed_sum(p packed_pt) i32 = extern("c_packed_sum")
 
-test "T21: #packed struct ≤8B in single register" =
+test "T21: #packed struct <=8B in single register" =
   let p = packed_pt{x: 17, y: 25}
   assert::equals(c_packed_sum(p), 42)
 

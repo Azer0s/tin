@@ -107,7 +107,14 @@ func (cg *CodeGen) genMatchWithResult(block *ir.Block, s *ast.MatchStmt, resAllo
 		caseBlock := cg.newBlock(fmt.Sprintf("match.case.%d", i))
 		caseBlocks = append(caseBlocks, caseBlock)
 
+		// Tag the pattern as match-arm context so a bare type name
+		// (`case Leaf:` thinking T-as-pattern) gets the "use
+		// match s.(type)" fix-it.
+		prevIdentCtx := cg.identExprContext
+		cg.identExprContext = "match_arm"
 		pat, err := cg.genExpr(block, c.Pattern)
+		cg.identExprContext = prevIdentCtx
+
 		if err != nil {
 			return nil, err
 		}
