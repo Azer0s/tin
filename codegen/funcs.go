@@ -872,10 +872,12 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// the write is silently a no-op as far as the caller sees -- the
 	// warning surfaces the discrepancy so users either switch to a
 	// pointer receiver (`*T`) or explicitly own the local copy.
-	// Receivers named `this` are exempt (idiomatic method shape) and
-	// so are parameters already declared `*T` (intent is explicit).
+	// Parameters already declared `*T` are exempt (intent is explicit);
+	// `this` is NOT exempt because the value-receiver-vs-pointer-
+	// receiver choice is the precise design call this diagnostic
+	// exists to surface.  Default-off via -Wpedantic.
 	for _, astParam := range n.Params {
-		if astParam.IsVarArgs || astParam.Name == "" || astParam.Name == "this" {
+		if astParam.IsVarArgs || astParam.Name == "" {
 			continue
 		}
 
