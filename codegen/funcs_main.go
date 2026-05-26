@@ -5,6 +5,7 @@ import (
 
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/enum"
 	irtypes "github.com/llir/llvm/ir/types"
 
 	"github.com/Azer0s/tin/ast"
@@ -139,6 +140,24 @@ func (cg *CodeGen) genTestRunner() error {
 	for i, td := range cg.testDecls {
 		name := fmt.Sprintf("__tin_test_%d", i)
 		fn := cg.mod.NewFunc(name, irtypes.Void)
+		// noinline + optnone keep each `__tin_test_N` as its own distinct
+		// addressable callsite.  Without these attributes, the LTO
+		// MergeFunctions pass has been observed to fold test bodies into
+		// the user's `fn main()` when their inlined+optimized forms
+		// happen to collapse to the same machine code, leaving each
+		// `__tin_test_N` as a zero-byte alias for `main`. The test
+		// runner then calls main repeatedly through the test pointer
+		// table -- each invocation re-runs the user's main body
+		// (including `_tin_fiber_init` from the C-main wrapper) and
+		// spawns a fresh batch of worker pthreads, eventually
+		// exhausting the per-process thread limit (EAGAIN from
+		// pthread_create) on constrained runners. The attributes
+		// preserve a unique body shape per test so MergeFunctions
+		// leaves them alone.
+		fn.FuncAttrs = append(fn.FuncAttrs,
+			enum.FuncAttrNoInline,
+			enum.FuncAttrOptNone,
+		)
 		entry := fn.NewBlock("entry")
 
 		prevFn := cg.curFn
