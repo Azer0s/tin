@@ -1,0 +1,34 @@
+// Regression: match-binding a variant payload whose struct contains a
+// *rc::Cell field used to read a freed cell.  The match-scrut release
+// at afterBlock walks the active variant's payload and decrements
+// pointer fields the arm body has already transferred into resAlloca
+// via the store-and-load to the let binding.  Without an extra retain
+// on the stored value, the caller's load returns a dangling pointer
+// (mimalloc / free zeros the freed block, so the cell payload reads
+// back as 0).  Fix emits emitStructFieldRetain on the resAlloca store
+// in emitMatchArmBody.
+
+use rc
+
+fn dtor(p *void) = pass
+
+struct Box =
+  cell *rc::Cell[*void]
+
+data MyOpt =
+  Some(b Box)
+  None_
+
+fn make_opt() MyOpt =
+  return Some(Box{cell: rc::Cell[*void].new(nil, dtor)})
+
+fn main() =
+  let b Box = match make_opt():
+    case Some(x): x
+    case None_: panic("none")
+  // Pre-fix the destructure-then-let drop the cell's containing block
+  // before the read; the runtime crashes with SIGSEGV trying to follow
+  // a header through freed mimalloc memory.  Post-fix the read
+  // succeeds and returns nil (0), proving the cell pointer is still
+  // valid after the match transfer.
+  echo("ok ", b.cell.payload() as i64)

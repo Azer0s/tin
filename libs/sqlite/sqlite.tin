@@ -1,0 +1,101 @@
+//!+sqlite_worker.c -- -lsqlite3
+// libs/sqlite - async SQLite bindings.
+//
+// Each Connection owns a dedicated worker pthread that holds the
+// sqlite3* handle exclusively.  Tin fibers submit tasks through an
+// MPSC queue; results come back via a per-call Completion that the
+// Tin side awaits as a typed `SqliteCall[T]`.  No fiber blocks on a
+// pthread primitive directly -- the worker unparks the awaiting
+// fiber through _tin_fiber_unpark_fib.
+//
+//   use sqlite
+//
+//   let db = sqlite::open("test.db").ok()
+//   let n  = await db.exec("CREATE TABLE users (id INTEGER, name TEXT)")
+//   await db.close()
+
+use rc
+use errors
+use result
+use { Result } from result
+
+// ---------------------------------------------------------------------------
+// C externs
+// ---------------------------------------------------------------------------
+
+fn c_sqlite_open(path string) *void           = extern("_tin_sqlite_open")
+fn c_sqlite_close(conn *void)                 = extern("_tin_sqlite_close")
+fn c_sqlite_submit_exec(conn *void, sql string) *void = extern("_tin_sqlite_submit_exec")
+
+fn c_completion_ready(p *void) i32  = extern("_tin_sqlite_completion_ready")
+fn c_completion_take(p *void)  i64  = extern("_tin_sqlite_completion_take")
+fn c_completion_err(p *void)   string = extern("_tin_sqlite_completion_err")
+fn c_completion_free(p *void)       = extern("_tin_sqlite_completion_free")
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+data SqliteError(errors::Err, print) =
+  OpenFailed(path string)
+  ExecFailed(code i32, msg string)
+
+  fn errors::Err::message(this SqliteError) string =
+    match this:
+      case OpenFailed(p):     return "sqlite: open failed for {p}"
+      case ExecFailed(c, m):  return "sqlite: exec failed (code {c}): {m}"
+
+  fn ::print(this SqliteError) string = return this.message()
+
+// ---------------------------------------------------------------------------
+// Awaitable for a single sqlite call.
+// ---------------------------------------------------------------------------
+//
+// SqliteCall[T] wraps a Completion handle.  awaitable::result blocks
+// (via _tin_fiber_park inside completion_take) until the worker has
+// signalled the completion, then casts the raw i64 result back to T.
+// T is i64 today: exec returns the rowcount or a negative SQLite
+// error code (negated).  Query support layers a richer T later.
+
+struct SqliteCall[t](awaitable[t]) =
+  cell *rc::Cell[*void]   // owns the completion_t*; dtor frees it
+
+  fn awaitable[t]::ready(this SqliteCall[t]) bool =
+    return c_completion_ready(this.cell.payload()) != 0
+
+  fn awaitable[t]::result(this SqliteCall[t]) t where t is i64 =
+    return c_completion_take(this.cell.payload())
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+struct Connection (io::Closeable) =
+  cell *rc::Cell[*void]   // owns the C conn_t*; dtor sends SHUTDOWN + joins
+
+  // exec runs a single SQL statement that returns no rows.  The
+  // awaited result is the number of rows changed (sqlite3_changes).
+  // SQL errors surface as a negative value (the negated SQLite code);
+  // higher-level wrappers can re-shape into Result if desired.
+  fn exec(this Connection, sql string) SqliteCall[i64] =
+    let p *void = c_sqlite_submit_exec(this.cell.payload(), sql)
+    return SqliteCall[i64]{cell: rc::Cell[*void].new(p, c_completion_free)}
+
+  fn io::Closeable::close(this Connection) =
+    c_sqlite_close(this.cell.payload())
+    // Swap to nil so the Cell's dtor (which calls c_sqlite_close
+    // again) becomes a no-op (the C side guards on NULL).
+    this.cell.set(nil)
+
+// open opens (or creates) the database at path and spawns its worker.
+fn open(path string) Result[Connection, errors::Err] =
+  let p *void = c_sqlite_open(path)
+  if p == nil:
+    return Err(OpenFailed(path))
+  return Ok(Connection{cell: rc::Cell[*void].new(p, c_sqlite_close)})
+
+export {
+  Connection, SqliteError,
+  SqliteCall,
+  open,
+} as sqlite

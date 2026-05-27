@@ -297,7 +297,19 @@ func (cg *CodeGen) emitMatchArmBody(
 
 				if exprVal != nil {
 					resType := resAlloca.Type().(*irtypes.PointerType).ElemType
-					bodyBlock.NewStore(cg.coerce(bodyBlock, exprVal, resType), resAlloca)
+					coerced := cg.coerce(bodyBlock, exprVal, resType)
+					bodyBlock.NewStore(coerced, resAlloca)
+					// The match-scrut release that runs at afterBlock
+					// walks the active variant's payload and decrements
+					// any pointer fields the arm just transferred out
+					// via this store.  Without an extra retain here, the
+					// caller's load from resAlloca would see freed
+					// pointers (e.g. a *rc::Cell payload that the
+					// scrutinee release dropped to rc=0).  Walk the
+					// stored value's fields and retain inner Tin-managed
+					// pointers; primitive values and borrowed pointers
+					// are no-ops.
+					cg.emitStructFieldRetain(bodyBlock, coerced)
 				}
 			}
 		}
