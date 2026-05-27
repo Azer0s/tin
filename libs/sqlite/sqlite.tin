@@ -51,15 +51,18 @@ struct SqlQuery =
   sql    string
   params [SqlValue]
 
-// `_sql` rewrites `"... {ident} ..."_sql` at compile time into
-// `SqlQuery{sql: "... ? ...", params: [ident, ...]}`.  Each `{name}`
-// becomes a `?` placeholder; the named identifier flows in as a
-// raw value, which the SqlValue implicit-coerce wraps element-wise
-// when the array lands in the SqlQuery.params field.
+// `_sql_query` rewrites `"... {ident} ..."_sql_query` at compile time
+// into `SqlQuery{sql: "... ? ...", params: [ident, ...]}`.  Each
+// `{name}` becomes a `?` placeholder; the named identifier flows in
+// as a raw value, which the SqlValue implicit-coerce wraps element-
+// wise when the array lands in the SqlQuery.params field.
 //
 // Brace escapes work the standard way: `\{` and `\}` survive as
 // literal text and are NOT treated as placeholders.
-macro{#suffix@string #no_excl #no_parens} sql(s) =
+//
+// (Long name on purpose: collides less with the `sql` package
+// alias and reads as "produces a SqlQuery" at the call site.)
+macro{#suffix@string #no_excl #no_parens} sql_query(s) =
   let rewritten string = ""
   let idents    string = ""
   let i i64 = 0
@@ -353,6 +356,6 @@ fn if_zero_use_one(n i64) i64 =
 export {
   Connection, SqliteError,
   SqlValue, SqlQuery, Rows, Stmt,
-  sql,
+  sql_query,
   open,
 } as sqlite

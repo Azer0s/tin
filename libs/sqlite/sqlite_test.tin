@@ -3,7 +3,7 @@
 // the suite stays deterministic across re-runs.
 
 use sqlite
-use { sql } from sqlite
+use { sql_query } from sqlite
 use assert
 
 const TEST_DB = "/tmp/tin_sqlite_test.db"
@@ -142,9 +142,9 @@ test "_sql macro: identifier placeholders rewrite to `?` + params array" =
   let _create i64 = db.exec("CREATE TABLE m_a (id INTEGER, name TEXT)", [])
   let id   i64    = 11
   let name string = "carol"
-  let n i64 = db.run("INSERT INTO m_a VALUES ({id}, {name})"_sql)
+  let n i64 = db.run("INSERT INTO m_a VALUES ({id}, {name})"_sql_query)
   assert::ok(n == 1)
-  let rows = db.fetch("SELECT id, name FROM m_a"_sql).unwrap()
+  let rows = db.fetch("SELECT id, name FROM m_a"_sql_query).unwrap()
   assert::ok(rows.count() == 1)
   assert::ok(rows.get_i64(0, 0) == 11)
   assert::ok(rows.get_string(0, 1) == "carol")
@@ -158,7 +158,7 @@ test "_sql macro: WHERE clause with single ident binds correctly" =
   let _i2 i64 = db.exec("INSERT INTO m_b VALUES (2)", [])
   let _i3 i64 = db.exec("INSERT INTO m_b VALUES (3)", [])
   let cutoff i64 = 2
-  let rows = db.fetch("SELECT id FROM m_b WHERE id >= {cutoff} ORDER BY id"_sql).unwrap()
+  let rows = db.fetch("SELECT id FROM m_b WHERE id >= {cutoff} ORDER BY id"_sql_query).unwrap()
   assert::ok(rows.count() == 2)
   assert::ok(rows.get_i64(0, 0) == 2)
   assert::ok(rows.get_i64(1, 0) == 3)
