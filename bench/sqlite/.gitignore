@@ -1,0 +1,8 @@
+# Crystal: shards-installed deps + crystal build cache
+cr/lib/
+
+# Rust: cargo target + lockfile is fine to commit normally, but
+# rusqlite bundled brings in many transitive deps. Keep target out.
+rs/target/
+
+# Go: nothing to ignore (build output lands in ../../bin/)

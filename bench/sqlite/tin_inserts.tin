@@ -1,0 +1,49 @@
+// bench/sqlite/tin_inserts - INSERT N rows sequentially against one
+// sqlite Connection.  Counterpart of c_inserts.c, go/inserts.go,
+// rs/src/main.rs, cr_inserts.cr.  Each language uses its idiomatic
+// synchronous sqlite API; Tin's wrapper goes through one async hop
+// (queue task -> park fiber -> worker steps -> unpark) per INSERT,
+// so this bench surfaces that per-call overhead.
+//
+// Usage: ./tin_inserts N
+//   N = total rows to INSERT
+//
+// Stmt cache makes the first call pay prepare cost; subsequent calls
+// reset+bind+step against the cached sqlite3_stmt.  Single transaction
+// (WAL + synchronous=NORMAL) so fsync isn't the bottleneck.
+
+use sqlite
+use strings
+use measure
+
+const DB_PATH = "/tmp/tin_sqlite_bench.db"
+
+fn{#async} main(args [string]) =
+  if len(args) < 2:
+    echo("usage: tin_inserts N")
+    return
+
+  let total i64 = strings::atol(args[1])
+
+  let db = sqlite::open(DB_PATH).unwrap()
+
+  let _w  i64 = await db.exec("PRAGMA journal_mode=WAL", [])
+  let _s  i64 = await db.exec("PRAGMA synchronous=NORMAL", [])
+  let _d  i64 = await db.exec("DROP TABLE IF EXISTS bench", [])
+  let _c  i64 = await db.exec("CREATE TABLE bench (i INTEGER, name TEXT)", [])
+  let _b  i64 = await db.exec("BEGIN", [])
+
+  let t0 i64 = measure::now_us()
+
+  for let i i64 = 0; i < total; i = i + 1:
+    let _n i64 = await db.exec("INSERT INTO bench (i, name) VALUES (?, ?)", [Int(i), Text("row")])
+
+  let t1 i64 = measure::now_us()
+
+  let _co i64 = await db.exec("COMMIT", [])
+
+  let elapsed_us i64 = t1 - t0
+  let ops_per_sec i64 = total * 1000000 / elapsed_us
+  echo("n={total} elapsed_us={elapsed_us} ops_per_sec={ops_per_sec}")
+
+  db.close()
