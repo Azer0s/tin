@@ -758,6 +758,7 @@ func parseStringInterp(s string) (ast.Node, error) {
 	// Happens for inputs like `"\{x\}"` where brace escapes create
 	// fragmented literal-only parts.
 	allLiteral := true
+
 	for _, p := range parts {
 		if p.IsExpr {
 			allLiteral = false
