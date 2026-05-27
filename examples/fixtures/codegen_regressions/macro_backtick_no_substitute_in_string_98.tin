@@ -1,0 +1,11 @@
+// Regression: the outer walk in interpolateMacroBacktick did not
+// skip string literals, so `{n}` inside a `"..."` got macro-
+// substituted at parse time instead of being left as a runtime
+// string-interp slot.  The fix mirrors substituteParamsInSource's
+// string-skip in the outer walk.  Here, `{n}` inside the string
+// must NOT be replaced with `42`; the runtime `n` lookup must fail
+// with `undefined identifier: n`.
+
+macro greet(n) = `"hello {n}"`
+
+fn main() = echo(greet!(42))

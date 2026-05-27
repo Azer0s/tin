@@ -104,6 +104,38 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 
 	for i < len(content) {
 		c := content[i]
+		// Skip string literals: `{n}` inside `"..."` is a runtime
+		// string-interp slot, not a macro interpolation.  To inject a
+		// param into a string, use concat: `"hello " ++ {n}`.
+		if c == '"' {
+			out.WriteByte(c)
+
+			i++
+
+			for i < len(content) && content[i] != '"' {
+				if content[i] == '\\' && i+1 < len(content) {
+					out.WriteByte(content[i])
+					out.WriteByte(content[i+1])
+
+					i += 2
+
+					continue
+				}
+
+				out.WriteByte(content[i])
+
+				i++
+			}
+
+			if i < len(content) {
+				out.WriteByte(content[i])
+
+				i++
+			}
+
+			continue
+		}
+
 		if c != '{' {
 			out.WriteByte(c)
 

@@ -1074,13 +1074,15 @@ func (l *Lexer) readIdentOrKeyword(line, col int) (Token, error) {
 	// ident "true_flag". The Tokenize loop's suffix-pickup branch fires
 	// on BOOL_LIT, so we just need to return the keyword early and
 	// rewind so the `_<letter>` tail is the next lexer input.
-	if len(word) > 5 && (strings.HasPrefix(word, "true_") || strings.HasPrefix(word, "false_")) {
+	if strings.HasPrefix(word, "true_") || strings.HasPrefix(word, "false_") {
 		split := 4 // "true"
 		if word[0] == 'f' {
 			split = 5 // "false"
 		}
-
-		if isSuffixStart(rune(word[split+1])) {
+		// Need at least one suffix char AFTER the underscore: `true_X`
+		// is `true` + suffix `X`, but bare `true_` (with nothing after
+		// the underscore) is just a regular identifier `true_`.
+		if len(word) > split+1 && isSuffixStart(rune(word[split+1])) {
 			// Rewind past everything after the keyword.
 			rewind := len(word) - split
 			l.pos -= rewind
