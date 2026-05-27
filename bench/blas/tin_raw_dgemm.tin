@@ -27,11 +27,10 @@ fn main(args [string]) =
   let b = mem::malloc(total * 8) as *f64
   let c = mem::calloc(total, 8) as *f64
 
-  { #unsafe } {
+  do{#unsafe}:
     for let i i64 = 0; i < total; i++:
       *(a + i) = ((i % 7) + 1) as f64
       *(b + i) = ((i % 5) + 1) as f64
-  }
 
   let t1 = measure::now_us()
   let ni32 = n as i32
@@ -50,10 +49,9 @@ fn main(args [string]) =
   let t2 = measure::now_us()
   let sum = 0.0
 
-  { #unsafe } {
+  do{#unsafe}:
     for let i i64 = 0; i < total; i++:
       sum = sum + *(c + i)
-  }
 
   let t3 = measure::now_us()
   echo "sum: {sum}"

@@ -1,2 +1,0 @@
-{#async} test "tagged tests are rejected" =
-  assert::ok(true)
