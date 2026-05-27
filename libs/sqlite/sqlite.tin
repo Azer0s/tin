@@ -39,6 +39,43 @@ data SqlValue (implicit[i64], implicit[f64], implicit[string]) =
   static fn ::implicit(v f64) SqlValue    = return Real(v)
   static fn ::implicit(s string) SqlValue = return Text(s)
 
+// SqlQuery bundles a parameterised SQL statement and its bound
+// values.  Produced by the `_sql` suffix macro and consumed by
+// Connection.run / Connection.fetch.
+struct SqlQuery =
+  sql    string
+  params [SqlValue]
+
+// `_sql` rewrites `"... {ident} ..."_sql` at compile time into
+// `SqlQuery{sql: "... ? ...", params: [ident, ...]}`.  Each `{name}`
+// becomes a `?` placeholder; the named identifier flows in as a
+// raw value, which the SqlValue implicit-coerce wraps element-wise
+// when the array lands in the SqlQuery.params field.
+//
+// Brace escapes work the standard way: `\{` and `\}` survive as
+// literal text and are NOT treated as placeholders.
+macro{#suffix@string #no_excl #no_parens} sql(s) =
+  let rewritten string = ""
+  let idents    string = ""
+  let i i64 = 0
+  let n i64 = 0
+  for let _k i64 = 0; i < len(s); _k = _k + 1:
+    if s[i..i+1] == "{":
+      let j i64 = i + 1
+      for let _m i64 = 0; s[j..j+1] != "}"; _m = _m + 1:
+        j = j + 1
+      if n > 0:
+        idents = idents ++ ", "
+      idents = idents ++ s[i+1..j]
+      rewritten = rewritten ++ "?"
+      n = n + 1
+      i = j + 1
+    else:
+      rewritten = rewritten ++ s[i..i+1]
+      i = i + 1
+  let sql_lit string = "\"" ++ rewritten ++ "\""
+  return `sqlite::SqlQuery{sql: {sql_lit}, params: [{idents}]}`
+
 // Params marshal as three parallel arrays (tags, ints, texts).  For
 // each Int param: tag=1, int holds the value, text="".  For each
 // Text param: tag=3, text holds the string, int=0.  For Null:
@@ -219,6 +256,15 @@ struct Connection (io::Closeable) =
     let p *void = c_sqlite_submit_query(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
     return SqliteQuery{cell: rc::Cell[*void].new(p, c_completion_free)}
 
+  // run is the SqlQuery-shaped twin of exec: takes the bundle the
+  // `_sql` macro produces and threads sql + params through to exec.
+  fn run(this Connection, q SqlQuery) SqliteCall[i64] =
+    return this.exec(q.sql, q.params)
+
+  // fetch is the SqlQuery-shaped twin of query.
+  fn fetch(this Connection, q SqlQuery) SqliteQuery =
+    return this.query(q.sql, q.params)
+
   fn io::Closeable::close(this Connection) =
     c_sqlite_close(this.cell.payload())
     this.cell.set(nil)
@@ -238,6 +284,7 @@ fn open(path string) Result[Connection, errors::Err] =
 export {
   Connection, SqliteError,
   SqliteCall, SqliteQuery,
-  SqlValue, Rows,
+  SqlValue, SqlQuery, Rows,
+  sql,
   open,
 } as sqlite

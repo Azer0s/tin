@@ -5,6 +5,7 @@
 // tests use unique table names to avoid collisions.
 
 use sqlite
+use { sql } from sqlite
 use assert
 
 const TEST_DB = "/tmp/tin_sqlite_test.db"
@@ -137,6 +138,34 @@ test "is_null detects SQL NULL columns" =
   assert::ok(rows.count() == 1)
   assert::ok(rows.is_null(0, 0) == false)
   assert::ok(rows.is_null(0, 1) == true)
+  db.close()
+
+test "_sql macro: identifier placeholders rewrite to `?` + params array" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_a", [])
+  let _create i64 = await db.exec("CREATE TABLE m_a (id INTEGER, name TEXT)", [])
+  let id   i64    = 11
+  let name string = "carol"
+  let n i64 = await db.run("INSERT INTO m_a VALUES ({id}, {name})"_sql)
+  assert::ok(n == 1)
+  let rows = await db.fetch("SELECT id, name FROM m_a"_sql)
+  assert::ok(rows.count() == 1)
+  assert::ok(rows.get_i64(0, 0) == 11)
+  assert::ok(rows.get_string(0, 1) == "carol")
+  db.close()
+
+test "_sql macro: WHERE clause with single ident binds correctly" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_b", [])
+  let _create i64 = await db.exec("CREATE TABLE m_b (id INTEGER)", [])
+  let _i1 i64 = await db.exec("INSERT INTO m_b VALUES (1)", [])
+  let _i2 i64 = await db.exec("INSERT INTO m_b VALUES (2)", [])
+  let _i3 i64 = await db.exec("INSERT INTO m_b VALUES (3)", [])
+  let cutoff i64 = 2
+  let rows = await db.fetch("SELECT id FROM m_b WHERE id >= {cutoff} ORDER BY id"_sql)
+  assert::ok(rows.count() == 2)
+  assert::ok(rows.get_i64(0, 0) == 2)
+  assert::ok(rows.get_i64(1, 0) == 3)
   db.close()
 
 test "explicit Int / Text construction round-trips through match" =
