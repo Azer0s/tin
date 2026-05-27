@@ -23,6 +23,8 @@
 //   stmt.close()
 
 use rc
+use db
+use { RowSet, Conn, Value } from db
 use errors
 use result
 use { Result } from result
@@ -158,8 +160,6 @@ struct Rows =
   fn count(this Rows) i64 = return c_rows_count(this.cell.payload())
   fn cols(this Rows)  i64 = return c_rows_cols(this.cell.payload())
 
-  // Typed accessors.  Named per type because Tin's `where t is X`
-  // guards narrow on primitive WIDTH categories, not specific types.
   fn get_i64(this Rows, row i64, col i64) i64 =
     return c_rows_get_i64(this.cell.payload(), row, col)
 
@@ -173,6 +173,21 @@ struct Rows =
 
   fn is_null(this Rows, row i64, col i64) bool =
     return c_rows_is_null(this.cell.payload(), row, col) != 0
+
+  // Build a stdlib/db RowSet view of these rows.  The returned
+  // RowSet shares the same underlying rc::Cell so the buffer stays
+  // alive for the RowSet's lifetime.  See db::RowSet's doc-comment
+  // for why we hand-roll the vtable instead of going via trait.
+  fn to_rowset(this Rows) RowSet =
+    return RowSet{
+      cell:       this.cell,
+      count_fn:   c_rows_count,
+      cols_fn:    c_rows_cols,
+      get_i64_fn: c_rows_get_i64,
+      get_f64_fn: c_rows_get_f64,
+      get_str_fn: rowset_get_string,
+      is_null_fn: rowset_is_null,
+    }
 
 // ---------------------------------------------------------------------------
 // Stmt: low-level prepared statement.
@@ -235,7 +250,7 @@ struct Stmt (io::Closeable) =
 // Connection
 // ---------------------------------------------------------------------------
 
-struct Connection (io::Closeable) =
+struct Connection (io::Closeable, Conn) =
   cell *rc::Cell[*void]
 
   // exec runs a statement that returns no rows.  Returns rowcount
@@ -341,6 +356,17 @@ struct Connection (io::Closeable) =
     c_sqlite_close(this.cell.payload())
     this.cell.set(nil)
 
+  // Conn impl: translate [Value] -> [SqlValue], forward.
+  // Value variants are IntVal/RealVal/TextVal/NullVal (prefixed so
+  // they don't collide with our local SqlValue.Int/Real/Text/Null).
+  fn Conn::exec(this Connection, sql string, params [Value]) i64 =
+    return this.exec(sql, to_sql_values(params))
+
+  fn Conn::query(this Connection, sql string, params [Value]) Result[RowSet, errors::Err] =
+    match this.query(sql, to_sql_values(params)):
+      case Err(e): return Err(e)
+      case Ok(r):  return Ok(r.to_rowset())
+
 // open opens (or creates) the database at path.
 fn open(path string) Result[Connection, errors::Err] =
   let p *void = c_sqlite_open(path)
@@ -352,6 +378,36 @@ fn if_zero_use_one(n i64) i64 =
   if n > 0:
     return n
   return 1
+
+// rowset_get_string adapts c_rows_get_text (which writes via an
+// out-param) into the (*void, i64, i64) -> string signature that
+// db::RowSet.get_str_fn expects.
+fn rowset_get_string(p *void, r i64, c i64) string =
+  let out string = ""
+  c_rows_get_text(p, r, c, &out)
+  return out
+
+// rowset_is_null adapts c_rows_is_null (which returns i32 like C)
+// into a bool, matching db::RowSet.is_null_fn.
+fn rowset_is_null(p *void, r i64, c i64) bool =
+  return c_rows_is_null(p, r, c) != 0
+
+// to_sql_values translates a [Value] argument array into the
+// driver-local [SqlValue].  Match arms use Value's prefixed
+// variants (IntVal etc) which avoids the bare-name collision with
+// our local SqlValue.Int/Real/Text/Null.
+fn to_sql_values(params [Value]) [SqlValue] =
+  let n i64 = len(params)
+  let sv [SqlValue] = []
+  let i i64 = 0
+  for i < n:
+    match params[i]:
+      case IntVal(v):  sv ++= [Int(v) as SqlValue]
+      case RealVal(v): sv ++= [Real(v) as SqlValue]
+      case TextVal(s): sv ++= [Text(s) as SqlValue]
+      case NullVal:    sv ++= [Null as SqlValue]
+    i = i + 1
+  return sv
 
 export {
   Connection, SqliteError,

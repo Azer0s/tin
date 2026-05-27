@@ -1,0 +1,106 @@
+// libs/sqlite/db_orm_test - integration tests for stdlib/db's
+// trait-driven CRUD against the sqlite driver.  Each test creates
+// and drops its own table for re-run determinism.
+
+use sqlite
+use db
+use assert
+
+const TEST_DB = "/tmp/tin_db_orm_test.db"
+
+struct user =
+  id    i64    @"db:id"
+  name  string @"db:name"
+  score f64    @"db:score"
+
+struct product =
+  id   i64    @"db:id"
+  sku  string @"db:product_code"   // tag renames column
+  pwd  string @"db:-"              // tag skips field
+
+fn open_test() sqlite::Connection =
+  return sqlite::open(TEST_DB).unwrap()
+
+test "db::insert + db::find_by_id round-trip" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 1, name: "alice", score: 4.5})
+  match db::find_by_id[user](c, 1):
+    case Ok(u):
+      assert::ok(u.id == 1)
+      assert::ok(u.name == "alice")
+      assert::ok(u.score == 4.5)
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::find_by_id Err on missing row" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  match db::find_by_id[user](c, 999):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db::all returns every inserted row in driver order" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _1  i64 = db::insert[user](c, user{id: 1, name: "alice", score: 1.0})
+  let _2  i64 = db::insert[user](c, user{id: 2, name: "bob",   score: 2.0})
+  let _3  i64 = db::insert[user](c, user{id: 3, name: "carol", score: 3.0})
+  match db::all[user](c):
+    case Ok(rows):
+      assert::ok(len(rows) == 3)
+      assert::ok(rows[0].name == "alice")
+      assert::ok(rows[1].name == "bob")
+      assert::ok(rows[2].name == "carol")
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::update changes a row WHERE pk = id" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 7, name: "old", score: 0.0})
+  let _u  i64 = db::update[user](c, user{id: 7, name: "new", score: 9.0})
+  match db::find_by_id[user](c, 7):
+    case Ok(u):
+      assert::ok(u.name == "new")
+      assert::ok(u.score == 9.0)
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::delete removes the row" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 5, name: "doomed", score: 0.0})
+  let _dl i64 = db::delete[user](c, 5)
+  match db::find_by_id[user](c, 5):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db column-rename tag (@\"db:product_code\") drives SQL column name" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS product", [])
+  let _ct i64 = c.exec("CREATE TABLE product (id INTEGER, product_code TEXT)", [])
+  let _i  i64 = db::insert[product](c, product{id: 1, sku: "ABC-123", pwd: "secret"})
+  match db::find_by_id[product](c, 1):
+    case Ok(p):
+      assert::ok(p.sku == "ABC-123")
+      assert::ok(p.pwd == "")    // skipped field stays at zero
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::insert_into uses the explicit table name" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS users_v2", [])
+  let _ct i64 = c.exec("CREATE TABLE users_v2 (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert_into[user](c, "users_v2", user{id: 1, name: "z", score: 0.0})
+  match db::find_by_id_in[user](c, "users_v2", 1):
+    case Ok(u): assert::ok(u.name == "z")
+    case Err(_): assert::ok(false)
+  c.close()
