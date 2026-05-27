@@ -226,6 +226,14 @@ func (cg *CodeGen) Generate(prog *ast.Program) (*ir.Module, error) {
 		}
 	}
 
+	// Re-run receiver-mutation analysis to fixpoint.  The single pass
+	// inside predeclareMethod is source-order-sensitive: method foo()
+	// calling this.bar() can be analyzed before bar() is registered, so
+	// foo's transitive mutation through bar is missed and foo gets
+	// recorded as non-mutating.  Iterate until the maps stabilize so a
+	// chain of N inter-method calls is fully resolved.
+	cg.refineMethodMutationToFixpoint(prog.Stmts)
+
 	// Validate trait-impl completeness: every struct that declares (T1, T2, ...)
 	// must provide qualified impls for each virtual method of each listed trait.
 	// Default-bodied methods (e.g. labeled.label) remain optional. Reports all

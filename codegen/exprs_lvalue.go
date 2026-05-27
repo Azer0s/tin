@@ -72,6 +72,20 @@ func (cg *CodeGen) genLValue(block *ir.Block, node ast.Node) (value.Value, error
 			return nil, err
 		}
 
+		// Auto-deref: `p[i] = ...` where `p` is `*[T]` (pointer to a fat
+		// array) or `*string` -- load through the pointer once so the
+		// fat-array dispatch below sees the value, not the pointer.
+		// Without this the *irtypes.PointerType arm at the bottom did
+		// pointer arithmetic in FatArray-sized strides, yielding a
+		// `*FatArray` lvalue that fails the type check at the assign
+		// site ("cannot assign value of type i64 (declared type [i64])").
+		// Mirrors the rvalue auto-deref in genIndexExpr.
+		if pt, ok := arr.Type().(*irtypes.PointerType); ok {
+			if isFatArrayPtr(pt.ElemType) || isStringType(pt.ElemType) {
+				arr = block.NewLoad(pt.ElemType, arr)
+			}
+		}
+
 		arrType := arr.Type()
 		switch at := arrType.(type) {
 		case *irtypes.StructType:

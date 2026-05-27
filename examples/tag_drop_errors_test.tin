@@ -16,3 +16,6 @@ test "stray tag on let rejected" =
 
 test "stray tag on return rejected" =
   expect_tag_drop_error("stray_tag_on_return.tin")
+
+test "stray tag on test rejected" =
+  expect_tag_drop_error("stray_tag_on_test.tin")

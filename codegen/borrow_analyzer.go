@@ -579,6 +579,17 @@ func (cg *CodeGen) collectMutatedTargets(node ast.Node) map[string]bool {
 					if recvName != "" {
 						if perType, ok := cg.methodMayMutateReceiverByType[recvName]; ok {
 							mutates = perType[fa.Field]
+							// Per-type map was populated but doesn't list
+							// this method.  Fall back to the bare-name map
+							// in case a free `fn` (used as UFCS) or a
+							// method on a different struct registered the
+							// name there.  Conservative correctness beats
+							// precision here.
+							if !mutates {
+								mutates = cg.methodMayMutateReceiver[fa.Field]
+							}
+						} else {
+							mutates = cg.methodMayMutateReceiver[fa.Field]
 						}
 					} else {
 						mutates = cg.methodMayMutateReceiver[fa.Field]

@@ -337,14 +337,17 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 		return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
 	}
 
-	// Top-level tags only attach to fn/struct/macro/test - the cases
-	// that forward `tags` below.  Everywhere else they were silently
-	// dropped (e.g. `{#async} let x = 5` parsed clean and ran without
-	// the tag taking effect).  Surface the typo instead.
+	// Top-level tags only attach to fn/struct/macro/static - the cases
+	// below that thread `tags` into their downstream parser.  Everywhere
+	// else they were silently dropped (e.g. `{#async} let x = 5` parsed
+	// clean and ran without the tag taking effect).  Surface the typo
+	// instead.  `test` is NOT on this list: parseTestDecl takes no tags
+	// argument, so accepting them here would re-introduce the silent
+	// drop bug.
 	if len(tags) > 0 {
 		t := p.peek().Type
-		if t != lexer.KW_FN && t != lexer.KW_STRUCT && t != lexer.KW_MACRO && t != lexer.KW_TEST && t != lexer.KW_STATIC {
-			return nil, p.errorf("tags here are only valid before `fn`, `struct`, `macro`, `test` or `static`; got %s", p.peek().Literal)
+		if t != lexer.KW_FN && t != lexer.KW_STRUCT && t != lexer.KW_MACRO && t != lexer.KW_STATIC {
+			return nil, p.errorf("tags here are only valid before `fn`, `struct`, `macro` or `static`; got %s", p.peek().Literal)
 		}
 	}
 

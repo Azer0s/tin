@@ -263,6 +263,67 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	return nil
 }
 
+// refineMethodMutationToFixpoint iterates the receiver-mutation
+// analysis over every method in `stmts` until both the bare-name and
+// per-type maps stop growing.  The single in-line analysis inside
+// predeclareMethod is source-order-sensitive: when method foo() calls
+// this.bar() on the same struct and bar() is declared AFTER foo() in
+// source, foo's mutation through bar is missed (bar isn't yet in the
+// map at the moment foo is analyzed).  Re-running until stable lets a
+// chain of N inter-method calls resolve in N passes.
+func (cg *CodeGen) refineMethodMutationToFixpoint(stmts []ast.Node) {
+	const maxPasses = 8
+
+	for pass := 0; pass < maxPasses; pass++ {
+		changed := false
+
+		for _, node := range stmts {
+			sd, ok := node.(*ast.StructDecl)
+			if !ok || len(sd.TypeParams) > 0 {
+				continue
+			}
+
+			aug := cg.augmentStructFromTraits(sd)
+			for _, m := range aug.Methods {
+				if len(m.Params) == 0 || m.Body == nil {
+					continue
+				}
+
+				if _, isPtr := m.Params[0].Type.(*ast.PointerType); !isPtr {
+					continue
+				}
+
+				recv := m.Params[0].Name
+				if recv == "" {
+					continue
+				}
+
+				if !cg.collectMutatedTargets(m.Body)[recv] {
+					continue
+				}
+
+				if !cg.methodMayMutateReceiver[m.Name] {
+					cg.methodMayMutateReceiver[m.Name] = true
+					changed = true
+				}
+
+				if cg.methodMayMutateReceiverByType[aug.Name] == nil {
+					cg.methodMayMutateReceiverByType[aug.Name] = map[string]bool{}
+				}
+
+				if !cg.methodMayMutateReceiverByType[aug.Name][m.Name] {
+					cg.methodMayMutateReceiverByType[aug.Name][m.Name] = true
+					changed = true
+				}
+			}
+		}
+
+		if !changed {
+			return
+		}
+	}
+}
+
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.
 func (cg *CodeGen) predeclareFuncAs(n *ast.FuncDecl, scopeName string) error {
 	// Skip extern declarations - they will be handled in genFuncDecl.
