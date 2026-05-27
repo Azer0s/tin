@@ -36,6 +36,13 @@ typedef enum {
     OP_SHUTDOWN = 99,
 } op_kind_t;
 
+// Per-param wire format: three parallel slots.  tag picks how to
+// interpret the row.  See encode_params in sqlite.tin.
+//   tag=1 (Int):  int_val carries the i64
+//   tag=3 (Text): text_val carries the C string (borrowed; deep-
+//                 copied at submit time before the caller may drop it)
+//   tag=5 (Null): no payload
+
 typedef struct completion {
     pthread_mutex_t mu;
     int     done;         // set by worker after writing result
@@ -86,11 +93,33 @@ static void completion_signal(completion_t *c, int code, int64_t v, const char *
 // ---------------------------------------------------------------------------
 
 typedef struct task {
-    op_kind_t     op;
-    char         *sql;        // strdup'd; freed by worker after exec
-    completion_t *completion; // signalled by worker; not freed here
-    struct task  *next;
+    op_kind_t        op;
+    char            *sql;        // strdup'd; freed by worker after exec
+    // Params are deep-copied at submit time so the Tin caller can
+    // drop the source `[SqlValue]` before the worker picks the task
+    // up.  Three parallel arrays match the wire format from
+    // sqlite.tin::exec.  texts[i] is strdup'd when tag=3, NULL otherwise.
+    int64_t         *tags;
+    int64_t         *ints;
+    char           **texts;
+    int64_t          n_params;
+    completion_t    *completion;
+    struct task     *next;
 } task_t;
+
+static void free_task(task_t *t) {
+    if (!t) return;
+    if (t->sql) free(t->sql);
+    if (t->tags) free(t->tags);
+    if (t->ints) free(t->ints);
+    if (t->texts) {
+        for (int64_t i = 0; i < t->n_params; i++) {
+            if (t->texts[i]) free(t->texts[i]);
+        }
+        free(t->texts);
+    }
+    free(t);
+}
 
 typedef struct conn {
     sqlite3        *db;
@@ -126,12 +155,49 @@ static task_t *dequeue(conn_t *c) {
 // Op execution (runs on worker thread).
 // ---------------------------------------------------------------------------
 
+// Bind one param to the prepared stmt at the given 1-based index.
+// Uses SQLITE_TRANSIENT so sqlite copies TEXT data into stmt storage;
+// the param's strdup'd buffer is freed by free_task after step+finalize.
+static int bind_one(sqlite3_stmt *stmt, int idx, int64_t tag, int64_t int_val, char *text_val) {
+    switch (tag) {
+    case 1: return sqlite3_bind_int64(stmt, idx, int_val);
+    case 3: return sqlite3_bind_text(stmt, idx, text_val ? text_val : "", -1, SQLITE_TRANSIENT);
+    case 5: return sqlite3_bind_null(stmt, idx);
+    default: return SQLITE_MISUSE;
+    }
+}
+
 static void exec_one(conn_t *c, task_t *t) {
-    char *err = NULL;
-    int rc = sqlite3_exec(c->db, t->sql, NULL, NULL, &err);
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(c->db, t->sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+        if (stmt) sqlite3_finalize(stmt);
+        return;
+    }
+
+    for (int64_t i = 0; i < t->n_params; i++) {
+        rc = bind_one(stmt, (int)(i + 1),
+                      t->tags[i],
+                      t->ints[i],
+                      t->texts ? t->texts[i] : NULL);
+        if (rc != SQLITE_OK) {
+            completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+            sqlite3_finalize(stmt);
+            return;
+        }
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+        sqlite3_finalize(stmt);
+        return;
+    }
+    // For OP_EXEC we don't iterate rows; report changes() and finalize.
     int64_t changes = (int64_t)sqlite3_changes(c->db);
-    completion_signal(t->completion, rc, changes, err);
-    if (err) sqlite3_free(err);
+    sqlite3_finalize(stmt);
+    completion_signal(t->completion, SQLITE_OK, changes, NULL);
 }
 
 static void *worker_loop(void *arg) {
@@ -140,13 +206,11 @@ static void *worker_loop(void *arg) {
         task_t *t = dequeue(c);
         if (t->op == OP_SHUTDOWN) {
             completion_signal(t->completion, SQLITE_OK, 0, NULL);
-            if (t->sql) free(t->sql);
-            free(t);
+            free_task(t);
             break;
         }
         exec_one(c, t);
-        if (t->sql) free(t->sql);
-        free(t);
+        free_task(t);
     }
     return NULL;
 }
@@ -219,12 +283,32 @@ void _tin_sqlite_close(void *conn) {
 // _tin_sqlite_submit_exec: queue an exec task and return the
 // completion handle.  Tin awaits on the completion via the
 // SqliteCall awaitable.
-void *_tin_sqlite_submit_exec(void *conn, const char *sql) {
+//
+// `tags` / `ints` / `texts` are borrowed pointers into the Tin
+// caller's parallel arrays; the contents (including any TEXT data
+// the texts pointers reference) are deep-copied into the task so
+// the caller may drop its source arrays immediately.
+void *_tin_sqlite_submit_exec(void *conn, const char *sql,
+                              const int64_t *tags, const int64_t *ints,
+                              const char *const *texts, int64_t n_params) {
     conn_t *c = (conn_t *)conn;
     completion_t *done = completion_new();
     task_t *t = (task_t *)calloc(1, sizeof(*t));
     t->op = OP_EXEC;
     t->sql = sql ? strdup(sql) : NULL;
+    t->n_params = n_params;
+    if (n_params > 0) {
+        t->tags  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->ints  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->texts = (char **)calloc((size_t)n_params, sizeof(char *));
+        for (int64_t i = 0; i < n_params; i++) {
+            t->tags[i] = tags[i];
+            t->ints[i] = ints[i];
+            if (tags[i] == 3 && texts[i]) {
+                t->texts[i] = strdup(texts[i]);
+            }
+        }
+    }
     t->completion = done;
     enqueue(c, t);
     return done;

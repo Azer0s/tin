@@ -1,0 +1,70 @@
+// libs/sqlite/sqlite_test - smoke + correctness tests.
+//
+// Each test creates and drops an isolated table so the suite stays
+// deterministic across re-runs.  The shared db file lives in /tmp;
+// tests use unique table names to avoid collisions.
+
+use sqlite
+use assert
+
+const TEST_DB = "/tmp/tin_sqlite_test.db"
+
+fn fresh_db() sqlite::Connection =
+  return sqlite::open(TEST_DB).unwrap()
+
+test "open + exec + close round-trip" =
+  let db = fresh_db()
+  let n i64 = await db.exec("DROP TABLE IF EXISTS smoke_a", [])
+  assert::ok(n == 0)
+  let n2 i64 = await db.exec("CREATE TABLE smoke_a (id INTEGER)", [])
+  assert::ok(n2 == 0)
+  db.close()
+
+test "exec with Int param inserts row" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_b", [])
+  let _create i64 = await db.exec("CREATE TABLE smoke_b (id INTEGER)", [])
+  let r i64 = await db.exec("INSERT INTO smoke_b VALUES (?)", [Int(42)])
+  assert::ok(r == 1)
+  db.close()
+
+test "exec with Text param inserts row" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_c", [])
+  let _create i64 = await db.exec("CREATE TABLE smoke_c (name TEXT)", [])
+  let r i64 = await db.exec("INSERT INTO smoke_c VALUES (?)", [Text("alice")])
+  assert::ok(r == 1)
+  db.close()
+
+test "exec with mixed Int + Text params inserts row" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_d", [])
+  let _create i64 = await db.exec("CREATE TABLE smoke_d (id INTEGER, name TEXT)", [])
+  let r i64 = await db.exec("INSERT INTO smoke_d VALUES (?, ?)",
+    [Int(7), Text("bob")])
+  assert::ok(r == 1)
+  db.close()
+
+test "exec without params still works" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_e", [])
+  let _create i64 = await db.exec("CREATE TABLE smoke_e (x INTEGER)", [])
+  let r i64 = await db.exec("INSERT INTO smoke_e VALUES (99)", [])
+  assert::ok(r == 1)
+  db.close()
+
+test "exec on bad SQL returns negative error code" =
+  let db = fresh_db()
+  let n i64 = await db.exec("THIS IS NOT VALID SQL", [])
+  assert::ok(n < 0)
+  db.close()
+
+test "explicit Int / Text construction round-trips through match" =
+  match Int(42):
+    case Int(v): assert::ok(v == 42)
+    case Text(_): assert::ok(false)
+    case Null: assert::ok(false)
+  match Text("hi"):
+    case Int(_): assert::ok(false)
+    case Text(s): assert::ok(s == "hi")
+    case Null: assert::ok(false)
