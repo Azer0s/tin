@@ -221,6 +221,30 @@ test "exec_blocking + async exec interleave on the same Connection" =
   assert::ok(rows.get_i64(3, 0) == 4)
   db.close()
 
+test "Stmt: prepare-once + bind/step/reset loop inserts all rows" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS s_a", [])
+  let _create i64 = await db.exec("CREATE TABLE s_a (id INTEGER, name TEXT)", [])
+  let stmt = db.prepare("INSERT INTO s_a VALUES (?, ?)").unwrap()
+  for let i i64 = 0; i < 5; i = i + 1:
+    let _b1 i32 = stmt.bind_int(1, i)
+    let _b2 i32 = stmt.bind_text(2, "row")
+    let n i64 = stmt.step()
+    assert::ok(n == 1)
+    stmt.reset()
+  stmt.close()
+  let rows = await db.query("SELECT COUNT(*) FROM s_a", [])
+  assert::ok(rows.get_i64(0, 0) == 5)
+  db.close()
+
+test "Stmt: bad SQL returns Err from prepare" =
+  let db = fresh_db()
+  let r = db.prepare("THIS IS NOT VALID SQL")
+  match r:
+    case Ok(_): assert::ok(false)
+    case Err(_): assert::ok(true)
+  db.close()
+
 test "explicit Int / Text construction round-trips through match" =
   match Int(42):
     case Int(v): assert::ok(v == 42)

@@ -94,6 +94,15 @@ fn c_sqlite_submit_exec(conn *void, sql string, tags [i64], ints [i64], reals [f
 fn c_sqlite_submit_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_query")
 fn c_sqlite_exec_blocking(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) i64 = extern("_tin_sqlite_exec_blocking")
 
+fn c_stmt_prepare(conn *void, sql string, out_rc *i32) *void = extern("_tin_sqlite_stmt_prepare")
+fn c_stmt_finalize(p *void)                                  = extern("_tin_sqlite_stmt_finalize")
+fn c_stmt_bind_int(p *void, idx i32, v i64)             i32  = extern("_tin_sqlite_stmt_bind_int")
+fn c_stmt_bind_real(p *void, idx i32, v f64)            i32  = extern("_tin_sqlite_stmt_bind_real")
+fn c_stmt_bind_text(p *void, idx i32, s *char, n i64)   i32  = extern("_tin_sqlite_stmt_bind_text")
+fn c_stmt_bind_null(p *void, idx i32)                   i32  = extern("_tin_sqlite_stmt_bind_null")
+fn c_stmt_step(p *void)                                 i64  = extern("_tin_sqlite_stmt_step")
+fn c_stmt_reset(p *void)                                     = extern("_tin_sqlite_stmt_reset")
+
 fn c_completion_ready(p *void)        i32    = extern("_tin_sqlite_completion_ready")
 fn c_completion_take(p *void)         i64    = extern("_tin_sqlite_completion_take")
 fn c_completion_take_ptr(p *void)     *void  = extern("_tin_sqlite_completion_take_ptr")
@@ -196,6 +205,45 @@ struct SqliteQuery(awaitable[Rows]) =
 // Connection
 // ---------------------------------------------------------------------------
 
+// Stmt is a user-managed prepared statement.  Each bind/step/reset is
+// one direct C call; no Tin-side array marshalling.  Use for hot
+// inner loops where exec_blocking's per-call allocations show up.
+//
+//   let stmt = db.prepare("INSERT INTO t VALUES (?, ?)").unwrap()
+//   for let i i64 = 0; i < n; i = i + 1:
+//     stmt.bind_int(1, i)
+//     stmt.bind_text(2, "row")
+//     stmt.step()
+//     stmt.reset()
+//   stmt.close()
+//
+// All operations take the same per-conn mutex the async worker uses;
+// safe to interleave with `await db.exec(...)` on the same Connection.
+struct Stmt (io::Closeable) =
+  cell *rc::Cell[*void]   // owns the C stmt_handle_t*; dtor finalizes the stmt
+
+  fn bind_int(this Stmt, idx i64, v i64) i32 =
+    return c_stmt_bind_int(this.cell.payload(), idx as i32, v)
+
+  fn bind_real(this Stmt, idx i64, v f64) i32 =
+    return c_stmt_bind_real(this.cell.payload(), idx as i32, v)
+
+  fn bind_text(this Stmt, idx i64, v string) i32 =
+    return c_stmt_bind_text(this.cell.payload(), idx as i32, c_str_data(v), len(v))
+
+  fn bind_null(this Stmt, idx i64) i32 =
+    return c_stmt_bind_null(this.cell.payload(), idx as i32)
+
+  // step returns changes() on SQLITE_DONE, -1 on SQLITE_ROW (caller
+  // should iterate via the query-row path), or -(error_code).
+  fn step(this Stmt) i64 = return c_stmt_step(this.cell.payload())
+
+  fn reset(this Stmt) = c_stmt_reset(this.cell.payload())
+
+  fn io::Closeable::close(this Stmt) =
+    c_stmt_finalize(this.cell.payload())
+    this.cell.set(nil)
+
 struct Connection (io::Closeable) =
   cell *rc::Cell[*void]   // owns the C conn_t*; dtor sends SHUTDOWN + joins
 
@@ -289,6 +337,16 @@ struct Connection (io::Closeable) =
           tags[i] = 5
     return c_sqlite_exec_blocking(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
 
+  // prepare compiles a SQL statement into a reusable Stmt.  Use for
+  // hot loops where exec_blocking's per-call array marshalling is the
+  // bottleneck.  Returns Err on compile error.
+  fn prepare(this Connection, sql string) Result[Stmt, errors::Err] =
+    let rc i32 = 0
+    let p *void = c_stmt_prepare(this.cell.payload(), sql, &rc)
+    if p == nil:
+      return Err(ExecFailed(rc, "prepare failed"))
+    return Ok(Stmt{cell: rc::Cell[*void].new(p, c_stmt_finalize)})
+
   // run is the SqlQuery-shaped twin of exec: takes the bundle the
   // `_sql` macro produces and threads sql + params through to exec.
   fn run(this Connection, q SqlQuery) SqliteCall[i64] =
@@ -317,7 +375,7 @@ fn open(path string) Result[Connection, errors::Err] =
 export {
   Connection, SqliteError,
   SqliteCall, SqliteQuery,
-  SqlValue, SqlQuery, Rows,
+  SqlValue, SqlQuery, Rows, Stmt,
   sql,
   open,
 } as sqlite

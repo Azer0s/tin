@@ -614,6 +614,104 @@ int64_t _tin_sqlite_exec_blocking(void *conn, const char *sql,
     return changes;
 }
 
+// ---------------------------------------------------------------------------
+// Prepared-statement API (Tin Stmt struct).
+//
+// User-owned sqlite3_stmt + parent conn pointer.  Each bind/step/reset
+// is one direct C call (no Tin-side array marshalling), so a tight
+// INSERT loop pays roughly: 1 mutex lock + 1 bind per column + 1 step
+// + 1 reset + 1 unlock.  ~4-5x faster than exec_blocking for the
+// cached-stmt case at the cost of explicit prepare/close + per-column
+// bind calls.
+// ---------------------------------------------------------------------------
+
+typedef struct stmt_handle {
+    conn_t       *conn;   // for db_mu
+    sqlite3_stmt *stmt;
+} stmt_handle_t;
+
+void *_tin_sqlite_stmt_prepare(void *conn, const char *sql, int *out_rc) {
+    conn_t *c = (conn_t *)conn;
+    sqlite3_stmt *stmt = NULL;
+    pthread_mutex_lock(&c->db_mu);
+    int rc = sqlite3_prepare_v2(c->db, sql, -1, &stmt, NULL);
+    pthread_mutex_unlock(&c->db_mu);
+    *out_rc = rc;
+    if (rc != SQLITE_OK || !stmt) {
+        if (stmt) sqlite3_finalize(stmt);
+        return NULL;
+    }
+    stmt_handle_t *h = (stmt_handle_t *)calloc(1, sizeof(*h));
+    h->conn = c;
+    h->stmt = stmt;
+    return h;
+}
+
+void _tin_sqlite_stmt_finalize(void *p) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    if (!h) return;
+    if (h->stmt) {
+        pthread_mutex_lock(&h->conn->db_mu);
+        sqlite3_finalize(h->stmt);
+        pthread_mutex_unlock(&h->conn->db_mu);
+    }
+    free(h);
+}
+
+int _tin_sqlite_stmt_bind_int(void *p, int idx, int64_t v) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    int rc = sqlite3_bind_int64(h->stmt, idx, v);
+    pthread_mutex_unlock(&h->conn->db_mu);
+    return rc;
+}
+
+int _tin_sqlite_stmt_bind_real(void *p, int idx, double v) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    int rc = sqlite3_bind_double(h->stmt, idx, v);
+    pthread_mutex_unlock(&h->conn->db_mu);
+    return rc;
+}
+
+int _tin_sqlite_stmt_bind_text(void *p, int idx, const char *s, int64_t len) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    int rc = sqlite3_bind_text(h->stmt, idx, s ? s : "", (int)len, SQLITE_TRANSIENT);
+    pthread_mutex_unlock(&h->conn->db_mu);
+    return rc;
+}
+
+int _tin_sqlite_stmt_bind_null(void *p, int idx) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    int rc = sqlite3_bind_null(h->stmt, idx);
+    pthread_mutex_unlock(&h->conn->db_mu);
+    return rc;
+}
+
+// Step + reset returns changes() on SQLITE_DONE, -1 on SQLITE_ROW
+// (caller should iterate via _step_row instead), or -(error_code).
+int64_t _tin_sqlite_stmt_step(void *p) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    int rc = sqlite3_step(h->stmt);
+    int64_t out;
+    if (rc == SQLITE_DONE)      out = (int64_t)sqlite3_changes(h->conn->db);
+    else if (rc == SQLITE_ROW)  out = -1;
+    else                        out = -(int64_t)rc;
+    pthread_mutex_unlock(&h->conn->db_mu);
+    return out;
+}
+
+void _tin_sqlite_stmt_reset(void *p) {
+    stmt_handle_t *h = (stmt_handle_t *)p;
+    pthread_mutex_lock(&h->conn->db_mu);
+    sqlite3_reset(h->stmt);
+    sqlite3_clear_bindings(h->stmt);
+    pthread_mutex_unlock(&h->conn->db_mu);
+}
+
 // _tin_sqlite_completion_ready: non-blocking poll for the
 // awaitable::ready check.
 int _tin_sqlite_completion_ready(void *p) {

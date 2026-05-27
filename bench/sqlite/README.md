@@ -12,8 +12,9 @@ statement.
 | `rs_inserts`            | Rust: `rusqlite` (bundled libsqlite3)         |
 | `cr_inserts`            | Crystal: `crystal-lang/crystal-sqlite3`       |
 | `go_inserts`            | Go: `database/sql` + `mattn/go-sqlite3` (cgo) |
-| `tin_inserts`           | Tin: `libs/sqlite` `await db.exec(...)` (async via worker thread) |
-| `tin_inserts_blocking`  | Tin: `libs/sqlite` `db.exec_blocking(...)` (caller-thread, bypasses worker) |
+| `tin_inserts`           | Tin: `await db.exec(...)` (async via worker thread) |
+| `tin_inserts_blocking`  | Tin: `db.exec_blocking(...)` (caller-thread, params marshalled per call) |
+| `tin_inserts_prepared`  | Tin: `db.prepare(...)` + `stmt.bind_*` + `stmt.step` (no per-call marshalling) |
 
 All six drive the same SQLite engine and the same query plan; the
 gap is binding overhead per call.
@@ -24,14 +25,14 @@ gap is binding overhead per call.
 N=10k / 100k / 1M.  Numbers below are ops/sec (median of a few cold-db
 runs).
 
-| N         | C     | Rust  | Crystal | Go    | Tin (blocking) | Tin (async)  |
-|-----------|-------|-------|---------|-------|----------------|--------------|
-| 10 000    | 3.2 M | 4.8 M | 2.6 M   | 1.4 M | 1.6 M          | 89 k         |
-| 100 000   | 3.3 M | 5.0 M | 2.7 M   | 1.4 M | 1.9 M          | 73 k         |
-| 1 000 000 | 3.3 M | 4.4 M | 2.8 M   | 1.3 M | 1.9 M          | 72 k         |
+| N         | C     | Rust  | Crystal | Go    | Tin (Stmt) | Tin (blocking) | Tin (async)  |
+|-----------|-------|-------|---------|-------|------------|----------------|--------------|
+| 10 000    | 3.3 M | 4.8 M | 2.6 M   | 1.4 M | 2.4 M      | 1.6 M          | 89 k         |
+| 100 000   | 3.3 M | 5.0 M | 2.7 M   | 1.4 M | 2.7 M      | 1.9 M          | 73 k         |
+| 1 000 000 | 3.3 M | 4.4 M | 2.8 M   | 1.3 M | 2.7 M      | 1.9 M          | 72 k         |
 
-Two Tin numbers reflect the two API shapes the library offers and the
-very different per-call costs.
+Three Tin numbers reflect three points on the convenience/throughput
+curve.
 
 ## Two Tin API shapes, two cost profiles
 
@@ -72,16 +73,34 @@ entirely.  That cuts per-op overhead from ~10 µs to roughly the same
 allocation+marshalling cost C-via-FFI bindings carry; throughput jumps
 from 72-89 k ops/sec to 1.6-1.9 M ops/sec (a 20-25× win).
 
+A third path - `db.prepare(sql)` + `stmt.bind_*` + `stmt.step` -
+keeps a sqlite3_stmt across iterations and avoids the per-call array
+marshalling entirely.  Each bind/step/reset is one FFI call.
+For 1M cached INSERTs this lands at 2.7 M ops/sec, ~80% of C and
+faster than Go/Crystal:
+
+```tin
+let stmt = db.prepare("INSERT INTO bench (i, name) VALUES (?, ?)").unwrap()
+for let i i64 = 0; i < n; i = i + 1:
+  stmt.bind_int(1, i)
+  stmt.bind_text(2, "row")
+  stmt.step()
+  stmt.reset()
+stmt.close()
+```
+
 **When to pick which:**
 - Use `await db.exec(...)` when the call may be slow (long SELECT,
   contended write, big BLOB write).  The worker thread eats the
   blocking time so the calling fiber's worker stays free to schedule
   other work.
-- Use `db.exec_blocking(...)` when you know the call is fast (cached
-  stmt, simple INSERT/UPDATE).  No fiber park, no queue, but the
-  calling thread is pinned inside sqlite for the duration.
+- Use `db.exec_blocking(...)` when the call is fast and the call
+  shape changes per iteration.  Same convenience as exec, no fiber
+  hop, but still allocates the params arrays per call.
+- Use `db.prepare(...)` + Stmt when you have a hot loop with a fixed
+  SQL string and want C-class throughput.
 
-The two paths share the same Connection, the same prepared-statement
+All three paths share the same Connection, the same prepared-statement
 cache, and serialize against each other through a per-conn mutex - so
 mixing them on one Connection is safe.  In pure-async or pure-blocking
 workloads the mutex is uncontended.
