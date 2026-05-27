@@ -25,10 +25,14 @@
 // mutate the protected value while the lock is held; load/store work
 // for snapshot semantics.
 //
-// Ownership: Atomic[t] is `#no_copy` and lives on the heap. `new`
-// returns `*Atomic[t]`, callers share the cell via standard tin pointer
-// ARC (let b = a bumps the refcount on the *Atomic, scope exit drops
-// it, the deinit fires on the last drop and frees the foreign C cell).
+// Copy semantics: Atomic[t] holds an *rc::Cell[*void] for the underlying
+// C cell, so `let b = a` is a refcount bump (both share the cell) and
+// the underlying allocation is freed exactly once when the last owner
+// drops. No bespoke deinit on Atomic -- Cell's destructor wires the
+// per-impl free function (tin_atomic_free for the lock-free path,
+// tin_atomic_obj_free for the obj path).
+
+use rc
 
 // Numeric types -- gate for add/cas. Floats and bool excluded (no
 // meaningful atomic int-add or compare for them).
@@ -41,10 +45,8 @@ type w2 = i16 | u16
 type w1 = i8 | u8 | bool
 type primitive = i64 | u64 | i32 | u32 | i16 | u16 | i8 | u8 | f64 | f32 | bool
 
-// Fused alloc + initial-store. Returning the foreign block straight
-// from the call (no `let raw = ...` temp) keeps the value off any code
-// path that would name it as a stand-alone binding.
-fn tin_atomic_alloc_init(size i64, initial *void) *void = extern("_tin_atomic_alloc_init")
+// Generic slot allocator (calloc-zero) for primitives.
+fn tin_atomic_alloc(size i64) *void                  = extern("_tin_atomic_alloc")
 fn tin_atomic_free(p *void)                          = extern("_tin_atomic_free")
 
 // Per-width load/store.
@@ -70,8 +72,7 @@ fn tin_atomic_cas_i8(a *void, old i8, nw i8) i8      = extern("_tin_atomic_cas_i
 // Mutex-backed slot for non-primitive t. The kind discriminator picks
 // the shape inside the slot (string/array vs any vs fn) so store/load
 // retain/release the embedded payload pointer at the right offset.
-// Fused obj_new + initial-store: see tin_atomic_alloc_init.
-fn tin_atomic_obj_new_init(size i64, rc_kind i32, initial *void) *void = extern("_tin_atomic_obj_new_init")
+fn tin_atomic_obj_new(size i64, rc_kind i32) *void   = extern("_tin_atomic_obj_new")
 fn tin_atomic_obj_free(p *void)                      = extern("_tin_atomic_obj_free")
 fn tin_atomic_obj_load(p *void, out *void)           = extern("_tin_atomic_obj_load")
 fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_store")
@@ -81,115 +82,129 @@ fn tin_atomic_obj_store(p *void, src *void)          = extern("_tin_atomic_obj_s
 fn tin_atomic_obj_lock(p *void) *void                = extern("_tin_atomic_obj_lock_payload")
 fn tin_atomic_obj_unlock(p *void)                    = extern("_tin_atomic_obj_unlock")
 
-struct {#no_copy} Atomic[t] =
-  _ptr *void
+struct Atomic[t] =
+  _cell *rc::Cell[*void]
 
   // ptr borrows the underlying C cell. Pure forwarding -- keeps every
   // load/store/add/cas/for_locked one line and the compiler can fold
   // the chain.
-  fn ptr(this *Atomic[t]) *void = return this._ptr
+  fn ptr(this Atomic[t]) *void = return this._cell.payload()
 
-  static fn new(v t) *Atomic[t] where t is w8 =
-    return &Atomic[t]{_ptr: tin_atomic_alloc_init(8, &v as *void)}
 
-  static fn new(v t) *Atomic[t] where t is w4 =
-    return &Atomic[t]{_ptr: tin_atomic_alloc_init(4, &v as *void)}
+  static fn new(v t) Atomic[t] where t is w8 =
+    let raw = tin_atomic_alloc(8)
 
-  static fn new(v t) *Atomic[t] where t is w2 =
-    return &Atomic[t]{_ptr: tin_atomic_alloc_init(2, &v as *void)}
+    tin_atomic_store_64(raw, &v as *void)
 
-  static fn new(v t) *Atomic[t] where t is w1 =
-    return &Atomic[t]{_ptr: tin_atomic_alloc_init(1, &v as *void)}
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
-  static fn new(v t) *Atomic[t] where t is not primitive =
-    return &Atomic[t]{_ptr: tin_atomic_obj_new_init(sizeof(t), isrc(t), &v as *void)}
+  static fn new(v t) Atomic[t] where t is w4 =
+    let raw = tin_atomic_alloc(4)
 
-  // deinit fires when the last *Atomic[t] reference drops. The
-  // primitive path is plain free; the obj path additionally drops
-  // the rc-slot for the protected payload.
-  fn deinit(this Atomic[t]) where t is primitive =
-    tin_atomic_free(this._ptr)
+    tin_atomic_store_32(raw, &v as *void)
 
-  fn deinit(this Atomic[t]) where t is not primitive =
-    tin_atomic_obj_free(this._ptr)
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
 
-  fn load(this *Atomic[t]) t where t is w8 =
+  static fn new(v t) Atomic[t] where t is w2 =
+    let raw = tin_atomic_alloc(2)
+
+    tin_atomic_store_16(raw, &v as *void)
+
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+
+  static fn new(v t) Atomic[t] where t is w1 =
+    let raw = tin_atomic_alloc(1)
+
+    tin_atomic_store_8(raw, &v as *void)
+
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_free)}
+
+  static fn new(v t) Atomic[t] where t is not primitive =
+    let raw = tin_atomic_obj_new(sizeof(t), isrc(t))
+
+    tin_atomic_obj_store(raw, &v as *void)
+
+    return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_obj_free)}
+
+
+  fn load(this Atomic[t]) t where t is w8 =
     let out t
 
     tin_atomic_load_64(this.ptr(), &out as *void)
 
     return out
 
-  fn load(this *Atomic[t]) t where t is w4 =
+  fn load(this Atomic[t]) t where t is w4 =
     let out t
 
     tin_atomic_load_32(this.ptr(), &out as *void)
 
     return out
 
-  fn load(this *Atomic[t]) t where t is w2 =
+  fn load(this Atomic[t]) t where t is w2 =
     let out t
 
     tin_atomic_load_16(this.ptr(), &out as *void)
 
     return out
 
-  fn load(this *Atomic[t]) t where t is w1 =
+  fn load(this Atomic[t]) t where t is w1 =
     let out t
 
     tin_atomic_load_8(this.ptr(), &out as *void)
 
     return out
 
-  fn load(this *Atomic[t]) t where t is not primitive =
+  fn load(this Atomic[t]) t where t is not primitive =
     let out t
 
     tin_atomic_obj_load(this.ptr(), &out as *void)
 
     return out
 
-  fn store(this *Atomic[t], v t) where t is w8 =
+
+  fn store(this Atomic[t], v t) where t is w8 =
     tin_atomic_store_64(this.ptr(), &v as *void)
 
-  fn store(this *Atomic[t], v t) where t is w4 =
+  fn store(this Atomic[t], v t) where t is w4 =
     tin_atomic_store_32(this.ptr(), &v as *void)
 
-  fn store(this *Atomic[t], v t) where t is w2 =
+  fn store(this Atomic[t], v t) where t is w2 =
     tin_atomic_store_16(this.ptr(), &v as *void)
 
-  fn store(this *Atomic[t], v t) where t is w1 =
+  fn store(this Atomic[t], v t) where t is w1 =
     tin_atomic_store_8(this.ptr(), &v as *void)
 
-  fn store(this *Atomic[t], v t) where t is not primitive =
+  fn store(this Atomic[t], v t) where t is not primitive =
     tin_atomic_obj_store(this.ptr(), &v as *void)
 
-  // add: numeric only, per-width.
-  fn add(this *Atomic[t], d t) t where t is i64 || u64 =
+
+  fn add(this Atomic[t], d t) t where t is i64 || u64 =
     return tin_atomic_add_i64(this.ptr(), d as i64) as t
 
-  fn add(this *Atomic[t], d t) t where t is i32 || u32 =
+  fn add(this Atomic[t], d t) t where t is i32 || u32 =
     return tin_atomic_add_i32(this.ptr(), d as i32) as t
 
-  fn add(this *Atomic[t], d t) t where t is i16 || u16 =
+  fn add(this Atomic[t], d t) t where t is i16 || u16 =
     return tin_atomic_add_i16(this.ptr(), d as i16) as t
 
-  fn add(this *Atomic[t], d t) t where t is i8 || u8 =
+  fn add(this Atomic[t], d t) t where t is i8 || u8 =
     return tin_atomic_add_i8(this.ptr(), d as i8) as t
 
-  // cas: numeric only, per-width.
-  fn cas(this *Atomic[t], old t, nw t) t where t is i64 || u64 =
+
+  fn cas(this Atomic[t], old t, nw t) t where t is i64 || u64 =
     return tin_atomic_cas_i64(this.ptr(), old as i64, nw as i64) as t
 
-  fn cas(this *Atomic[t], old t, nw t) t where t is i32 || u32 =
+  fn cas(this Atomic[t], old t, nw t) t where t is i32 || u32 =
     return tin_atomic_cas_i32(this.ptr(), old as i32, nw as i32) as t
 
-  fn cas(this *Atomic[t], old t, nw t) t where t is i16 || u16 =
+  fn cas(this Atomic[t], old t, nw t) t where t is i16 || u16 =
     return tin_atomic_cas_i16(this.ptr(), old as i16, nw as i16) as t
 
-  fn cas(this *Atomic[t], old t, nw t) t where t is i8 || u8 =
+  fn cas(this Atomic[t], old t, nw t) t where t is i8 || u8 =
     return tin_atomic_cas_i8(this.ptr(), old as i8, nw as i8) as t
 
-  // for_locked: non-primitive only.
+  //
   // Run a callback with the protected value held under the lock.
   // The callback receives `*t`; mutations through the pointer are
   // visible to subsequent load() callers. Atomicity is maintained
@@ -200,7 +215,7 @@ struct {#no_copy} Atomic[t] =
   // free C11 atomics don't have the concept of an arbitrary
   // user-defined critical section.
 
-  fn for_locked(this *Atomic[t], f fn(*t)) where t is not primitive =
+  fn for_locked(this Atomic[t], f fn(*t)) where t is not primitive =
     let payload *void = tin_atomic_obj_lock(this.ptr())
 
     // defer the unlock so a panic in `f` can't leave the cell locked

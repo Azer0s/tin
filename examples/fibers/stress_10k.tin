@@ -5,7 +5,7 @@
 
 use sync
 
-var counter *sync::Atomic[i64]
+var counter sync::Atomic[i64]
 var done_ch sync::Channel[i64]
 
 fn{#async} inc_fiber() =
