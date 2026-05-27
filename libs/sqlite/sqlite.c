@@ -11,8 +11,12 @@
 //   Low level:  stmt.bind_*(...) + stmt.step() + stmt.exec_*(...)
 // Both blocking; both share the same per-conn prepared-statement cache.
 
+// strdup landed in POSIX.1-2008, so we need _POSIX_C_SOURCE >= 200809L.
+// Lower feature-test macros (POSIX.1-2001 = 200112L) compile on macOS via
+// Apple's permissive headers but fail under glibc with -Werror-implicit-
+// function-declaration.
 #ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200112L
+#define _POSIX_C_SOURCE 200809L
 #endif
 
 #include <pthread.h>
