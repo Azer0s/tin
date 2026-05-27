@@ -1,4 +1,4 @@
-//!+sqlite_worker.c -- -lsqlite3
+//!+sqlite.c -- -lsqlite3
 // libs/sqlite - blocking SQLite bindings.
 //
 // All operations run synchronously on the caller's thread.  A per-

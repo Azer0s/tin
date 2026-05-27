@@ -1,4 +1,4 @@
-// libs/sqlite/sqlite_worker - blocking SQLite bindings.
+// libs/sqlite/sqlite.c - blocking SQLite bindings.
 //
 // All sqlite3 calls run directly on the caller's thread; there's no
 // dedicated worker pthread or task queue.  A per-connection mutex
