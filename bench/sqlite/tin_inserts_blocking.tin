@@ -30,8 +30,15 @@ fn{#async} main(args [string]) =
 
   let t0 i64 = measure::now_us()
 
+  // Hoist the literal-string ops -- c_str_data + len are pure but
+  // Tin doesn't constant-fold extern calls, so without this they run
+  // every iteration.
+  let row_text string = "row"
+  let sql string = "INSERT INTO bench (i, name) VALUES (?, ?)"
   for let i i64 = 0; i < total; i = i + 1:
-    let _n i64 = db.exec_blocking("INSERT INTO bench (i, name) VALUES (?, ?)", [Int(i), Text("row")])
+    // exec_is takes raw primitives directly: no SqlValue boxing,
+    // no array allocation, one FFI call per row.
+    let _n i64 = db.exec_is(sql, i, row_text)
 
   let t1 i64 = measure::now_us()
 

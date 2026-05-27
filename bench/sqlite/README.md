@@ -13,8 +13,9 @@ statement.
 | `cr_inserts`            | Crystal: `crystal-lang/crystal-sqlite3`       |
 | `go_inserts`            | Go: `database/sql` + `mattn/go-sqlite3` (cgo) |
 | `tin_inserts`           | Tin: `await db.exec(...)` (async via worker thread) |
-| `tin_inserts_blocking`  | Tin: `db.exec_blocking(...)` (caller-thread, params marshalled per call) |
-| `tin_inserts_prepared`  | Tin: `db.prepare(...)` + `stmt.bind_*` + `stmt.step` (no per-call marshalling) |
+| `tin_inserts_blocking`  | Tin: `db.exec_is(sql, i, s)` (caller-thread, raw primitives, cached stmt) |
+| `tin_inserts_prepared`  | Tin: `db.prepare(...)` + per-column `stmt.bind_*` + `stmt.step` |
+| `tin_inserts_multibind` | Tin: `db.prepare(...)` + `stmt.exec_is(i, s)` (bind+step+reset in one FFI call) |
 
 All six drive the same SQLite engine and the same query plan; the
 gap is binding overhead per call.
@@ -25,14 +26,16 @@ gap is binding overhead per call.
 N=10k / 100k / 1M.  Numbers below are ops/sec (median of a few cold-db
 runs).
 
-| N         | C     | Rust  | Crystal | Go    | Tin (Stmt) | Tin (blocking) | Tin (async)  |
-|-----------|-------|-------|---------|-------|------------|----------------|--------------|
-| 10 000    | 3.3 M | 4.8 M | 2.6 M   | 1.4 M | 2.4 M      | 1.6 M          | 89 k         |
-| 100 000   | 3.3 M | 5.0 M | 2.7 M   | 1.4 M | 2.7 M      | 1.9 M          | 73 k         |
-| 1 000 000 | 3.3 M | 4.4 M | 2.8 M   | 1.3 M | 2.7 M      | 1.9 M          | 72 k         |
+| N         | C     | Rust  | Crystal | Go    | Tin (db.exec_is) | Tin (Stmt.exec_is) | Tin (Stmt.bind+step) | Tin (await db.exec) |
+|-----------|-------|-------|---------|-------|------------------|--------------------|----------------------|---------------------|
+| 10 000    | 3.3 M | 4.8 M | 2.6 M   | 1.4 M | 2.9 M            | 2.7 M              | 2.4 M                | 89 k                |
+| 100 000   | 3.3 M | 5.0 M | 2.7 M   | 1.4 M | 2.9 M            | 2.9 M              | 2.7 M                | 73 k                |
+| 1 000 000 | 3.4 M | 4.4 M | 2.8 M   | 1.3 M | **3.0 M**        | 3.0 M              | 2.7 M                | 72 k                |
 
-Three Tin numbers reflect three points on the convenience/throughput
-curve.
+Tin's high-level `db.exec_is(sql, i, s)` lands at **3.0 M ops/sec on 1 M
+inserts — ~6% faster than Crystal**, 87% of C.  The `Stmt`-based variants
+are slightly faster on tiny N (warmup amortizes better) and identical at
+scale.
 
 ## Two Tin API shapes, two cost profiles
 

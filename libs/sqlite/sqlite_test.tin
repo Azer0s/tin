@@ -237,6 +237,20 @@ test "Stmt: prepare-once + bind/step/reset loop inserts all rows" =
   assert::ok(rows.get_i64(0, 0) == 5)
   db.close()
 
+test "Stmt: exec_is combinator binds int+text + step in one call" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS s_b", [])
+  let _create i64 = await db.exec("CREATE TABLE s_b (id INTEGER, name TEXT)", [])
+  let stmt = db.prepare("INSERT INTO s_b VALUES (?, ?)").unwrap()
+  for let i i64 = 0; i < 5; i = i + 1:
+    let n i64 = stmt.exec_is(i, "row")
+    assert::ok(n == 1)
+  stmt.close()
+  let rows = await db.query("SELECT COUNT(*), MAX(id) FROM s_b", [])
+  assert::ok(rows.get_i64(0, 0) == 5)
+  assert::ok(rows.get_i64(0, 1) == 4)
+  db.close()
+
 test "Stmt: bad SQL returns Err from prepare" =
   let db = fresh_db()
   let r = db.prepare("THIS IS NOT VALID SQL")

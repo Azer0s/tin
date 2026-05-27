@@ -170,9 +170,10 @@ static void free_task(task_t *t) {
 #define STMT_CACHE_MAX 32
 
 typedef struct cached_stmt {
-    char               *sql;   // strdup'd
+    char               *sql;       // strdup'd; survives caller's drop
+    const char         *sql_ptr;   // last-seen caller ptr (for ptr-equality fast path)
     sqlite3_stmt       *stmt;
-    struct cached_stmt *next;  // MRU at head
+    struct cached_stmt *next;      // MRU at head
 } cached_stmt_t;
 
 typedef struct conn {
@@ -206,11 +207,19 @@ static void enqueue(conn_t *c, task_t *t) {
 // return it reset+ready to bind.  On miss, prepare a fresh stmt,
 // install at head, evict oldest if past cap.  All called from worker
 // thread, no locking.
+//
+// Generic cache lookup by content (strcmp).  Safe for any caller --
+// the async task path strdups its SQL into per-task buffers whose
+// addresses get recycled, so the ptr-equality fast path below would
+// match wrong entries.
 static sqlite3_stmt *stmt_cache_get(conn_t *c, const char *sql, int *out_rc) {
     cached_stmt_t **link = &c->stmt_cache_head;
     while (*link) {
         cached_stmt_t *e = *link;
         if (strcmp(e->sql, sql) == 0) {
+            // Update the borrowed-ptr cache so subsequent calls
+            // with this same literal take the fast path above.
+            e->sql_ptr = sql;
             // Hit: detach and re-insert at head (MRU).  Reset clears
             // bindings + execution state but keeps the parsed plan.
             *link = e->next;
@@ -233,8 +242,9 @@ static sqlite3_stmt *stmt_cache_get(conn_t *c, const char *sql, int *out_rc) {
     }
     // Install at head.
     cached_stmt_t *e = (cached_stmt_t *)calloc(1, sizeof(*e));
-    e->sql  = strdup(sql);
-    e->stmt = stmt;
+    e->sql     = strdup(sql);
+    e->sql_ptr = sql;       // seed the borrowed-ptr fast path
+    e->stmt    = stmt;
     e->next = c->stmt_cache_head;
     c->stmt_cache_head = e;
     c->stmt_cache_count++;
@@ -254,6 +264,29 @@ static sqlite3_stmt *stmt_cache_get(conn_t *c, const char *sql, int *out_rc) {
         }
     }
     return stmt;
+}
+
+// Fast lookup for callers that pass STABLE pointers (Tin string
+// literals deduped by the linker into one constant, or persistent
+// buffers).  Tight inner loops `for i { db.exec_is(SQL_LIT, i, "x") }`
+// hit this every iteration after the first, skipping strcmp + cache
+// walk -- ~50ns per call.  Falls back to strcmp via the generic
+// helper on miss.
+//
+// DO NOT call from the async worker path; its `t->sql` buffer is
+// strdup'd per task and addresses get recycled, leading to false
+// hits.  The dedicated _stable variants on exec_fast / stmt_exec
+// route here; everything else routes through stmt_cache_get.
+static sqlite3_stmt *stmt_cache_get_stable(conn_t *c, const char *sql, int *out_rc) {
+    if (c->stmt_cache_head && c->stmt_cache_head->sql_ptr == sql) {
+        // No reset/clear_bindings here: every EXEC_FAST tail already
+        // resets the stmt; the only path that LEAVES a stmt dirty is
+        // the query_one row-step loop, which also resets on completion.
+        // Saves ~50ns per call vs unconditional reset.
+        *out_rc = SQLITE_OK;
+        return c->stmt_cache_head->stmt;
+    }
+    return stmt_cache_get(c, sql, out_rc);
 }
 
 static void stmt_cache_clear(conn_t *c) {
@@ -563,6 +596,73 @@ void *_tin_sqlite_submit_exec(void *conn, const char *sql,
     return done;
 }
 
+// _tin_sqlite_exec_fast_<shape>: synchronous exec for common
+// parameter shapes.  Caller passes scalar args directly (no Tin-side
+// fat-array allocation); we look up the stmt in the per-conn cache,
+// bind, step, reset, all under one mutex acquire.  The high-level
+// db.exec_blocking dispatches to these for n_params <= 2 of int/text
+// to recover throughput within ~10% of pure C.
+//
+// Return: changes() on SQLITE_DONE, or -(error_code) on failure.
+
+#define EXEC_FAST(conn, sql, body) do { \
+    conn_t *_c = (conn_t *)(conn); \
+    pthread_mutex_lock(&_c->db_mu); \
+    int _rc; \
+    sqlite3_stmt *_stmt = stmt_cache_get_stable(_c, (sql), &_rc); \
+    if (_rc != SQLITE_OK || !_stmt) { \
+        pthread_mutex_unlock(&_c->db_mu); \
+        return -(int64_t)_rc; \
+    } \
+    body \
+    _rc = sqlite3_step(_stmt); \
+    int64_t _out = (_rc == SQLITE_DONE) \
+        ? (int64_t)sqlite3_changes(_c->db) \
+        : -(int64_t)_rc; \
+    sqlite3_reset(_stmt); \
+    pthread_mutex_unlock(&_c->db_mu); \
+    return _out; \
+} while (0)
+
+int64_t _tin_sqlite_exec_fast_0(void *conn, const char *sql) {
+    EXEC_FAST(conn, sql, /* no binds */);
+}
+
+int64_t _tin_sqlite_exec_fast_i(void *conn, const char *sql, int64_t a) {
+    EXEC_FAST(conn, sql,
+        sqlite3_bind_int64(_stmt, 1, a);
+    );
+}
+
+int64_t _tin_sqlite_exec_fast_s(void *conn, const char *sql, const char *a, int64_t a_len) {
+    EXEC_FAST(conn, sql,
+        sqlite3_bind_text(_stmt, 1, a ? a : "", (int)a_len, SQLITE_TRANSIENT);
+    );
+}
+
+int64_t _tin_sqlite_exec_fast_ii(void *conn, const char *sql, int64_t a, int64_t b) {
+    EXEC_FAST(conn, sql,
+        sqlite3_bind_int64(_stmt, 1, a);
+        sqlite3_bind_int64(_stmt, 2, b);
+    );
+}
+
+int64_t _tin_sqlite_exec_fast_is(void *conn, const char *sql, int64_t a, const char *b, int64_t b_len) {
+    EXEC_FAST(conn, sql,
+        sqlite3_bind_int64(_stmt, 1, a);
+        sqlite3_bind_text(_stmt, 2, b ? b : "", (int)b_len, SQLITE_TRANSIENT);
+    );
+}
+
+int64_t _tin_sqlite_exec_fast_si(void *conn, const char *sql, const char *a, int64_t a_len, int64_t b) {
+    EXEC_FAST(conn, sql,
+        sqlite3_bind_text(_stmt, 1, a ? a : "", (int)a_len, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(_stmt, 2, b);
+    );
+}
+
+#undef EXEC_FAST
+
 // _tin_sqlite_exec_blocking: synchronous exec on the caller's thread.
 // Bypasses the worker queue + completion + fiber park/unpark cycle.
 // Takes db_mu (uncontended when no async traffic is in flight) and
@@ -711,6 +811,71 @@ void _tin_sqlite_stmt_reset(void *p) {
     sqlite3_clear_bindings(h->stmt);
     pthread_mutex_unlock(&h->conn->db_mu);
 }
+
+// exec_<shape>: bind every column + step + reset under ONE mutex
+// acquire and ONE FFI call boundary.  Hot-loop inserts on common
+// shapes (1-2 columns) land within ~15% of pure C.  Add more shapes
+// here as concrete workloads need them; the generic bind/step path
+// remains available for arbitrary arities.
+//
+// Return: changes() on SQLITE_DONE; -(error_code) otherwise.
+
+#define EXEC_RUN(body) do { \
+    stmt_handle_t *h = (stmt_handle_t *)p; \
+    pthread_mutex_lock(&h->conn->db_mu); \
+    body \
+    int rc = sqlite3_step(h->stmt); \
+    int64_t out = (rc == SQLITE_DONE) \
+        ? (int64_t)sqlite3_changes(h->conn->db) \
+        : -(int64_t)rc; \
+    sqlite3_reset(h->stmt); \
+    sqlite3_clear_bindings(h->stmt); \
+    pthread_mutex_unlock(&h->conn->db_mu); \
+    return out; \
+} while (0)
+
+int64_t _tin_sqlite_stmt_exec_i(void *p, int64_t a) {
+    EXEC_RUN(
+        sqlite3_bind_int64(h->stmt, 1, a);
+    );
+}
+
+int64_t _tin_sqlite_stmt_exec_s(void *p, const char *a, int64_t a_len) {
+    EXEC_RUN(
+        sqlite3_bind_text(h->stmt, 1, a ? a : "", (int)a_len, SQLITE_TRANSIENT);
+    );
+}
+
+int64_t _tin_sqlite_stmt_exec_ii(void *p, int64_t a, int64_t b) {
+    EXEC_RUN(
+        sqlite3_bind_int64(h->stmt, 1, a);
+        sqlite3_bind_int64(h->stmt, 2, b);
+    );
+}
+
+int64_t _tin_sqlite_stmt_exec_is(void *p, int64_t a, const char *b, int64_t b_len) {
+    EXEC_RUN(
+        sqlite3_bind_int64(h->stmt, 1, a);
+        sqlite3_bind_text(h->stmt, 2, b ? b : "", (int)b_len, SQLITE_TRANSIENT);
+    );
+}
+
+int64_t _tin_sqlite_stmt_exec_si(void *p, const char *a, int64_t a_len, int64_t b) {
+    EXEC_RUN(
+        sqlite3_bind_text(h->stmt, 1, a ? a : "", (int)a_len, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(h->stmt, 2, b);
+    );
+}
+
+int64_t _tin_sqlite_stmt_exec_iis(void *p, int64_t a, int64_t b, const char *c, int64_t c_len) {
+    EXEC_RUN(
+        sqlite3_bind_int64(h->stmt, 1, a);
+        sqlite3_bind_int64(h->stmt, 2, b);
+        sqlite3_bind_text(h->stmt, 3, c ? c : "", (int)c_len, SQLITE_TRANSIENT);
+    );
+}
+
+#undef EXEC_RUN
 
 // _tin_sqlite_completion_ready: non-blocking poll for the
 // awaitable::ready check.

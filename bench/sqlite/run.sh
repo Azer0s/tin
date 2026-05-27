@@ -20,6 +20,8 @@ clang -O2 bench/sqlite/c_inserts.c -lsqlite3 -o "$BIN/c_inserts"
   | grep -E "error|warning" || true
 ./tin build bench/sqlite/tin_inserts_prepared.tin -o "$BIN/tin_inserts_prepared" 2>&1 \
   | grep -E "error|warning" || true
+./tin build bench/sqlite/tin_inserts_multibind.tin -o "$BIN/tin_inserts_multibind" 2>&1 \
+  | grep -E "error|warning" || true
 (cd bench/sqlite/go && go build -o ../../bin/go_inserts .)
 (cd bench/sqlite/rs && cargo build --release --quiet && cp target/release/rs_inserts ../../bin/)
 (cd bench/sqlite/cr && shards install --quiet && crystal build --release inserts.cr -o ../../bin/cr_inserts)
@@ -28,15 +30,16 @@ echo
 echo "--- run ---"
 for N in 10000 100000 1000000; do
   echo "N=$N"
-  for prog in c_inserts rs_inserts cr_inserts go_inserts tin_inserts tin_inserts_blocking tin_inserts_prepared; do
+  for prog in c_inserts rs_inserts cr_inserts go_inserts tin_inserts tin_inserts_blocking tin_inserts_prepared tin_inserts_multibind; do
     # Each binary uses its own bench db so we wipe the matching path.
     case "$prog" in
-      tin_inserts_blocking) rm -f /tmp/tin_sqlite_bench_blocking.db ;;
-      tin_inserts_prepared) rm -f /tmp/tin_sqlite_bench_prepared.db ;;
-      tin_inserts)          rm -f /tmp/tin_sqlite_bench.db ;;
-      *)                    rm -f /tmp/${prog%_inserts}_sqlite_bench.db ;;
+      tin_inserts_blocking)  rm -f /tmp/tin_sqlite_bench_blocking.db ;;
+      tin_inserts_prepared)  rm -f /tmp/tin_sqlite_bench_prepared.db ;;
+      tin_inserts_multibind) rm -f /tmp/tin_sqlite_bench_multibind.db ;;
+      tin_inserts)           rm -f /tmp/tin_sqlite_bench.db ;;
+      *)                     rm -f /tmp/${prog%_inserts}_sqlite_bench.db ;;
     esac
-    printf "  %-21s " "$prog"
+    printf "  %-22s " "$prog"
     "$BIN/$prog" "$N"
   done
 done
