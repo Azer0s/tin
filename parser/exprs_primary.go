@@ -679,6 +679,7 @@ func (p *Parser) maybeWrapSuffix(lit ast.Node, pos ast.Pos) (ast.Node, error) {
 			}
 
 			extra = append(extra, arg)
+
 			if p.check(lexer.COMMA) {
 				p.advance()
 			}

@@ -1123,7 +1123,7 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 	}
 
 	// #suffix validation. Every suffix macro must declare at least one
-	// `#suffix@<kind>` with a recognised literal kind, and must satisfy
+	// `#suffix@<kind>` with a recognized literal kind, and must satisfy
 	// exactly one of (a) name ends with `!`, (b) tag set contains
 	// `#no_excl`. Anything else cannot be reached from any call site.
 	hasSuffix := false

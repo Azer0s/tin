@@ -523,7 +523,7 @@ func (cg *CodeGen) lookupSuffixMacro(name string) *ast.MacroDecl {
 }
 
 // suffixLiteralKind reports the spec kind name of n (`int`, `float`,
-// `string`, `bool`). Returns "" for anything not a recognised literal.
+// `string`, `bool`). Returns "" for anything not a recognized literal.
 func suffixLiteralKind(n ast.Node) string {
 	switch n.(type) {
 	case *ast.IntLit:

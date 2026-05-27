@@ -331,12 +331,12 @@ func isDegenerateNumericLit(tok Token) bool {
 // macro can attach to. Char and atom literals are deliberately
 // excluded; the spec only covers int/float/string/bool kinds.
 func suffixCarrier(tt TokenType) bool {
-	switch tt {
+	switch tt { //nolint:exhaustive // only the four literal kinds carry suffixes
 	case INT_LIT, FLOAT_LIT, STRING_LIT, BOOL_LIT:
 		return true
+	default:
+		return false
 	}
-
-	return false
 }
 
 // isSuffixStart matches the first char of a suffix-macro name: an
@@ -357,7 +357,7 @@ func (l *Lexer) readSuffixIdent(line, col int) (Token, error) {
 	var sb strings.Builder
 
 	for {
-		if !(unicode.IsLetter(l.peek()) || l.peek() == '_') {
+		if !unicode.IsLetter(l.peek()) && l.peek() != '_' {
 			return Token{}, fmt.Errorf(
 				"suffix-macro name must start with a letter at %d:%d, got %q",
 				line, col, l.peek())

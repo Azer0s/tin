@@ -86,6 +86,7 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 // a parse error from the eventual reparse.
 func interpolateMacroBacktick(content string, params []string, args []ast.Node) string {
 	subst := map[string]string{}
+
 	for i, p := range params {
 		if i < len(args) {
 			subst[p] = ast.PrintExpr(args[i])
@@ -93,6 +94,7 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 	}
 
 	var out strings.Builder
+
 	i := 0
 
 	isIdentCont := func(b byte) bool {
@@ -104,6 +106,7 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 		c := content[i]
 		if c != '{' {
 			out.WriteByte(c)
+
 			i++
 
 			continue
@@ -114,6 +117,7 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 		// the preceding char to disambiguate.
 		if i > 0 && isIdentCont(content[i-1]) {
 			out.WriteByte(c)
+
 			i++
 
 			continue
@@ -140,6 +144,7 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 		if depth != 0 || j >= len(content) {
 			// Unbalanced; pass through verbatim.
 			out.WriteByte(c)
+
 			i++
 
 			continue
@@ -147,6 +152,7 @@ func interpolateMacroBacktick(content string, params []string, args []ast.Node) 
 		// content[i+1:j] is the inner expression.
 		inner := content[i+1 : j]
 		out.WriteString(substituteParamsInSource(inner, subst))
+
 		i = j + 1
 	}
 
@@ -175,23 +181,27 @@ func substituteParamsInSource(src string, subst map[string]string) string {
 		// Skip string literals so identifiers inside them stay literal.
 		if c == '"' {
 			out.WriteByte(c)
+
 			i++
 
 			for i < len(src) && src[i] != '"' {
 				if src[i] == '\\' && i+1 < len(src) {
 					out.WriteByte(src[i])
 					out.WriteByte(src[i+1])
+
 					i += 2
 
 					continue
 				}
 
 				out.WriteByte(src[i])
+
 				i++
 			}
 
 			if i < len(src) {
 				out.WriteByte(src[i])
+
 				i++
 			}
 
@@ -200,6 +210,7 @@ func substituteParamsInSource(src string, subst map[string]string) string {
 
 		if !isIdentStart(c) {
 			out.WriteByte(c)
+
 			i++
 
 			continue
