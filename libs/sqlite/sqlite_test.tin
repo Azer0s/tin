@@ -168,6 +168,23 @@ test "_sql macro: WHERE clause with single ident binds correctly" =
   assert::ok(rows.get_i64(1, 0) == 3)
   db.close()
 
+test "stmt cache: hot-loop INSERTs reuse the prepared statement" =
+  // Correctness check: the cached statement must be reset+bound on
+  // each iteration with no state leaking between calls (e.g. stale
+  // bindings, partial step state).  A 200-iteration loop also
+  // exercises the cache cap; a single SQL string stays cached and
+  // never gets evicted.
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_cache", [])
+  let _create i64 = await db.exec("CREATE TABLE m_cache (id INTEGER)", [])
+  for let i i64 = 0; i < 200; i = i + 1:
+    let _n i64 = await db.exec("INSERT INTO m_cache VALUES (?)", [Int(i)])
+  let rows = await db.query("SELECT COUNT(*) FROM m_cache", [])
+  assert::ok(rows.get_i64(0, 0) == 200)
+  let last = await db.query("SELECT id FROM m_cache ORDER BY id DESC LIMIT 1", [])
+  assert::ok(last.get_i64(0, 0) == 199)
+  db.close()
+
 test "explicit Int / Text construction round-trips through match" =
   match Int(42):
     case Int(v): assert::ok(v == 42)

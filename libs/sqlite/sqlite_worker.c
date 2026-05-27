@@ -158,6 +158,23 @@ static void free_task(task_t *t) {
     free(t);
 }
 
+// stmt_cache: simple linked-list cache of (sql, prepared stmt) pairs
+// scoped to a single Connection.  Lives on the worker thread; no
+// locking needed (single-threaded access).  Capped at STMT_CACHE_MAX
+// entries; on insert past the cap, the oldest (head) is finalized
+// and dropped.  Cleared+finalized on connection close.
+//
+// Effective for hot loops: repeated `db.exec("INSERT ...", [...])`
+// at the same SQL skips sqlite3_prepare_v2 (a parse+plan) after the
+// first call and only does reset+bind+step.
+#define STMT_CACHE_MAX 32
+
+typedef struct cached_stmt {
+    char               *sql;   // strdup'd
+    sqlite3_stmt       *stmt;
+    struct cached_stmt *next;  // MRU at head
+} cached_stmt_t;
+
 typedef struct conn {
     sqlite3        *db;
     pthread_t       worker;
@@ -166,6 +183,9 @@ typedef struct conn {
     task_t         *head;
     task_t         *tail;
     int             stopped;  // worker exited
+    // Worker-local prepared-statement cache.
+    cached_stmt_t  *stmt_cache_head;
+    int             stmt_cache_count;
 } conn_t;
 
 static void enqueue(conn_t *c, task_t *t) {
@@ -176,6 +196,73 @@ static void enqueue(conn_t *c, task_t *t) {
     c->tail = t;
     pthread_cond_signal(&c->qcv);
     pthread_mutex_unlock(&c->qmu);
+}
+
+// Look up a cached stmt for `sql`; on hit, move to MRU (head) and
+// return it reset+ready to bind.  On miss, prepare a fresh stmt,
+// install at head, evict oldest if past cap.  All called from worker
+// thread, no locking.
+static sqlite3_stmt *stmt_cache_get(conn_t *c, const char *sql, int *out_rc) {
+    cached_stmt_t **link = &c->stmt_cache_head;
+    while (*link) {
+        cached_stmt_t *e = *link;
+        if (strcmp(e->sql, sql) == 0) {
+            // Hit: detach and re-insert at head (MRU).  Reset clears
+            // bindings + execution state but keeps the parsed plan.
+            *link = e->next;
+            e->next = c->stmt_cache_head;
+            c->stmt_cache_head = e;
+            sqlite3_reset(e->stmt);
+            sqlite3_clear_bindings(e->stmt);
+            *out_rc = SQLITE_OK;
+            return e->stmt;
+        }
+        link = &(*link)->next;
+    }
+    // Miss: prepare.
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(c->db, sql, -1, &stmt, NULL);
+    *out_rc = rc;
+    if (rc != SQLITE_OK) {
+        if (stmt) sqlite3_finalize(stmt);
+        return NULL;
+    }
+    // Install at head.
+    cached_stmt_t *e = (cached_stmt_t *)calloc(1, sizeof(*e));
+    e->sql  = strdup(sql);
+    e->stmt = stmt;
+    e->next = c->stmt_cache_head;
+    c->stmt_cache_head = e;
+    c->stmt_cache_count++;
+    // Evict oldest past the cap.
+    if (c->stmt_cache_count > STMT_CACHE_MAX) {
+        cached_stmt_t **t = &c->stmt_cache_head;
+        for (int i = 0; i < STMT_CACHE_MAX && *t; i++) {
+            t = &(*t)->next;
+        }
+        if (*t) {
+            cached_stmt_t *victim = *t;
+            *t = NULL;
+            sqlite3_finalize(victim->stmt);
+            free(victim->sql);
+            free(victim);
+            c->stmt_cache_count = STMT_CACHE_MAX;
+        }
+    }
+    return stmt;
+}
+
+static void stmt_cache_clear(conn_t *c) {
+    cached_stmt_t *e = c->stmt_cache_head;
+    while (e) {
+        cached_stmt_t *next = e->next;
+        sqlite3_finalize(e->stmt);
+        free(e->sql);
+        free(e);
+        e = next;
+    }
+    c->stmt_cache_head = NULL;
+    c->stmt_cache_count = 0;
 }
 
 static task_t *dequeue(conn_t *c) {
@@ -207,11 +294,10 @@ static int bind_one(sqlite3_stmt *stmt, int idx, int64_t tag,
 }
 
 static void exec_one(conn_t *c, task_t *t) {
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(c->db, t->sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
+    int rc;
+    sqlite3_stmt *stmt = stmt_cache_get(c, t->sql, &rc);
+    if (rc != SQLITE_OK || !stmt) {
         completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-        if (stmt) sqlite3_finalize(stmt);
         return;
     }
 
@@ -222,7 +308,7 @@ static void exec_one(conn_t *c, task_t *t) {
                       t->texts ? t->texts[i] : NULL);
         if (rc != SQLITE_OK) {
             completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
             return;
         }
     }
@@ -230,12 +316,13 @@ static void exec_one(conn_t *c, task_t *t) {
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-        sqlite3_finalize(stmt);
+        sqlite3_reset(stmt);
         return;
     }
-    // For OP_EXEC we don't iterate rows; report changes() and finalize.
+    // For OP_EXEC we don't iterate rows; report changes() and reset
+    // (stmt stays in cache for re-use).
     int64_t changes = (int64_t)sqlite3_changes(c->db);
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
     completion_signal(t->completion, SQLITE_OK, changes, NULL, NULL);
 }
 
@@ -244,11 +331,10 @@ static void exec_one(conn_t *c, task_t *t) {
 // chunks of n_cols rows; we double when exhausted so realloc churn is
 // O(log n).
 static void query_one(conn_t *c, task_t *t) {
-    sqlite3_stmt *stmt = NULL;
-    int rc = sqlite3_prepare_v2(c->db, t->sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
+    int rc;
+    sqlite3_stmt *stmt = stmt_cache_get(c, t->sql, &rc);
+    if (rc != SQLITE_OK || !stmt) {
         completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-        if (stmt) sqlite3_finalize(stmt);
         return;
     }
 
@@ -258,7 +344,7 @@ static void query_one(conn_t *c, task_t *t) {
                       t->texts ? t->texts[i] : NULL);
         if (rc != SQLITE_OK) {
             completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
             return;
         }
     }
@@ -278,7 +364,7 @@ static void query_one(conn_t *c, task_t *t) {
             }
             free(cells);
             completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
-            sqlite3_finalize(stmt);
+            sqlite3_reset(stmt);
             return;
         }
 
@@ -320,7 +406,7 @@ static void query_one(conn_t *c, task_t *t) {
         n_rows++;
     }
 
-    sqlite3_finalize(stmt);
+    sqlite3_reset(stmt);
 
     result_set_t *rs = (result_set_t *)calloc(1, sizeof(*rs));
     rs->n_rows = n_rows;
@@ -406,6 +492,9 @@ void _tin_sqlite_close(void *conn) {
     pthread_mutex_unlock(&done->mu);
 
     pthread_join(c->worker, NULL);
+    // Finalize all cached prepared statements before closing the db
+    // (sqlite3_close errors if any stmt is still open).
+    stmt_cache_clear(c);
     sqlite3_close(c->db);
     pthread_mutex_destroy(&c->qmu);
     pthread_cond_destroy(&c->qcv);
