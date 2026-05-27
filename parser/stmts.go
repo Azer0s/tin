@@ -261,16 +261,30 @@ func (p *Parser) parseColonBody() (*ast.Block, error) {
 		return &ast.Block{}, nil
 	}
 
-	stmt, err := p.parseStatement()
-	if err != nil {
-		return nil, err
+	// Inline body on the same line. Consume statements separated by `;`
+	// so `do{#tag}: a; b; c` puts ALL three under the tag's scope.
+	// Without the loop, only `a` was tagged and `; b; c` landed in the
+	// outer scope, silently escaping `do{#unsafe}:` and similar.
+	var stmts []ast.Node
+
+	for {
+		stmt, err := p.parseStatement()
+		if err != nil {
+			return nil, err
+		}
+
+		if stmt != nil {
+			stmts = append(stmts, stmt)
+		}
+
+		if !p.check(lexer.SEMI) {
+			break
+		}
+
+		p.advance() // consume `;`
 	}
 
-	if stmt == nil {
-		return &ast.Block{}, nil
-	}
-
-	return &ast.Block{Stmts: []ast.Node{stmt}}, nil
+	return &ast.Block{Stmts: stmts}, nil
 }
 
 func (p *Parser) parseDeferStmt() (*ast.DeferStmt, error) {

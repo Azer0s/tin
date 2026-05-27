@@ -49,6 +49,12 @@ jobs:
       - name: Run example tests
         run: ./tin test examples/... -lm
 
+      - name: Run libs/blas tests
+        run: ./tin test libs/blas/...
+
+      - name: Run libs/blas tests under valgrind
+        run: ./tin test --valgrind libs/blas/...
+
       - name: Run fiber example tests
         run: |
           for f in examples/fibers/*.tin; do
@@ -166,6 +172,12 @@ jobs:
 
       - name: Run example tests
         run: ./tin test examples/... -lm
+
+      - name: Run libs/blas tests
+        run: ./tin test libs/blas/...
+
+      - name: Run libs/blas tests under valgrind
+        run: ./tin test --valgrind libs/blas/...
 
       - name: Run fiber example tests
         run: |

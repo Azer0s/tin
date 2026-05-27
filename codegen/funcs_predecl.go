@@ -272,9 +272,16 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 // map at the moment foo is analyzed).  Re-running until stable lets a
 // chain of N inter-method calls resolve in N passes.
 func (cg *CodeGen) refineMethodMutationToFixpoint(stmts []ast.Node) {
-	const maxPasses = 8
+	// Monotonic-grow fixpoint: each pass adds at least one entry to one
+	// of the maps, or exits via the !changed gate. With N methods in
+	// the program, the maximum depth of "method A mutates via method B
+	// mutates via method C..." chains is bounded by N, so the loop is
+	// guaranteed to terminate. Use a high panic-bound instead of a
+	// silent cap to catch the impossible case where someone introduces
+	// a back-edge in the propagation that breaks monotonicity.
+	const panicBound = 4096
 
-	for pass := 0; pass < maxPasses; pass++ {
+	for pass := 0; pass < panicBound; pass++ {
 		changed := false
 
 		for _, node := range stmts {
@@ -322,6 +329,7 @@ func (cg *CodeGen) refineMethodMutationToFixpoint(stmts []ast.Node) {
 			return
 		}
 	}
+	panic("refineMethodMutationToFixpoint: did not converge in 4096 passes; check for non-monotonic add to methodMayMutateReceiver*")
 }
 
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.

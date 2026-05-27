@@ -170,13 +170,18 @@ struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   fn write(this Conn, data [byte]) Future[i64] =
     return spawn send_to_impl(this.fd, data, this.host, this.port)
 
-  // Accept-based Conn shares the Server's fd -- skipping io::close here keeps
-  // the parent listener alive for subsequent accepts.  Dial-based owns its fd
-  // and forwards to io::close.  Idempotency under repeated .close() is handled
-  // by io::close itself (POSIX close on an already-closed fd is a no-op error).
+  // Accept-based Conn shares the Server's fd: skipping io::close here
+  // keeps the parent listener alive for subsequent accepts. Dial-based
+  // owns its fd and forwards to io::close. The cell's dtor is
+  // close_if_valid, so disarming the cell (`cell.set(-1)`) prevents
+  // the dtor from running io::close on the same fd at scope exit. The
+  // sentinel matters: kernel could recycle the fd between the explicit
+  // close and the scope-exit close, and the second close would target
+  // an unrelated file.
   fn Closeable::close(this Conn) =
     if this.owns_fd:
       io::close(this.fd)
+      this.cell.set(-1)
 
   fn valid(this Conn) bool = return this.fd >= 0
 
@@ -190,7 +195,9 @@ struct Server (io::Closeable) =
   fn accept(this Server) Future[Result[Conn, errors::Err]] =
     return spawn accept_impl(this.fd)
 
-  fn Closeable::close(this Server) = io::close(this.fd)
+  fn Closeable::close(this Server) =
+    io::close(this.fd)
+    this.cell.set(-1)
 
 // listen creates a bound UDP socket on the given port.
 fn listen(port i32) Result[Server, errors::Err] =
@@ -199,7 +206,7 @@ fn listen(port i32) Result[Server, errors::Err] =
   if fd < 0:
     return Err(CannotBind(port))
 
-  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
 // dial creates a connected UDP socket to host:port.
 fn dial(host string, port i32) Result[Conn, errors::Err] =
@@ -210,7 +217,7 @@ fn dial(host string, port i32) Result[Conn, errors::Err] =
 
   return Ok(Conn{
     fd:       fd,
-    cell:     rc::Cell[i32].new(fd, io::close),
+    cell:     rc::Cell[i32].new(fd, io::close_if_valid),
     cursor:   sync::Atomic[i64].new(0),
     host:     host,
     port:     port,

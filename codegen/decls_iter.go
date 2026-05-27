@@ -26,12 +26,18 @@ func isRefIterGetImpl(decl *ast.FuncDecl) bool {
 	if tq == "" {
 		return false
 	}
+	// Strip any leading "pkg::" prefix so a user-written
+	// `fn somepkg::ref_iter::get(...)` matches the same as the bare
+	// `fn ref_iter::get(...)` form.  Without this the qualified impl is
+	// not recognised, the entry-retain and return-retain are NOT
+	// suppressed, and the loop pays the cost without anyone noticing.
+	bare := stripQualifierModule(tq)
 	// Match "ref_iter" exactly or "ref_iter[...]" (instantiated form).
-	if tq == "ref_iter" {
+	if bare == "ref_iter" {
 		return true
 	}
 
-	return len(tq) > len("ref_iter") && tq[:len("ref_iter")] == "ref_iter" && tq[len("ref_iter")] == '['
+	return len(bare) > len("ref_iter") && bare[:len("ref_iter")] == "ref_iter" && bare[len("ref_iter")] == '['
 }
 
 func (cg *CodeGen) tryCoerceToIter(block *ir.Block, iterVal value.Value) (value.Value, string, bool, bool) {

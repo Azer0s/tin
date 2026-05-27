@@ -53,7 +53,9 @@ struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
   fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
     return spawn io::async_write(this.fd, buf, n)
 
-  fn Closeable::close(this Conn) = io::close(this.fd)
+  fn Closeable::close(this Conn) =
+    io::close(this.fd)
+    this.cell.set(-1)
 
   fn valid(this Conn) bool = return this.fd >= 0
 
@@ -68,9 +70,11 @@ struct Server (io::Closeable) =
     if fd < 0:
       return Err(AcceptFailed)
 
-    return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close)})
+    return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
-  fn Closeable::close(this Server) = io::close(this.fd)
+  fn Closeable::close(this Server) =
+    io::close(this.fd)
+    this.cell.set(-1)
 
 // listen creates a TCP server on the given port.
 fn listen(port i32) Result[Server, errors::Err] =
@@ -79,7 +83,7 @@ fn listen(port i32) Result[Server, errors::Err] =
   if fd < 0:
     return Err(CannotBind(port))
 
-  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
 // dial connects to host:port via TCP.
 fn dial(host string, port i32) Result[Conn, errors::Err] =
@@ -88,6 +92,6 @@ fn dial(host string, port i32) Result[Conn, errors::Err] =
   if fd < 0:
     return Err(DialFailed(host, port))
 
-  return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
 export { Conn, Server, TcpError, listen, dial } as tcp

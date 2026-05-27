@@ -429,15 +429,12 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	yieldBlk := cg.newBlock("chan.send.yield")
 	checkHandoffBlk.NewCondBr(isHandoff, handoffBlk, yieldBlk)
 
-	// Handoff: attempt pre-registration in the sender's next recv channel so the
-	// worker can go directly to BLOCKED after coro.suspend instead of routing via
-	// LQ.  If _tin_prepark_next_recv succeeds it sets pending_park, which takes
-	// priority over handoff_yield in the worker's yield-path check.  Either way
-	// the same coro.suspend is used; the worker picks the right path from flags.
-	preparkFn := cg.ensureExternDecl("_tin_prepark_next_recv", irtypes.I32,
-		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
-	handoffBlk.NewCall(preparkFn, pid)
-	// On resume the send is already complete - go straight to doneBlk.
+	// Handoff: the prepark optimization (advisory pre-registration of
+	// the sender's next recv) was disabled in stdlib/sync/channel_arc.c.
+	// Don't emit the call - it was returning 0 on entry, so every chan-send
+	// handoff site paid for an extern call into a no-op.
+	_ = pid
+	// On resume the send is already complete: go straight to doneBlk.
 	cg.emitInlineChanSuspend("chan.send.handoff", handoffBlk, doneBlk, doneBlk)
 
 	// Park and retry: outer coro suspends until the channel has room.

@@ -33,6 +33,13 @@ struct {#no_copy #closed} Cell[T] =
   fn payload(this *Cell[T]) T =
     return this._payload
 
+  // set replaces the stored value. Useful for "disarming" the dtor when
+  // the resource was already released through another path (e.g.
+  // explicit close()). The dtor still runs on scope exit but receives
+  // the new payload, so pass a sentinel the dtor treats as no-op.
+  fn set(this *Cell[T], value T) =
+    this._payload = value
+
   // retain bumps the cell's refcount. Used when something outside Tin's
   // automatic field-ARC takes a fresh handle on the cell -- e.g. the
   // fiber spawn machinery copies a containing struct via raw frame

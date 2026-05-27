@@ -1,0 +1,21 @@
+// Regression: `==`/`!=` on non-string fat arrays (e.g. `[i64]`) used to
+// route through _tin_str_memcmp which compared `len` BYTES instead of
+// `len` ELEMENTS, silently reporting true for [1,2,3] == [1,2,4] (the
+// first 3 bytes happen to match because little-endian i64 starts with
+// 01,00,00,00,00,00,00,00,02,00,...). Reject at compile time so users
+// implement element-wise comparison explicitly.
+
+use assert
+use "./fixtures/run_compiler"
+
+fn expect_fat_array_eq_error(fixture string) =
+  let r = run_tin("run", "examples/fixtures/fat_array_eq/" ++ fixture)
+
+  assert::ok(r.exit_code != 0 as i32)
+  assert::ok(contains_text(r.stderr, "is not defined"))
+
+test "int-array equality rejected" =
+  expect_fat_array_eq_error("int_array_eq.tin")
+
+test "int-array inequality rejected" =
+  expect_fat_array_eq_error("int_array_neq.tin")

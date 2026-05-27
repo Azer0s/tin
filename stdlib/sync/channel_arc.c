@@ -31,6 +31,7 @@
 #define _POSIX_C_SOURCE 200112L
 #endif
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -291,6 +292,22 @@ typedef struct TinChannel {
     _Alignas(64) _Atomic(int64_t) deq_pos;
     char                          _pad_deq[56];
 } TinChannel;
+
+// Lock the line-0 field offsets that the hot-path comments above
+// promise. atomic_bool is 1 byte on every tier-1 toolchain (gcc/clang
+// on x86/arm/darwin) but C11 permits it to be wider. A widened
+// atomic_bool would silently shift recv_wq_cnt off the 4-byte
+// boundary the relaxed atomic load assumes, and the field would also
+// cross into line 1, false-sharing with ref_count. Caught at
+// C-compile time instead.
+_Static_assert(sizeof(atomic_bool) == 1,
+               "TinChannel layout assumes atomic_bool == 1 byte");
+_Static_assert(offsetof(TinChannel, closed) == 48,
+               "TinChannel.closed must sit at line-0 offset 48");
+_Static_assert(offsetof(TinChannel, recv_wq_cnt) == 52,
+               "TinChannel.recv_wq_cnt must sit at line-0 offset 52");
+_Static_assert(offsetof(TinChannel, send_wq_cnt) == 56,
+               "TinChannel.send_wq_cnt must sit at line-0 offset 56");
 
 // ---------------------------------------------------------------------------
 // Allocate / retain / release

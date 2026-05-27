@@ -267,6 +267,16 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 	case "==":
 		cg.checkTautologicalNilCmp(e, false)
 
+		// Non-string fat-array equality has no defined semantics yet (the
+		// runtime memcmp helper would compare element-count bytes, not
+		// element-count elements, silently lying for any `[i64]`-shaped
+		// type).  Reject at the call site instead of synthesising a wrong
+		// answer.
+		if isFatPtrType(lt) && !isStringType(lt) {
+			return nil, cg.nodeErr(e, "`==` is not defined for %s; only string fat-pointers support equality, other fat arrays need an explicit element-wise compare",
+				cg.tinTypeDisplay(lt))
+		}
+
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, false)
 		// Release temporary string operands after comparison (e.g., fn() == fn()).
 		if isFatPtrType(lt) {
@@ -282,6 +292,12 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		return result, nil
 	case "!=":
 		cg.checkTautologicalNilCmp(e, true)
+
+		// Same fat-array carve-out as for `==`.
+		if isFatPtrType(lt) && !isStringType(lt) {
+			return nil, cg.nodeErr(e, "`!=` is not defined for %s; only string fat-pointers support equality, other fat arrays need an explicit element-wise compare",
+				cg.tinTypeDisplay(lt))
+		}
 
 		result := cg.genEqNeqExpr(block, left, right, lt, rt, isFloat, true)
 		// Release temporary string operands after comparison (e.g., fn() != fn()).
@@ -604,7 +620,12 @@ func (cg *CodeGen) genEqNeqExpr(block *ir.Block, left, right value.Value, lt, rt
 
 	// String equality/inequality: length-aware compare honors TinString.len
 	// instead of running off the slice into adjacent memory like strcmp would.
-	if isFatPtrType(lt) {
+	// Gated to string-typed fat ptrs only: a generic fat array like [i64]
+	// has the same shape (ptr+len+cap) but len counts ELEMENTS, not bytes,
+	// so memcmp(ptr, len) would read `len` bytes and report a spurious
+	// equal whenever the first len bytes happen to match.  Non-string fat
+	// arrays fall through to the rejected-operands path below.
+	if isStringType(lt) {
 		lptr := cg.extractStringPtr(block, left)
 		llen := cg.extractStringLen(block, left)
 		rptr := cg.extractStringPtr(block, right)

@@ -599,7 +599,28 @@ func (cg *CodeGen) collectMutatedTargets(node ast.Node) map[string]bool {
 				}
 
 				if mutates {
-					recordTargetRoot(fa.Expr, out)
+					// When fa.Expr is structurally `root.field.method(...)`
+					// (a chained FieldAccess), the chained field is
+					// almost always a pointer-or-handle field (e.g.
+					// `this.cell` where `cell` is `*Cell[T]`), and the
+					// method mutates the pointee, not the field holder.
+					// Without this carve-out, every
+					// `this.handle.method()` style call triggers a
+					// spurious -Wparam-mutation on `this` even though
+					// the holder is structurally unchanged.  Direct
+					// `root.method()` calls still propagate, so
+					// value-receiver mutations on plain locals stay
+					// caught.  This is imprecise (intentionally
+					// conservative the other direction) but matches
+					// the codebase's idiomatic ptr-cell pattern.
+					mutatesThroughPtrField := false
+					if _, isChainedFA := fa.Expr.(*ast.FieldAccess); isChainedFA {
+						mutatesThroughPtrField = true
+					}
+
+					if !mutatesThroughPtrField {
+						recordTargetRoot(fa.Expr, out)
+					}
 				}
 			}
 		}

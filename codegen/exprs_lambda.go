@@ -141,6 +141,28 @@ func (cg *CodeGen) genLambdaExpr(block *ir.Block, e *ast.LambdaExpr) (value.Valu
 		cg.curScope.set(selfName, &scopeEntry{val: fatSlot, isAlloc: true, noDeinit: true, noRelease: true})
 	}
 
+	// -Wparam-mutation: same check as the named-fn path in funcs.go;
+	// surface lambda bodies that write to their own params (silent
+	// no-op for the caller after autocopy).  Pointer-typed params are
+	// exempt (intent is explicit).  Default-off via -Wpedantic; the
+	// diagnostic's own default-off level handles the gating.
+	mutated := cg.collectMutatedTargets(e.Body)
+	for _, p := range e.Params {
+		if p.Name == "" {
+			continue
+		}
+
+		if _, isPtr := p.Type.(*ast.PointerType); isPtr {
+			continue
+		}
+
+		if mutated[p.Name] {
+			cg.warn(DiagParamMutation, e.Pos(),
+				"parameter `%s` of lambda is mutated inside the body but caller's binding is untouched (autocopy); switch to a `*T` receiver if the caller should see the write",
+				p.Name)
+		}
+	}
+
 	// Step 4: unpack captures from env inside the lambda body.
 	// unpackClosureEnv uses GEPs directly (env persists across calls) and retains
 	// each RC-tracked capture so the body's scope-exit release is balanced.
