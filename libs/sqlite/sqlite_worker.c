@@ -32,9 +32,42 @@ extern void  *_tin_current_fib(void);
 // ---------------------------------------------------------------------------
 
 typedef enum {
-    OP_EXEC = 1,
+    OP_EXEC  = 1,
+    OP_QUERY = 2,
     OP_SHUTDOWN = 99,
 } op_kind_t;
+
+// ResultSet packs all rows + columns from a SELECT into a single
+// owned buffer so Tin-side get_* accessors are pure memcpy with no
+// extra await per cell.  Layout per cell:
+//   tag       i64   (1=Int, 2=Real, 3=Text, 5=Null)
+//   int_val   i64   (Int payload, or TEXT length)
+//   real_val  f64   (Real payload)
+//   text_ptr  char* (TEXT data, owned, freed with the ResultSet)
+typedef struct {
+    int64_t tag;
+    int64_t int_val;
+    double  real_val;
+    char   *text_ptr;
+} cell_t;
+
+typedef struct {
+    int64_t  n_rows;
+    int64_t  n_cols;
+    cell_t  *cells;  // n_rows * n_cols, row-major
+} result_set_t;
+
+static void result_set_free(result_set_t *rs) {
+    if (!rs) return;
+    if (rs->cells) {
+        int64_t total = rs->n_rows * rs->n_cols;
+        for (int64_t i = 0; i < total; i++) {
+            if (rs->cells[i].text_ptr) free(rs->cells[i].text_ptr);
+        }
+        free(rs->cells);
+    }
+    free(rs);
+}
 
 // Per-param wire format: three parallel slots.  tag picks how to
 // interpret the row.  See encode_params in sqlite.tin.
@@ -51,7 +84,8 @@ typedef struct completion {
 
     // Result fields (interpreted per op).
     int     result_code;  // SQLITE_OK or sqlite error code
-    int64_t result_i64;   // exec: changes(), query: row count, etc.
+    int64_t result_i64;   // exec: changes(); query: 0
+    void   *result_ptr;   // query: owned result_set_t*; exec: NULL
     char   *result_err;   // strdup'd error string, or NULL
 } completion_t;
 
@@ -72,10 +106,11 @@ static void completion_free(completion_t *c) {
 
 // Called from worker thread after executing the task.  Stores result,
 // flips done, and unparks the waiter if one has registered.
-static void completion_signal(completion_t *c, int code, int64_t v, const char *err) {
+static void completion_signal(completion_t *c, int code, int64_t v, void *ptr, const char *err) {
     pthread_mutex_lock(&c->mu);
     c->result_code = code;
     c->result_i64  = v;
+    c->result_ptr  = ptr;
     if (err) c->result_err = strdup(err);
     c->done = 1;
 
@@ -171,7 +206,7 @@ static void exec_one(conn_t *c, task_t *t) {
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(c->db, t->sql, -1, &stmt, NULL);
     if (rc != SQLITE_OK) {
-        completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+        completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
         if (stmt) sqlite3_finalize(stmt);
         return;
     }
@@ -182,7 +217,7 @@ static void exec_one(conn_t *c, task_t *t) {
                       t->ints[i],
                       t->texts ? t->texts[i] : NULL);
         if (rc != SQLITE_OK) {
-            completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+            completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
             sqlite3_finalize(stmt);
             return;
         }
@@ -190,14 +225,104 @@ static void exec_one(conn_t *c, task_t *t) {
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-        completion_signal(t->completion, rc, 0, sqlite3_errmsg(c->db));
+        completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
         sqlite3_finalize(stmt);
         return;
     }
     // For OP_EXEC we don't iterate rows; report changes() and finalize.
     int64_t changes = (int64_t)sqlite3_changes(c->db);
     sqlite3_finalize(stmt);
-    completion_signal(t->completion, SQLITE_OK, changes, NULL);
+    completion_signal(t->completion, SQLITE_OK, changes, NULL, NULL);
+}
+
+// query_one runs a SELECT-like statement: prepare, bind params, step
+// each row into the cell buffer, finalize.  Storage is malloc'd in
+// chunks of n_cols rows; we double when exhausted so realloc churn is
+// O(log n).
+static void query_one(conn_t *c, task_t *t) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(c->db, t->sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
+        if (stmt) sqlite3_finalize(stmt);
+        return;
+    }
+
+    for (int64_t i = 0; i < t->n_params; i++) {
+        rc = bind_one(stmt, (int)(i + 1),
+                      t->tags[i], t->ints[i],
+                      t->texts ? t->texts[i] : NULL);
+        if (rc != SQLITE_OK) {
+            completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
+            sqlite3_finalize(stmt);
+            return;
+        }
+    }
+
+    int64_t n_cols = (int64_t)sqlite3_column_count(stmt);
+    int64_t cap_rows = 8;
+    int64_t n_rows = 0;
+    cell_t *cells = (cell_t *)calloc((size_t)(cap_rows * n_cols), sizeof(cell_t));
+
+    for (;;) {
+        rc = sqlite3_step(stmt);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_ROW) {
+            // Step error: free the partial buffer and report.
+            for (int64_t i = 0; i < n_rows * n_cols; i++) {
+                if (cells[i].text_ptr) free(cells[i].text_ptr);
+            }
+            free(cells);
+            completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
+            sqlite3_finalize(stmt);
+            return;
+        }
+
+        if (n_rows == cap_rows) {
+            cap_rows *= 2;
+            cells = (cell_t *)realloc(cells, (size_t)(cap_rows * n_cols) * sizeof(cell_t));
+            memset(cells + (n_rows * n_cols), 0,
+                   (size_t)((cap_rows - n_rows) * n_cols) * sizeof(cell_t));
+        }
+
+        cell_t *row = cells + (n_rows * n_cols);
+        for (int64_t col = 0; col < n_cols; col++) {
+            int col_type = sqlite3_column_type(stmt, (int)col);
+            switch (col_type) {
+            case SQLITE_INTEGER:
+                row[col].tag = 1;
+                row[col].int_val = sqlite3_column_int64(stmt, (int)col);
+                break;
+            case SQLITE_FLOAT:
+                row[col].tag = 2;
+                row[col].real_val = sqlite3_column_double(stmt, (int)col);
+                break;
+            case SQLITE_TEXT: {
+                row[col].tag = 3;
+                const unsigned char *src = sqlite3_column_text(stmt, (int)col);
+                int len = sqlite3_column_bytes(stmt, (int)col);
+                row[col].int_val = len;
+                row[col].text_ptr = (char *)malloc((size_t)len + 1);
+                if (src && len > 0) memcpy(row[col].text_ptr, src, (size_t)len);
+                row[col].text_ptr[len] = '\0';
+                break;
+            }
+            case SQLITE_NULL:
+            default:
+                row[col].tag = 5;
+                break;
+            }
+        }
+        n_rows++;
+    }
+
+    sqlite3_finalize(stmt);
+
+    result_set_t *rs = (result_set_t *)calloc(1, sizeof(*rs));
+    rs->n_rows = n_rows;
+    rs->n_cols = n_cols;
+    rs->cells  = cells;
+    completion_signal(t->completion, SQLITE_OK, 0, rs, NULL);
 }
 
 static void *worker_loop(void *arg) {
@@ -205,11 +330,15 @@ static void *worker_loop(void *arg) {
     for (;;) {
         task_t *t = dequeue(c);
         if (t->op == OP_SHUTDOWN) {
-            completion_signal(t->completion, SQLITE_OK, 0, NULL);
+            completion_signal(t->completion, SQLITE_OK, 0, NULL, NULL);
             free_task(t);
             break;
         }
-        exec_one(c, t);
+        if (t->op == OP_QUERY) {
+            query_one(c, t);
+        } else {
+            exec_one(c, t);
+        }
         free_task(t);
     }
     return NULL;
@@ -360,7 +489,116 @@ const char *_tin_sqlite_completion_err(void *p) {
 
 // _tin_sqlite_completion_free: release the completion after the Tin
 // awaitable has consumed the result.  The completion is rc::Cell-
-// managed on the Tin side.
+// managed on the Tin side.  The contained result_ptr (a query
+// ResultSet) is NOT freed here; ownership transferred to the Tin
+// Rows handle via _tin_sqlite_completion_take_ptr.
 void _tin_sqlite_completion_free(void *p) {
     completion_free((completion_t *)p);
+}
+
+// _tin_sqlite_submit_query: queue a SELECT-shaped task.  Same param
+// marshalling as submit_exec.  Result is a `result_set_t*` retrieved
+// via _tin_sqlite_completion_take_ptr after the awaitable resolves.
+void *_tin_sqlite_submit_query(void *conn, const char *sql,
+                               const int64_t *tags, const int64_t *ints,
+                               const char *const *texts, int64_t n_params) {
+    conn_t *c = (conn_t *)conn;
+    completion_t *done = completion_new();
+    task_t *t = (task_t *)calloc(1, sizeof(*t));
+    t->op = OP_QUERY;
+    t->sql = sql ? strdup(sql) : NULL;
+    t->n_params = n_params;
+    if (n_params > 0) {
+        t->tags  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->ints  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->texts = (char **)calloc((size_t)n_params, sizeof(char *));
+        for (int64_t i = 0; i < n_params; i++) {
+            t->tags[i] = tags[i];
+            t->ints[i] = ints[i];
+            if (tags[i] == 3 && texts[i]) {
+                t->texts[i] = strdup(texts[i]);
+            }
+        }
+    }
+    t->completion = done;
+    enqueue(c, t);
+    return done;
+}
+
+// _tin_sqlite_completion_take_ptr: park on the completion (like
+// _take) and return the raw result_ptr (the result_set_t*).  Used by
+// the SqliteCall[Rows] await path.  Ownership transfers to the
+// caller; the matching _free is _tin_sqlite_rows_free.
+void *_tin_sqlite_completion_take_ptr(void *p) {
+    completion_t *c = (completion_t *)p;
+    pthread_mutex_lock(&c->mu);
+    while (!c->done) {
+        int64_t pid = _tin_current_pid();
+        void   *fib = _tin_current_fib();
+        c->waiter_pid = pid;
+        c->waiter_fib = fib;
+        pthread_mutex_unlock(&c->mu);
+        _tin_fiber_park(pid);
+        pthread_mutex_lock(&c->mu);
+    }
+    void *rv = c->result_ptr;
+    pthread_mutex_unlock(&c->mu);
+    return rv;
+}
+
+// ---------------------------------------------------------------------------
+// ResultSet accessors (called by Rows.get_* on the Tin side).
+// All reads are pure memcpy; no awaits, no mutex.
+// ---------------------------------------------------------------------------
+
+void _tin_sqlite_rows_free(void *p) { result_set_free((result_set_t *)p); }
+
+int64_t _tin_sqlite_rows_count(void *p) {
+    result_set_t *rs = (result_set_t *)p;
+    return rs ? rs->n_rows : 0;
+}
+
+int64_t _tin_sqlite_rows_cols(void *p) {
+    result_set_t *rs = (result_set_t *)p;
+    return rs ? rs->n_cols : 0;
+}
+
+int64_t _tin_sqlite_rows_get_i64(void *p, int64_t row, int64_t col) {
+    result_set_t *rs = (result_set_t *)p;
+    if (!rs || row >= rs->n_rows || col >= rs->n_cols) return 0;
+    return rs->cells[row * rs->n_cols + col].int_val;
+}
+
+double _tin_sqlite_rows_get_f64(void *p, int64_t row, int64_t col) {
+    result_set_t *rs = (result_set_t *)p;
+    if (!rs || row >= rs->n_rows || col >= rs->n_cols) return 0.0;
+    return rs->cells[row * rs->n_cols + col].real_val;
+}
+
+// Writes a fresh Tin `string` copy of the cell's TEXT into *out_str.
+// Out-param matches the runtime convention for C functions returning
+// a `string` (the TinString fat-ptr return doesn't round-trip through
+// Tin's `string`-return extern ABI).  See stdlib/net/dns/dns.c for
+// the same pattern.
+typedef struct { char *ptr; int64_t len; int64_t cap; } _TinString;
+extern _TinString _tin_string_from_bytes(const char *ptr, int64_t len);
+
+void _tin_sqlite_rows_get_text(void *p, int64_t row, int64_t col, _TinString *out_str) {
+    result_set_t *rs = (result_set_t *)p;
+    if (!rs || row >= rs->n_rows || col >= rs->n_cols) {
+        *out_str = _tin_string_from_bytes("", 0);
+        return;
+    }
+    cell_t *cell = &rs->cells[row * rs->n_cols + col];
+    if (cell->text_ptr == NULL || cell->int_val <= 0) {
+        *out_str = _tin_string_from_bytes("", 0);
+        return;
+    }
+    *out_str = _tin_string_from_bytes(cell->text_ptr, cell->int_val);
+}
+
+int _tin_sqlite_rows_is_null(void *p, int64_t row, int64_t col) {
+    result_set_t *rs = (result_set_t *)p;
+    if (!rs || row >= rs->n_rows || col >= rs->n_cols) return 1;
+    return rs->cells[row * rs->n_cols + col].tag == 5 ? 1 : 0;
 }

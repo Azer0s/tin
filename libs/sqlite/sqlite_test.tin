@@ -59,6 +59,62 @@ test "exec on bad SQL returns negative error code" =
   assert::ok(n < 0)
   db.close()
 
+test "query returns Rows with correct row + column counts" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_a", [])
+  let _create i64 = await db.exec("CREATE TABLE q_a (id INTEGER, name TEXT)", [])
+  let _ia i64 = await db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(1), Text("alice")])
+  let _ib i64 = await db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(2), Text("bob")])
+  let rows = await db.query("SELECT id, name FROM q_a ORDER BY id", [])
+  assert::ok(rows.count() == 2)
+  assert::ok(rows.cols()  == 2)
+  db.close()
+
+test "query Int and Text getters return correct cell values" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_b", [])
+  let _create i64 = await db.exec("CREATE TABLE q_b (id INTEGER, name TEXT)", [])
+  let _ia i64 = await db.exec("INSERT INTO q_b VALUES (?, ?)", [Int(7), Text("hello")])
+  let rows = await db.query("SELECT id, name FROM q_b", [])
+  assert::ok(rows.count() == 1)
+  let id   i64    = rows.get_i64(0, 0)
+  let name string = rows.get_string(0, 1)
+  assert::ok(id == 7)
+  assert::ok(name == "hello")
+  db.close()
+
+test "query with WHERE param filters rows" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_c", [])
+  let _create i64 = await db.exec("CREATE TABLE q_c (id INTEGER)", [])
+  let _ia i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(1)])
+  let _ib i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(2)])
+  let _ic i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(3)])
+  let rows = await db.query("SELECT id FROM q_c WHERE id >= ? ORDER BY id", [Int(2)])
+  assert::ok(rows.count() == 2)
+  assert::ok(rows.get_i64(0, 0) == 2)
+  assert::ok(rows.get_i64(1, 0) == 3)
+  db.close()
+
+test "query on empty table returns zero rows" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_d", [])
+  let _create i64 = await db.exec("CREATE TABLE q_d (x INTEGER)", [])
+  let rows = await db.query("SELECT x FROM q_d", [])
+  assert::ok(rows.count() == 0)
+  db.close()
+
+test "is_null detects SQL NULL columns" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_e", [])
+  let _create i64 = await db.exec("CREATE TABLE q_e (a INTEGER, b TEXT)", [])
+  let _ia i64 = await db.exec("INSERT INTO q_e VALUES (?, NULL)", [Int(1)])
+  let rows = await db.query("SELECT a, b FROM q_e", [])
+  assert::ok(rows.count() == 1)
+  assert::ok(rows.is_null(0, 0) == false)
+  assert::ok(rows.is_null(0, 1) == true)
+  db.close()
+
 test "explicit Int / Text construction round-trips through match" =
   match Int(42):
     case Int(v): assert::ok(v == 42)

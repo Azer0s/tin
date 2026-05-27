@@ -45,13 +45,23 @@ data SqlValue =
 fn c_sqlite_open(path string) *void = extern("_tin_sqlite_open")
 fn c_sqlite_close(conn *void)       = extern("_tin_sqlite_close")
 fn c_sqlite_submit_exec(conn *void, sql string, tags [i64], ints [i64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_exec")
+fn c_sqlite_submit_query(conn *void, sql string, tags [i64], ints [i64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_query")
 
-fn c_completion_ready(p *void) i32  = extern("_tin_sqlite_completion_ready")
-fn c_completion_take(p *void)  i64  = extern("_tin_sqlite_completion_take")
-fn c_completion_err(p *void)   string = extern("_tin_sqlite_completion_err")
-fn c_completion_free(p *void)       = extern("_tin_sqlite_completion_free")
+fn c_completion_ready(p *void)        i32    = extern("_tin_sqlite_completion_ready")
+fn c_completion_take(p *void)         i64    = extern("_tin_sqlite_completion_take")
+fn c_completion_take_ptr(p *void)     *void  = extern("_tin_sqlite_completion_take_ptr")
+fn c_completion_err(p *void)          string = extern("_tin_sqlite_completion_err")
+fn c_completion_free(p *void)                = extern("_tin_sqlite_completion_free")
 
-fn c_str_data(s string) *char = extern("_tin_string_data")
+fn c_rows_free(p *void)                        = extern("_tin_sqlite_rows_free")
+fn c_rows_count(p *void)              i64      = extern("_tin_sqlite_rows_count")
+fn c_rows_cols(p *void)               i64      = extern("_tin_sqlite_rows_cols")
+fn c_rows_get_i64(p *void, r i64, c i64) i64   = extern("_tin_sqlite_rows_get_i64")
+fn c_rows_get_f64(p *void, r i64, c i64) f64   = extern("_tin_sqlite_rows_get_f64")
+fn c_rows_get_text(p *void, r i64, c i64, out *string) = extern("_tin_sqlite_rows_get_text")
+fn c_rows_is_null(p *void, r i64, c i64) i32   = extern("_tin_sqlite_rows_is_null")
+
+fn c_str_data(s string) *char                  = extern("_tin_string_data")
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -76,6 +86,43 @@ data SqliteError(errors::Err, print) =
 // (via _tin_fiber_park inside completion_take) until the worker has
 // signalled the completion, then casts the raw i64 result back to T.
 
+// ---------------------------------------------------------------------------
+// Rows: materialized SELECT result, packed in a C-side buffer.
+// ---------------------------------------------------------------------------
+//
+// Each cell holds a tag + the matching payload; get_*(row, col) is a
+// pure C memcpy with no await.  The Rows handle owns the buffer via
+// an rc::Cell so iterating + copying Rows shares ownership and the
+// buffer is freed on the last drop.
+
+struct Rows =
+  cell *rc::Cell[*void]   // owns the result_set_t*
+
+  fn count(this Rows) i64 = return c_rows_count(this.cell.payload())
+  fn cols(this Rows)  i64 = return c_rows_cols(this.cell.payload())
+
+  // get_* are named per type because Tin's `where t is X` guards
+  // narrow on primitive WIDTH categories (w1/w2/w4/w8), not on
+  // specific named types -- the generic `get[t]` body can't be
+  // type-checked under the constraint.  We could revisit if
+  // where-guards grow per-type narrowing.
+  fn get_i64(this Rows, row i64, col i64) i64 =
+    return c_rows_get_i64(this.cell.payload(), row, col)
+
+  fn get_f64(this Rows, row i64, col i64) f64 =
+    return c_rows_get_f64(this.cell.payload(), row, col)
+
+  fn get_string(this Rows, row i64, col i64) string =
+    let out string = ""
+    c_rows_get_text(this.cell.payload(), row, col, &out)
+    return out
+
+  fn is_null(this Rows, row i64, col i64) bool =
+    return c_rows_is_null(this.cell.payload(), row, col) != 0
+
+// SqliteCall[t] is the awaitable for value-typed results (currently
+// just i64 for exec rowcount).  Future scalar-result ops slot in via
+// new where-guards on `t`.
 struct SqliteCall[t](awaitable[t]) =
   cell *rc::Cell[*void]   // owns the completion_t*; dtor frees it
 
@@ -85,6 +132,19 @@ struct SqliteCall[t](awaitable[t]) =
   fn awaitable[t]::result(this SqliteCall[t]) t where t is i64 =
     return c_completion_take(this.cell.payload())
 
+// SqliteQuery is the awaitable for query results (`Rows`).  Split
+// from SqliteCall because where-guards only narrow on primitive types,
+// not on user-defined structs.
+struct SqliteQuery(awaitable[Rows]) =
+  cell *rc::Cell[*void]
+
+  fn awaitable[Rows]::ready(this SqliteQuery) bool =
+    return c_completion_ready(this.cell.payload()) != 0
+
+  fn awaitable[Rows]::result(this SqliteQuery) Rows =
+    let p *void = c_completion_take_ptr(this.cell.payload())
+    return Rows{cell: rc::Cell[*void].new(p, c_rows_free)}
+
 // ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
@@ -92,35 +152,55 @@ struct SqliteCall[t](awaitable[t]) =
 struct Connection (io::Closeable) =
   cell *rc::Cell[*void]   // owns the C conn_t*; dtor sends SHUTDOWN + joins
 
-  // exec runs a single SQL statement.  `params` binds positional
-  // placeholders (`?` in the SQL).  Returns the rowcount on success,
-  // or a negated SQLite error code on failure.
+  // exec runs a statement that returns no rows.  Result is the count
+  // from sqlite3_changes(), or a negated SQLite error code.
+  //
+  // The param-marshalling loop is inlined (not a helper fn) because
+  // Tin autocopies fat-array parameters -- mutations inside a helper
+  // don't propagate back to the caller's array.
   fn exec(this Connection, sql string, params [SqlValue]) SqliteCall[i64] =
     let n i64 = len(params)
-    // Allocate at >=1 slot so the C side can take &arr[0] even when
-    // n==0; it reads only the first n entries.
     let slots i64 = if_zero_use_one(n)
     let tags  [i64]   = [0] * slots
     let ints  [i64]   = [0] * slots
-    // text_keep holds Tin strings for ARC; text_ptrs is what C reads.
-    // Two parallel arrays so the C-friendly *char layout doesn't
-    // require Tin's [string]->**char auto-marshal (which allocates an
-    // alloca that violates coro dominance).
     let text_keep [string] = [""] * slots
     let text_ptrs [*char]  = [nil as *char] * slots
     for let i i64 = 0; i < n; i = i + 1:
       match params[i]:
         case Int(v):
-          tags[i]  = 1
-          ints[i]  = v
+          tags[i] = 1
+          ints[i] = v
         case Text(s):
           tags[i]      = 3
           text_keep[i] = s
           text_ptrs[i] = c_str_data(s)
         case Null:
-          tags[i]  = 5
+          tags[i] = 5
     let p *void = c_sqlite_submit_exec(this.cell.payload(), sql, tags, ints, text_ptrs, n)
     return SqliteCall[i64]{cell: rc::Cell[*void].new(p, c_completion_free)}
+
+  // query runs a statement and returns a materialized Rows handle
+  // covering every row of the result set.
+  fn query(this Connection, sql string, params [SqlValue]) SqliteQuery =
+    let n i64 = len(params)
+    let slots i64 = if_zero_use_one(n)
+    let tags  [i64]   = [0] * slots
+    let ints  [i64]   = [0] * slots
+    let text_keep [string] = [""] * slots
+    let text_ptrs [*char]  = [nil as *char] * slots
+    for let i i64 = 0; i < n; i = i + 1:
+      match params[i]:
+        case Int(v):
+          tags[i] = 1
+          ints[i] = v
+        case Text(s):
+          tags[i]      = 3
+          text_keep[i] = s
+          text_ptrs[i] = c_str_data(s)
+        case Null:
+          tags[i] = 5
+    let p *void = c_sqlite_submit_query(this.cell.payload(), sql, tags, ints, text_ptrs, n)
+    return SqliteQuery{cell: rc::Cell[*void].new(p, c_completion_free)}
 
   fn io::Closeable::close(this Connection) =
     c_sqlite_close(this.cell.payload())
@@ -140,6 +220,7 @@ fn open(path string) Result[Connection, errors::Err] =
 
 export {
   Connection, SqliteError,
-  SqliteCall, SqlValue,
+  SqliteCall, SqliteQuery,
+  SqlValue, Rows,
   open,
 } as sqlite
