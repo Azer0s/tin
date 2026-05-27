@@ -89,8 +89,6 @@ struct {#no_copy} Atomic[t] =
   // the chain.
   fn ptr(this *Atomic[t]) *void = return this._ptr
 
-  // --- new ----------------------------------------------------------
-
   static fn new(v t) *Atomic[t] where t is w8 =
     return &Atomic[t]{_ptr: tin_atomic_alloc_init(8, &v as *void)}
 
@@ -106,19 +104,14 @@ struct {#no_copy} Atomic[t] =
   static fn new(v t) *Atomic[t] where t is not primitive =
     return &Atomic[t]{_ptr: tin_atomic_obj_new_init(sizeof(t), isrc(t), &v as *void)}
 
-  // --- deinit -------------------------------------------------------
-  //
-  // Fires when the last *Atomic[t] reference drops. The primitive
-  // path is plain free; the obj path additionally drops the rc-slot
-  // for the protected payload.
-
+  // deinit fires when the last *Atomic[t] reference drops. The
+  // primitive path is plain free; the obj path additionally drops
+  // the rc-slot for the protected payload.
   fn deinit(this Atomic[t]) where t is primitive =
     tin_atomic_free(this._ptr)
 
   fn deinit(this Atomic[t]) where t is not primitive =
     tin_atomic_obj_free(this._ptr)
-
-  // --- load ---------------------------------------------------------
 
   fn load(this *Atomic[t]) t where t is w8 =
     let out t
@@ -155,8 +148,6 @@ struct {#no_copy} Atomic[t] =
 
     return out
 
-  // --- store --------------------------------------------------------
-
   fn store(this *Atomic[t], v t) where t is w8 =
     tin_atomic_store_64(this.ptr(), &v as *void)
 
@@ -172,8 +163,7 @@ struct {#no_copy} Atomic[t] =
   fn store(this *Atomic[t], v t) where t is not primitive =
     tin_atomic_obj_store(this.ptr(), &v as *void)
 
-  // --- add: numeric only, per-width ---------------------------------
-
+  // add: numeric only, per-width.
   fn add(this *Atomic[t], d t) t where t is i64 || u64 =
     return tin_atomic_add_i64(this.ptr(), d as i64) as t
 
@@ -186,8 +176,7 @@ struct {#no_copy} Atomic[t] =
   fn add(this *Atomic[t], d t) t where t is i8 || u8 =
     return tin_atomic_add_i8(this.ptr(), d as i8) as t
 
-  // --- cas: numeric only, per-width ---------------------------------
-
+  // cas: numeric only, per-width.
   fn cas(this *Atomic[t], old t, nw t) t where t is i64 || u64 =
     return tin_atomic_cas_i64(this.ptr(), old as i64, nw as i64) as t
 
@@ -200,8 +189,7 @@ struct {#no_copy} Atomic[t] =
   fn cas(this *Atomic[t], old t, nw t) t where t is i8 || u8 =
     return tin_atomic_cas_i8(this.ptr(), old as i8, nw as i8) as t
 
-  // --- for_locked: non-primitive only -------------------------------
-  //
+  // for_locked: non-primitive only.
   // Run a callback with the protected value held under the lock.
   // The callback receives `*t`; mutations through the pointer are
   // visible to subsequent load() callers. Atomicity is maintained

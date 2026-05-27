@@ -251,14 +251,15 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
 //   [separate]:  data_buf (cap * elem_size bytes).
 // ---------------------------------------------------------------------------
 typedef struct TinChannel {
-    // ----- Line 0: hot read-mostly metadata (~52 bytes used) ---------------
-    // Every fast-path send/recv touches this line: lf_enqueue reads
-    // cap_mask + seq_buf, the wrappers read rc_kind / single_thread /
-    // closed / wq_cnts.  Packing them all here means the hot path loads
+    // Line 0 holds hot read-mostly metadata (~52 bytes used).  Every
+    // fast-path send/recv touches this line: lf_enqueue reads cap_mask
+    // and seq_buf, the wrappers read rc_kind, single_thread, closed,
+    // and the wq_cnts.  Packing them all here means the hot path loads
     // 1 cache line of metadata + 1 line for enq_pos (or deq_pos) = 2
-    // lines per op instead of the 3-4 the field-by-field layout used to
-    // cost.  Writes to wq_cnt (slow-path, when a fiber parks/unparks)
-    // do invalidate this line on remote cores, but that's rare.
+    // lines per op instead of the 3..4 the field-by-field layout used
+    // to cost.  Writes to wq_cnt (slow path, when a fiber parks or
+    // unparks) do invalidate this line on remote cores, but that's
+    // rare.
     _Alignas(64) int64_t          cap_mask;     // 0..7
     int64_t                       elem_size;    // 8..15
     _Atomic(int64_t)             *seq_buf;      // 16..23
@@ -276,15 +277,15 @@ typedef struct TinChannel {
     _Atomic(int32_t)              send_wq_cnt;   // 56..59
     // 60..63 implicit pad to alignment of next line
 
-    // ----- Line 1: ref_count -- isolated from hot line ---------------------
+    // Line 1: ref_count, isolated from the hot line.
     _Alignas(64) atomic_int       ref_count;
 
-    // ----- Line 2..N: slow-path only ---------------------------------------
+    // Lines 2..N: slow-path only (waiter queue lock and queues).
     _Alignas(64) TinFastMutex     wq_fmu;       // waiter-queue lock
     TinWaiterQueue                recv_wq;       // protected by wq_fmu
     TinWaiterQueue                send_wq;       // protected by wq_fmu
 
-    // ----- Ring buffer positions: each on its own cache line ---------------
+    // Ring-buffer positions: each on its own cache line.
     _Alignas(64) _Atomic(int64_t) enq_pos;
     char                          _pad_enq[56];
     _Alignas(64) _Atomic(int64_t) deq_pos;
