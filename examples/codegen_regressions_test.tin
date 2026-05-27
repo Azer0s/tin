@@ -451,3 +451,7 @@ test "match: destructure variant carrying *rc::Cell field stays live" =
   expect_substr("match_destructure_cell_field_102.tin",
     "ok  0")
 
+test "data ADT: multiple `static fn ::implicit` overloads dispatch correctly" =
+  expect_substr("data_adt_implicit_overload_103.tin",
+    "ok  text:alice")
+

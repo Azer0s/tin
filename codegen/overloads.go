@@ -535,6 +535,31 @@ func scanOverloadedNamesPkg(nodes []ast.Node, pkgName string) map[string]bool {
 				key := methodScopeName(structName, m)
 				counts[key]++
 			}
+		case *ast.DataDecl:
+			// Mirror StructDecl: data ADTs that declare multiple
+			// `static fn ::implicit(...)` (or any other method name)
+			// need overload mangling so genTraitVtables can pick the
+			// right impl per source type.  Without this, the second
+			// impl with the same name overwrites the first in the
+			// scope and `implicit` dispatch only sees one entry.
+			//
+			// genDataDecl wraps the ADT in a StructDecl shim and
+			// suspends the package context before calling
+			// genTraitVtables (see data_codegen.go), so methodScopeName
+			// inside genTraitVtables sees the BARE struct name.  Use
+			// the bare name here too so the overload count keys match.
+			if len(n.TypeParams) > 0 {
+				continue
+			}
+
+			for _, m := range n.Methods {
+				if m.IsExtern != "" {
+					continue
+				}
+
+				key := methodScopeName(n.Name, m)
+				counts[key]++
+			}
 		}
 	}
 

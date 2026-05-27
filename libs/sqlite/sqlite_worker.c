@@ -132,10 +132,11 @@ typedef struct task {
     char            *sql;        // strdup'd; freed by worker after exec
     // Params are deep-copied at submit time so the Tin caller can
     // drop the source `[SqlValue]` before the worker picks the task
-    // up.  Three parallel arrays match the wire format from
+    // up.  Four parallel arrays match the wire format from
     // sqlite.tin::exec.  texts[i] is strdup'd when tag=3, NULL otherwise.
     int64_t         *tags;
     int64_t         *ints;
+    double          *reals;
     char           **texts;
     int64_t          n_params;
     completion_t    *completion;
@@ -147,6 +148,7 @@ static void free_task(task_t *t) {
     if (t->sql) free(t->sql);
     if (t->tags) free(t->tags);
     if (t->ints) free(t->ints);
+    if (t->reals) free(t->reals);
     if (t->texts) {
         for (int64_t i = 0; i < t->n_params; i++) {
             if (t->texts[i]) free(t->texts[i]);
@@ -193,9 +195,11 @@ static task_t *dequeue(conn_t *c) {
 // Bind one param to the prepared stmt at the given 1-based index.
 // Uses SQLITE_TRANSIENT so sqlite copies TEXT data into stmt storage;
 // the param's strdup'd buffer is freed by free_task after step+finalize.
-static int bind_one(sqlite3_stmt *stmt, int idx, int64_t tag, int64_t int_val, char *text_val) {
+static int bind_one(sqlite3_stmt *stmt, int idx, int64_t tag,
+                    int64_t int_val, double real_val, char *text_val) {
     switch (tag) {
     case 1: return sqlite3_bind_int64(stmt, idx, int_val);
+    case 2: return sqlite3_bind_double(stmt, idx, real_val);
     case 3: return sqlite3_bind_text(stmt, idx, text_val ? text_val : "", -1, SQLITE_TRANSIENT);
     case 5: return sqlite3_bind_null(stmt, idx);
     default: return SQLITE_MISUSE;
@@ -214,7 +218,7 @@ static void exec_one(conn_t *c, task_t *t) {
     for (int64_t i = 0; i < t->n_params; i++) {
         rc = bind_one(stmt, (int)(i + 1),
                       t->tags[i],
-                      t->ints[i],
+                      t->ints[i], t->reals ? t->reals[i] : 0.0,
                       t->texts ? t->texts[i] : NULL);
         if (rc != SQLITE_OK) {
             completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
@@ -250,7 +254,7 @@ static void query_one(conn_t *c, task_t *t) {
 
     for (int64_t i = 0; i < t->n_params; i++) {
         rc = bind_one(stmt, (int)(i + 1),
-                      t->tags[i], t->ints[i],
+                      t->tags[i], t->ints[i], t->reals ? t->reals[i] : 0.0,
                       t->texts ? t->texts[i] : NULL);
         if (rc != SQLITE_OK) {
             completion_signal(t->completion, rc, 0, NULL, sqlite3_errmsg(c->db));
@@ -419,6 +423,7 @@ void _tin_sqlite_close(void *conn) {
 // the caller may drop its source arrays immediately.
 void *_tin_sqlite_submit_exec(void *conn, const char *sql,
                               const int64_t *tags, const int64_t *ints,
+                              const double *reals,
                               const char *const *texts, int64_t n_params) {
     conn_t *c = (conn_t *)conn;
     completion_t *done = completion_new();
@@ -429,10 +434,12 @@ void *_tin_sqlite_submit_exec(void *conn, const char *sql,
     if (n_params > 0) {
         t->tags  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
         t->ints  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->reals = (double *)calloc((size_t)n_params, sizeof(double));
         t->texts = (char **)calloc((size_t)n_params, sizeof(char *));
         for (int64_t i = 0; i < n_params; i++) {
-            t->tags[i] = tags[i];
-            t->ints[i] = ints[i];
+            t->tags[i]  = tags[i];
+            t->ints[i]  = ints[i];
+            t->reals[i] = reals[i];
             if (tags[i] == 3 && texts[i]) {
                 t->texts[i] = strdup(texts[i]);
             }
@@ -501,6 +508,7 @@ void _tin_sqlite_completion_free(void *p) {
 // via _tin_sqlite_completion_take_ptr after the awaitable resolves.
 void *_tin_sqlite_submit_query(void *conn, const char *sql,
                                const int64_t *tags, const int64_t *ints,
+                               const double *reals,
                                const char *const *texts, int64_t n_params) {
     conn_t *c = (conn_t *)conn;
     completion_t *done = completion_new();
@@ -511,10 +519,12 @@ void *_tin_sqlite_submit_query(void *conn, const char *sql,
     if (n_params > 0) {
         t->tags  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
         t->ints  = (int64_t *)calloc((size_t)n_params, sizeof(int64_t));
+        t->reals = (double *)calloc((size_t)n_params, sizeof(double));
         t->texts = (char **)calloc((size_t)n_params, sizeof(char *));
         for (int64_t i = 0; i < n_params; i++) {
-            t->tags[i] = tags[i];
-            t->ints[i] = ints[i];
+            t->tags[i]  = tags[i];
+            t->ints[i]  = ints[i];
+            t->reals[i] = reals[i];
             if (tags[i] == 3 && texts[i]) {
                 t->texts[i] = strdup(texts[i]);
             }

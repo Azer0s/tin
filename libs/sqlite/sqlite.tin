@@ -25,10 +25,19 @@ use { Result } from result
 // SqlValue: tagged input value, one per parameter slot.
 // ---------------------------------------------------------------------------
 
-data SqlValue =
+data SqlValue (implicit[i64], implicit[f64], implicit[string]) =
   Int(v i64)
+  Real(v f64)
   Text(v string)
   Null
+
+  // implicit lets call sites pass bare primitives in the params
+  // array: `db.exec("...", [id, name, score])` instead of
+  // `[Int(id), Text(name), Real(score)]`.  Tin's coerce path picks
+  // the matching impl per element type.
+  static fn ::implicit(v i64) SqlValue    = return Int(v)
+  static fn ::implicit(v f64) SqlValue    = return Real(v)
+  static fn ::implicit(s string) SqlValue = return Text(s)
 
 // Params marshal as three parallel arrays (tags, ints, texts).  For
 // each Int param: tag=1, int holds the value, text="".  For each
@@ -44,8 +53,8 @@ data SqlValue =
 
 fn c_sqlite_open(path string) *void = extern("_tin_sqlite_open")
 fn c_sqlite_close(conn *void)       = extern("_tin_sqlite_close")
-fn c_sqlite_submit_exec(conn *void, sql string, tags [i64], ints [i64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_exec")
-fn c_sqlite_submit_query(conn *void, sql string, tags [i64], ints [i64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_query")
+fn c_sqlite_submit_exec(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_exec")
+fn c_sqlite_submit_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_query")
 
 fn c_completion_ready(p *void)        i32    = extern("_tin_sqlite_completion_ready")
 fn c_completion_take(p *void)         i64    = extern("_tin_sqlite_completion_take")
@@ -163,6 +172,7 @@ struct Connection (io::Closeable) =
     let slots i64 = if_zero_use_one(n)
     let tags  [i64]   = [0] * slots
     let ints  [i64]   = [0] * slots
+    let reals [f64]   = [0.0] * slots
     let text_keep [string] = [""] * slots
     let text_ptrs [*char]  = [nil as *char] * slots
     for let i i64 = 0; i < n; i = i + 1:
@@ -170,13 +180,16 @@ struct Connection (io::Closeable) =
         case Int(v):
           tags[i] = 1
           ints[i] = v
+        case Real(v):
+          tags[i]  = 2
+          reals[i] = v
         case Text(s):
           tags[i]      = 3
           text_keep[i] = s
           text_ptrs[i] = c_str_data(s)
         case Null:
           tags[i] = 5
-    let p *void = c_sqlite_submit_exec(this.cell.payload(), sql, tags, ints, text_ptrs, n)
+    let p *void = c_sqlite_submit_exec(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
     return SqliteCall[i64]{cell: rc::Cell[*void].new(p, c_completion_free)}
 
   // query runs a statement and returns a materialized Rows handle
@@ -186,6 +199,7 @@ struct Connection (io::Closeable) =
     let slots i64 = if_zero_use_one(n)
     let tags  [i64]   = [0] * slots
     let ints  [i64]   = [0] * slots
+    let reals [f64]   = [0.0] * slots
     let text_keep [string] = [""] * slots
     let text_ptrs [*char]  = [nil as *char] * slots
     for let i i64 = 0; i < n; i = i + 1:
@@ -193,13 +207,16 @@ struct Connection (io::Closeable) =
         case Int(v):
           tags[i] = 1
           ints[i] = v
+        case Real(v):
+          tags[i]  = 2
+          reals[i] = v
         case Text(s):
           tags[i]      = 3
           text_keep[i] = s
           text_ptrs[i] = c_str_data(s)
         case Null:
           tags[i] = 5
-    let p *void = c_sqlite_submit_query(this.cell.payload(), sql, tags, ints, text_ptrs, n)
+    let p *void = c_sqlite_submit_query(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
     return SqliteQuery{cell: rc::Cell[*void].new(p, c_completion_free)}
 
   fn io::Closeable::close(this Connection) =

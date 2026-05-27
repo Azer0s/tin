@@ -104,6 +104,30 @@ test "query on empty table returns zero rows" =
   assert::ok(rows.count() == 0)
   db.close()
 
+test "Real param + get_f64 round-trip" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_f", [])
+  let _create i64 = await db.exec("CREATE TABLE q_f (x REAL)", [])
+  let _i i64 = await db.exec("INSERT INTO q_f VALUES (?)", [Real(3.14159)])
+  let rows = await db.query("SELECT x FROM q_f", [])
+  assert::ok(rows.count() == 1)
+  let v f64 = rows.get_f64(0, 0)
+  assert::ok(v > 3.14158 && v < 3.14160)
+  db.close()
+
+test "implicit coerce: bare i64/string in params array" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_imp", [])
+  let _create i64 = await db.exec("CREATE TABLE q_imp (id INTEGER, name TEXT)", [])
+  // Annotated [SqlValue] binding drives element-wise implicit coerce.
+  let params [sqlite::SqlValue] = [42, "alice"]
+  let _i i64 = await db.exec("INSERT INTO q_imp VALUES (?, ?)", params)
+  let rows = await db.query("SELECT id, name FROM q_imp", [])
+  assert::ok(rows.count() == 1)
+  assert::ok(rows.get_i64(0, 0) == 42)
+  assert::ok(rows.get_string(0, 1) == "alice")
+  db.close()
+
 test "is_null detects SQL NULL columns" =
   let db = fresh_db()
   let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_e", [])
@@ -118,9 +142,11 @@ test "is_null detects SQL NULL columns" =
 test "explicit Int / Text construction round-trips through match" =
   match Int(42):
     case Int(v): assert::ok(v == 42)
+    case Real(_): assert::ok(false)
     case Text(_): assert::ok(false)
     case Null: assert::ok(false)
   match Text("hi"):
     case Int(_): assert::ok(false)
+    case Real(_): assert::ok(false)
     case Text(s): assert::ok(s == "hi")
     case Null: assert::ok(false)
