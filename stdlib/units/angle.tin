@@ -1,0 +1,17 @@
+// stdlib/units/angle - angle literal suffixes.
+//
+// `deg` converts to radians (the unit every trig fn in stdlib/math
+// expects); `rad` is the identity for symmetry.  Use float literals
+// to avoid the int->float coercion silently zeroing fractional input.
+//
+//   use { deg, rad } from units::angle
+//   use math
+//
+//   let theta = 45.0_deg          // 0.7853981633974483
+//   let phi   = 1.5_rad           // 1.5
+//   echo(math::sin(theta))
+
+macro{#suffix@float #no_excl #no_parens} deg(n) = `{n} * 0.017453292519943295`
+macro{#suffix@float #no_excl #no_parens} rad(n) = `{n}`
+
+export { deg, rad } as angle

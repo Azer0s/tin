@@ -461,6 +461,21 @@ type CallExpr struct {
 	IsVarArgs bool
 }
 
+// SuffixCallExpr represents a `<literal>_<suffix>` form (with optional
+// `!` and `::` package qualification baked into SuffixName).  The
+// parser builds this node when it sees a literal followed by a
+// SUFFIX_IDENT token.  Codegen's macro pass looks up SuffixName as a
+// `#suffix@<kind>` macro and expands it with Literal bound to the
+// macro's first parameter.  When extra args are present (the macro is
+// not `#no_parens` and parens followed the suffix), they're collected
+// in ExtraArgs and bound to additional parameters.
+type SuffixCallExpr struct {
+	base
+	SuffixName string // bare or qualified name; trailing `!` preserved
+	Literal    Node   // IntLit / FloatLit / StringLit / InterpolatedString / BoolLit
+	ExtraArgs  []Node // additional call args when not #no_parens
+}
+
 type IndexExpr struct {
 	base
 	Expr  Node

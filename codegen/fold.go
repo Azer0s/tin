@@ -508,6 +508,12 @@ func walkAST(n ast.Node, visit func(ast.Node)) {
 		for _, a := range v.Args {
 			walkAST(a, visit)
 		}
+	case *ast.SuffixCallExpr:
+		walkAST(v.Literal, visit)
+
+		for _, a := range v.ExtraArgs {
+			walkAST(a, visit)
+		}
 	case *ast.TypeofExpr:
 		walkAST(v.Expr, visit)
 	case *ast.LambdaExpr:

@@ -270,7 +270,7 @@ func (cg *CodeGen) genBinExpr(block *ir.Block, e *ast.BinExpr) (value.Value, err
 		// Non-string fat-array equality has no defined semantics yet (the
 		// runtime memcmp helper would compare element-count bytes, not
 		// element-count elements, silently lying for any `[i64]`-shaped
-		// type).  Reject at the call site instead of synthesising a wrong
+		// type).  Reject at the call site instead of synthesizing a wrong
 		// answer.
 		if isFatPtrType(lt) && !isStringType(lt) {
 			return nil, cg.nodeErr(e, "`==` is not defined for %s; only string fat-pointers support equality, other fat arrays need an explicit element-wise compare",

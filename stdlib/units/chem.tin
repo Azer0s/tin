@@ -1,0 +1,32 @@
+// stdlib/units/chem - chemistry literal suffixes.
+//
+//   Mass:        Da, kDa, MDa  (daltons)
+//   Concentration: M, mM, uM, nM, pM  (molar)
+//   Energy:      eV, keV, MeV  (electronvolts)
+//
+// All return f64 normalised to the bare unit (Da, M, eV).
+//
+//   use { kDa, mM, MeV } from units::chem
+//
+//   let mw = 14.4_kDa        // 14400.0 daltons
+//   let c  = 250_uM          // 0.00025 molar (f64)
+
+macro{#suffix@int #suffix@float #no_excl #no_parens} Da(n)  = `({n} as f64)`
+macro{#suffix@int #suffix@float #no_excl #no_parens} kDa(n) = `({n} as f64) * 1000.0`
+macro{#suffix@int #suffix@float #no_excl #no_parens} MDa(n) = `({n} as f64) * 1000000.0`
+
+macro{#suffix@int #suffix@float #no_excl #no_parens} M(n)  = `({n} as f64)`
+macro{#suffix@int #suffix@float #no_excl #no_parens} mM(n) = `({n} as f64) * 0.001`
+macro{#suffix@int #suffix@float #no_excl #no_parens} uM(n) = `({n} as f64) * 0.000001`
+macro{#suffix@int #suffix@float #no_excl #no_parens} nM(n) = `({n} as f64) * 0.000000001`
+macro{#suffix@int #suffix@float #no_excl #no_parens} pM(n) = `({n} as f64) * 0.000000000001`
+
+macro{#suffix@int #suffix@float #no_excl #no_parens} eV(n)  = `({n} as f64)`
+macro{#suffix@int #suffix@float #no_excl #no_parens} keV(n) = `({n} as f64) * 1000.0`
+macro{#suffix@int #suffix@float #no_excl #no_parens} MeV(n) = `({n} as f64) * 1000000.0`
+
+export {
+  Da, kDa, MDa,
+  M, mM, uM, nM, pM,
+  eV, keV, MeV,
+} as chem

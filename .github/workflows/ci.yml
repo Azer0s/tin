@@ -25,7 +25,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) required by tin codegen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
           clang --version
           opt --version | head -2
           ld.lld --version
@@ -155,7 +155,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) + valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
           clang --version
           opt --version | head -2
           ld.lld --version

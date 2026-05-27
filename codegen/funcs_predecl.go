@@ -329,6 +329,7 @@ func (cg *CodeGen) refineMethodMutationToFixpoint(stmts []ast.Node) {
 			return
 		}
 	}
+
 	panic("refineMethodMutationToFixpoint: did not converge in 4096 passes; check for non-monotonic add to methodMayMutateReceiver*")
 }
 

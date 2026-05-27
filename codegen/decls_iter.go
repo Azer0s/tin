@@ -29,7 +29,7 @@ func isRefIterGetImpl(decl *ast.FuncDecl) bool {
 	// Strip any leading "pkg::" prefix so a user-written
 	// `fn somepkg::ref_iter::get(...)` matches the same as the bare
 	// `fn ref_iter::get(...)` form.  Without this the qualified impl is
-	// not recognised, the entry-retain and return-retain are NOT
+	// not recognized, the entry-retain and return-retain are NOT
 	// suppressed, and the loop pays the cost without anyone noticing.
 	bare := stripQualifierModule(tq)
 	// Match "ref_iter" exactly or "ref_iter[...]" (instantiated form).

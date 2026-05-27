@@ -542,8 +542,58 @@ func (cg *CodeGen) checkUnusedImports(prog *ast.Program) {
 		}
 	}
 
+	// Index suffix macros by name (both source-local decls and ones
+	// pulled in from imported packages, since `2_i` may resolve to a
+	// macro from math::complex) so the walker can mark every
+	// identifier inside the macro body as used. Without this, `use {
+	// Value, i } from math::complex` flags `Value` as unused even
+	// though `2_i` expands to `Value{...}` and consumes the import.
+	suffixMacrosByName := map[string]*ast.MacroDecl{}
+
+	for _, n := range prog.Stmts {
+		if m, ok := n.(*ast.MacroDecl); ok && isSuffixMacro(m) {
+			suffixMacrosByName[m.Name] = m
+		}
+	}
+
+	for key, m := range cg.macros {
+		if !isSuffixMacro(m) {
+			continue
+		}
+		// cg.macros holds both qualified (`pkg::i`) and bare (`i`)
+		// keys. Use the bare name (last `::` segment) as the index.
+		bare := key
+		if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+			bare = bare[idx+2:]
+		}
+
+		suffixMacrosByName[strings.TrimSuffix(bare, "!")] = m
+	}
+
 	visit := func(n ast.Node) {
 		switch v := n.(type) {
+		case *ast.SuffixCallExpr:
+			// Mark the suffix's bare name (and any qualified prefix).
+			used[strings.TrimSuffix(v.SuffixName, "!")] = true
+
+			for _, seg := range strings.Split(v.SuffixName, "::") {
+				used[strings.TrimSuffix(seg, "!")] = true
+			}
+			// Mark every identifier referenced in the macro's body
+			// so symbols closed over by the expansion (e.g. `Value`
+			// in `Value{re: 0.0, im: {n} as f64}`) are not falsely
+			// flagged as never-used. The body for #suffix macros is
+			// typically a BacktickLit (template) so a structural walk
+			// would miss the inner names; reparse the template and
+			// walk the resulting AST.
+			bare := strings.TrimSuffix(v.SuffixName, "!")
+			if idx := strings.LastIndex(bare, "::"); idx >= 0 {
+				bare = bare[idx+2:]
+			}
+
+			if m, ok := suffixMacrosByName[bare]; ok && m.Body != nil {
+				markUsedInMacroBody(m.Body, used)
+			}
 		case *ast.Identifier:
 			used[v.Name] = true
 		case *ast.ScopeAccess:
@@ -883,4 +933,104 @@ func (cg *CodeGen) checkUnusedInFunc(fn *ast.FuncDecl) {
 		cg.warn(DiagLetNoReassign, v.Pos(),
 			"let-binding %q is never reassigned; use `const` to express immutability", v.Name)
 	})
+}
+
+// markUsedInMacroBody walks a macro body and marks every Identifier /
+// StructLit / ScopeAccess root as used. When the body is a BacktickLit
+// (templated source), the template content is reparsed first so the
+// inner names are visible to walkAST. Best-effort: a parse error on
+// the template leaves the `used` set unchanged (subsequent codegen
+// will surface a real error if the template was broken).
+func markUsedInMacroBody(body ast.Node, used map[string]bool) {
+	if body == nil {
+		return
+	}
+	// Unwrap one-statement wrapper shapes.
+	if es, ok := body.(*ast.ExprStmt); ok {
+		body = es.Expr
+	}
+
+	if rs, ok := body.(*ast.ReturnStmt); ok && rs.Value != nil {
+		body = rs.Value
+	}
+
+	if blk, ok := body.(*ast.Block); ok && len(blk.Stmts) == 1 {
+		body = blk.Stmts[0]
+	}
+
+	if es, ok := body.(*ast.ExprStmt); ok {
+		body = es.Expr
+	}
+
+	if rs, ok := body.(*ast.ReturnStmt); ok && rs.Value != nil {
+		body = rs.Value
+	}
+
+	if btl, ok := body.(*ast.BacktickLit); ok {
+		// The template may contain `{paramname}` interpolation
+		// markers that aren't valid bare expressions; strip them
+		// before reparsing so symbols outside the braces are
+		// recoverable.  Use a regex-style scan instead of full
+		// parse to keep the check robust against templates that
+		// produce non-expression source (e.g. statements).
+		markUsedInMacroSource(btl.Content, used)
+
+		return
+	}
+
+	walkAST(body, func(in ast.Node) {
+		switch v := in.(type) {
+		case *ast.Identifier:
+			used[v.Name] = true
+		case *ast.StructLit:
+			name := v.TypeName
+			if i := strings.Index(name, "::"); i >= 0 {
+				used[name[:i]] = true
+				name = name[i+2:]
+			}
+
+			used[name] = true
+		case *ast.ScopeAccess:
+			for _, seg := range v.Path {
+				if i := strings.Index(seg, "::"); i >= 0 {
+					used[seg[:i]] = true
+				} else {
+					used[seg] = true
+				}
+			}
+		}
+	})
+}
+
+// markUsedInMacroSource scans a backtick template body and marks
+// every identifier-shaped token as used.  Crude but sufficient for
+// the unused-import check: false positives (marking something as
+// used when it's just an inner-block local) are harmless; the goal is
+// to suppress the false negative where an imported name only appears
+// inside a `#suffix` macro's template.
+func markUsedInMacroSource(src string, used map[string]bool) {
+	isIdentStart := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+	}
+	isIdentCont := func(b byte) bool {
+		return isIdentStart(b) || (b >= '0' && b <= '9')
+	}
+
+	i := 0
+
+	for i < len(src) {
+		if !isIdentStart(src[i]) {
+			i++
+
+			continue
+		}
+
+		j := i + 1
+		for j < len(src) && isIdentCont(src[j]) {
+			j++
+		}
+
+		used[src[i:j]] = true
+		i = j
+	}
 }

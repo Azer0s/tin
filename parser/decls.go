@@ -1122,5 +1122,37 @@ func (p *Parser) parseMacroDecl(tags []string) (*ast.MacroDecl, error) {
 		tags = append(tags, "computed")
 	}
 
+	// #suffix validation. Every suffix macro must declare at least one
+	// `#suffix@<kind>` with a recognised literal kind, and must satisfy
+	// exactly one of (a) name ends with `!`, (b) tag set contains
+	// `#no_excl`. Anything else cannot be reached from any call site.
+	hasSuffix := false
+	hasNoExcl := false
+
+	for _, t := range tags {
+		switch {
+		case strings.HasPrefix(t, "suffix@"):
+			kind := strings.TrimPrefix(t, "suffix@")
+			if kind != "int" && kind != "float" && kind != "string" && kind != "bool" {
+				return nil, p.errorf("unknown #suffix kind @%s; valid kinds are @int, @float, @string, @bool", kind)
+			}
+
+			hasSuffix = true
+		case t == "no_excl":
+			hasNoExcl = true
+		}
+	}
+
+	if hasSuffix {
+		nameEndsBang := strings.HasSuffix(name, "!")
+		if nameEndsBang == hasNoExcl {
+			if nameEndsBang {
+				return nil, p.errorf("#suffix macro `%s` ends with `!` and also has `#no_excl`; pick one", name)
+			}
+
+			return nil, p.errorf("#suffix macro `%s` is unreachable: declare it as `%s!` for the `<lit>_%s!` call form, or add `#no_excl` for the `<lit>_%s` call form", name, name, name, name)
+		}
+	}
+
 	return &ast.MacroDecl{Name: name, Tags: tags, Params: params, ParamTypes: paramTypes, Body: body}, nil
 }

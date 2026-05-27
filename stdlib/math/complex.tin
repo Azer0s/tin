@@ -215,8 +215,15 @@ fn tan(z Value) Value = return sin(z) / cos(z)
 //   let z = complex::from_value(3.0, 4.0) + complex::I
 const I = Value{re: 0.0, im: 1.0}
 
+// Literal-suffix shorthand for the imaginary axis. `2_i` and
+// `2.5_i` both produce a Value with im set; combine with arithmetic
+// to spell complex literals naturally:
+//   let z = 3.0 + 2_i        // 3 + 2i
+//   let w = 1.5_i * 4.0_i    // -6 + 0i
+macro{#suffix@int #suffix@float #no_excl #no_parens} i(n) = `complex::Value{re: 0.0, im: {n} as f64}`
+
 export {
-  Value, I,
+  Value, I, i,
   from_value, from_polar,
   conj, abs, arg,
   exp, log, sqrt,

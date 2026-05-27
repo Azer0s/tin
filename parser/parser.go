@@ -437,12 +437,18 @@ func (p *Parser) parseTags() []string {
 
 		if p.check(lexer.CONTROL_TAG) {
 			for p.check(lexer.CONTROL_TAG) {
-				tags = append(tags, p.advance().Literal)
-				// optional @fn / @field qualifier
+				name := p.advance().Literal
+				// Optional @qualifier. Most existing consumers use the
+				// bare name and ignore the qualifier; `#suffix@int`
+				// (and any future tag that semantically depends on the
+				// qualifier) joins them as `name@qual` so the consumer
+				// can parse it out without changing the slice shape.
 				if p.check(lexer.AT) {
-					p.advance()
-					p.advance() // qualifier ident
+					p.advance() // consume @
+					name = name + "@" + p.advance().Literal
 				}
+
+				tags = append(tags, name)
 			}
 
 			if p.check(lexer.RBRACE) {

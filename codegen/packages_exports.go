@@ -204,6 +204,21 @@ func (cg *CodeGen) loadPackageSelective(path string, names []string, isFile bool
 			continue
 		}
 
+		// Suffix-macro fallthrough: `use { GiB } from units::memory`
+		// names a #suffix macro that was registered under
+		// `memory.GiB` / `memory::GiB`. Re-register under the bare
+		// name so SuffixCallExpr lookup resolves it.
+		for _, key := range []string{
+			pkgName + "." + bareName,
+			pkgName + "::" + bareName,
+		} {
+			if m, ok := cg.macros[key]; ok && isSuffixMacro(m) {
+				cg.macros[bareName] = m
+
+				break
+			}
+		}
+
 		// Function: look up by pkg-qualified key and register as bare name.
 		for _, key := range []string{
 			pkgName + "." + bareName,

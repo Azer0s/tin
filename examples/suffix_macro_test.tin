@@ -1,0 +1,39 @@
+// Suffix macros: `<lit>_<name>` expands at parse time to the macro's
+// body with the literal substituted.  Each test pins a specific
+// expansion so a regression in lex/parse/codegen surfaces here.
+
+use assert
+use { B, KiB, MiB, GiB, TiB, PiB, KB, MB, GB, TB, PB } from units::memory
+
+test "binary memory suffixes expand correctly" =
+  assert::ok(1_B == 1)
+  assert::ok(1_KiB == 1024)
+  assert::ok(1_MiB == 1048576)
+  assert::ok(1_GiB == 1073741824)
+  assert::ok(1_TiB == 1099511627776)
+  assert::ok(2_GiB == 2147483648)
+  assert::ok(4_GiB == 4294967296)
+
+test "decimal memory suffixes expand correctly" =
+  assert::ok(1_KB == 1000)
+  assert::ok(1_MB == 1000000)
+  assert::ok(1_GB == 1000000000)
+  assert::ok(1_TB == 1000000000000)
+  assert::ok(5_KB == 5000)
+
+test "digit-separator preserved alongside suffix" =
+  assert::ok(1_000_KiB == 1024000)
+  assert::ok(1_024_B == 1024)
+
+test "binary literal + suffix" =
+  assert::ok(0b1010_KiB == 10240)
+
+test "hex literal + suffix" =
+  assert::ok(0xFF_KiB == 261120)
+
+test "arithmetic on suffix expansions" =
+  let total = 4_GiB + 512_MiB
+  assert::ok(total == 4831838208)
+
+test "fully-qualified suffix path" =
+  assert::ok(2_units::memory::GiB == 2147483648)

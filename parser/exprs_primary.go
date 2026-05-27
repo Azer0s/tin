@@ -19,7 +19,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		il := parseIntLitToken(tok.Literal)
 		il.SetPos(pos)
 
-		return il, nil
+		return p.maybeWrapSuffix(il, pos)
 
 	case lexer.FLOAT_LIT:
 		p.advance()
@@ -29,12 +29,17 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		fl := &ast.FloatLit{Value: v}
 		fl.SetPos(pos)
 
-		return fl, nil
+		return p.maybeWrapSuffix(fl, pos)
 
 	case lexer.STRING_LIT:
 		p.advance()
 
-		return parseStringInterp(tok.Literal)
+		s, err := parseStringInterp(tok.Literal)
+		if err != nil {
+			return nil, err
+		}
+
+		return p.maybeWrapSuffix(s, pos)
 
 	case lexer.BACKTICK_LIT:
 		p.advance()
@@ -71,7 +76,7 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 		b := &ast.BoolLit{Value: tok.Literal == "true"}
 		b.SetPos(ast.Pos{Line: tok.Line, Col: tok.Col})
 
-		return b, nil
+		return p.maybeWrapSuffix(b, pos)
 
 	case lexer.ATOM_LIT:
 		p.advance()
@@ -645,4 +650,47 @@ func suggestForToken(tok lexer.Token) string {
 	}
 
 	return "expected an expression"
+}
+
+// maybeWrapSuffix wraps `lit` in a SuffixCallExpr if a SUFFIX_IDENT
+// follows. Optional `(args...)` is collected for non-`#no_parens`
+// macros. Otherwise returns `lit` unchanged.
+func (p *Parser) maybeWrapSuffix(lit ast.Node, pos ast.Pos) (ast.Node, error) {
+	if !p.check(lexer.SUFFIX_IDENT) {
+		return lit, nil
+	}
+
+	suf := p.advance().Literal
+
+	var extra []ast.Node
+	// Parse optional (args...) when the next non-whitespace token is
+	// `(`. We don't yet know whether the macro is #no_parens; that
+	// check happens at expansion time. Allowing the parse here is
+	// inert when the macro IS #no_parens (parens will be left in
+	// the surrounding expression context, e.g. `4_GiB(1+1)` would be
+	// a call after expansion).
+	if p.check(lexer.LPAREN) {
+		p.advance() // consume (
+
+		for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
+			arg, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+
+			extra = append(extra, arg)
+			if p.check(lexer.COMMA) {
+				p.advance()
+			}
+		}
+
+		if _, err := p.expect(lexer.RPAREN); err != nil {
+			return nil, err
+		}
+	}
+
+	sce := &ast.SuffixCallExpr{SuffixName: suf, Literal: lit, ExtraArgs: extra}
+	sce.SetPos(pos)
+
+	return sce, nil
 }
