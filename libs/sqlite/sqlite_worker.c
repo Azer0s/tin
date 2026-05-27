@@ -183,7 +183,11 @@ typedef struct conn {
     task_t         *head;
     task_t         *tail;
     int             stopped;  // worker exited
-    // Worker-local prepared-statement cache.
+    // Prepared-statement cache + sqlite3 access protected by db_mu.
+    // The async worker takes db_mu around every task; the sync path
+    // (exec_blocking) takes it around its direct sqlite3 call.  In
+    // pure-async or pure-sync workloads db_mu is uncontended.
+    pthread_mutex_t db_mu;
     cached_stmt_t  *stmt_cache_head;
     int             stmt_cache_count;
 } conn_t;
@@ -293,7 +297,9 @@ static int bind_one(sqlite3_stmt *stmt, int idx, int64_t tag,
     }
 }
 
-static void exec_one(conn_t *c, task_t *t) {
+// exec_one_locked: caller must hold c->db_mu.  Runs prepare-via-cache
+// + bind + step + reset on the stmt, signals the task's completion.
+static void exec_one_locked(conn_t *c, task_t *t) {
     int rc;
     sqlite3_stmt *stmt = stmt_cache_get(c, t->sql, &rc);
     if (rc != SQLITE_OK || !stmt) {
@@ -330,7 +336,7 @@ static void exec_one(conn_t *c, task_t *t) {
 // each row into the cell buffer, finalize.  Storage is malloc'd in
 // chunks of n_cols rows; we double when exhausted so realloc churn is
 // O(log n).
-static void query_one(conn_t *c, task_t *t) {
+static void query_one_locked(conn_t *c, task_t *t) {
     int rc;
     sqlite3_stmt *stmt = stmt_cache_get(c, t->sql, &rc);
     if (rc != SQLITE_OK || !stmt) {
@@ -415,6 +421,21 @@ static void query_one(conn_t *c, task_t *t) {
     completion_signal(t->completion, SQLITE_OK, 0, rs, NULL);
 }
 
+// exec_one / query_one: thin wrappers that grab db_mu around the
+// _locked body.  Worker uses these; the blocking entry point bypasses
+// the worker but takes the same lock around its own _locked call.
+static void exec_one(conn_t *c, task_t *t) {
+    pthread_mutex_lock(&c->db_mu);
+    exec_one_locked(c, t);
+    pthread_mutex_unlock(&c->db_mu);
+}
+
+static void query_one(conn_t *c, task_t *t) {
+    pthread_mutex_lock(&c->db_mu);
+    query_one_locked(c, t);
+    pthread_mutex_unlock(&c->db_mu);
+}
+
 static void *worker_loop(void *arg) {
     conn_t *c = (conn_t *)arg;
     for (;;) {
@@ -452,10 +473,12 @@ void *_tin_sqlite_open(const char *path) {
     }
     pthread_mutex_init(&c->qmu, NULL);
     pthread_cond_init(&c->qcv, NULL);
+    pthread_mutex_init(&c->db_mu, NULL);
     if (pthread_create(&c->worker, NULL, worker_loop, c) != 0) {
         sqlite3_close(c->db);
         pthread_mutex_destroy(&c->qmu);
         pthread_cond_destroy(&c->qcv);
+        pthread_mutex_destroy(&c->db_mu);
         free(c);
         return NULL;
     }
@@ -498,6 +521,7 @@ void _tin_sqlite_close(void *conn) {
     sqlite3_close(c->db);
     pthread_mutex_destroy(&c->qmu);
     pthread_cond_destroy(&c->qcv);
+    pthread_mutex_destroy(&c->db_mu);
     completion_free(done);
     free(c);
 }
@@ -537,6 +561,57 @@ void *_tin_sqlite_submit_exec(void *conn, const char *sql,
     t->completion = done;
     enqueue(c, t);
     return done;
+}
+
+// _tin_sqlite_exec_blocking: synchronous exec on the caller's thread.
+// Bypasses the worker queue + completion + fiber park/unpark cycle.
+// Takes db_mu (uncontended when no async traffic is in flight) and
+// uses the same stmt cache the worker does.
+//
+// Returns sqlite3_changes() on success, or -(sqlite_error_code) on
+// failure.  Callers that need the error string can fetch it via
+// _tin_sqlite_last_blocking_err -- but for the common cached-stmt
+// fast path the rc itself is enough.
+//
+// Use only when the caller knows the call will be fast (cached stmt,
+// no long-running SELECT).  Otherwise the calling fiber's worker
+// thread is stuck inside sqlite for the duration.
+int64_t _tin_sqlite_exec_blocking(void *conn, const char *sql,
+                                  const int64_t *tags, const int64_t *ints,
+                                  const double *reals,
+                                  const char *const *texts, int64_t n_params) {
+    conn_t *c = (conn_t *)conn;
+    pthread_mutex_lock(&c->db_mu);
+
+    int rc;
+    sqlite3_stmt *stmt = stmt_cache_get(c, sql, &rc);
+    if (rc != SQLITE_OK || !stmt) {
+        pthread_mutex_unlock(&c->db_mu);
+        return -(int64_t)rc;
+    }
+
+    for (int64_t i = 0; i < n_params; i++) {
+        rc = bind_one(stmt, (int)(i + 1),
+                      tags[i], ints[i], reals ? reals[i] : 0.0,
+                      texts ? (char *)texts[i] : NULL);
+        if (rc != SQLITE_OK) {
+            sqlite3_reset(stmt);
+            pthread_mutex_unlock(&c->db_mu);
+            return -(int64_t)rc;
+        }
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        sqlite3_reset(stmt);
+        pthread_mutex_unlock(&c->db_mu);
+        return -(int64_t)rc;
+    }
+
+    int64_t changes = (int64_t)sqlite3_changes(c->db);
+    sqlite3_reset(stmt);
+    pthread_mutex_unlock(&c->db_mu);
+    return changes;
 }
 
 // _tin_sqlite_completion_ready: non-blocking poll for the

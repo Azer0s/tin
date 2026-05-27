@@ -92,6 +92,7 @@ fn c_sqlite_open(path string) *void = extern("_tin_sqlite_open")
 fn c_sqlite_close(conn *void)       = extern("_tin_sqlite_close")
 fn c_sqlite_submit_exec(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_exec")
 fn c_sqlite_submit_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) *void = extern("_tin_sqlite_submit_query")
+fn c_sqlite_exec_blocking(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) i64 = extern("_tin_sqlite_exec_blocking")
 
 fn c_completion_ready(p *void)        i32    = extern("_tin_sqlite_completion_ready")
 fn c_completion_take(p *void)         i64    = extern("_tin_sqlite_completion_take")
@@ -255,6 +256,38 @@ struct Connection (io::Closeable) =
           tags[i] = 5
     let p *void = c_sqlite_submit_query(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
     return SqliteQuery{cell: rc::Cell[*void].new(p, c_completion_free)}
+
+  // exec_blocking runs the same workload as exec, but on the
+  // caller's thread (no fiber park/unpark, no worker round-trip).
+  // Takes a per-connection mutex shared with the async worker;
+  // uncontended when only blocking calls are in flight.
+  //
+  // Use when the call is known to be fast (cached stmt, no long
+  // SELECT, no contended write).  Slow sqlite calls inside
+  // exec_blocking pin the fiber's worker thread.
+  fn exec_blocking(this Connection, sql string, params [SqlValue]) i64 =
+    let n i64 = len(params)
+    let slots i64 = if_zero_use_one(n)
+    let tags  [i64]   = [0] * slots
+    let ints  [i64]   = [0] * slots
+    let reals [f64]   = [0.0] * slots
+    let text_keep [string] = [""] * slots
+    let text_ptrs [*char]  = [nil as *char] * slots
+    for let i i64 = 0; i < n; i = i + 1:
+      match params[i]:
+        case Int(v):
+          tags[i] = 1
+          ints[i] = v
+        case Real(v):
+          tags[i]  = 2
+          reals[i] = v
+        case Text(s):
+          tags[i]      = 3
+          text_keep[i] = s
+          text_ptrs[i] = c_str_data(s)
+        case Null:
+          tags[i] = 5
+    return c_sqlite_exec_blocking(this.cell.payload(), sql, tags, ints, reals, text_ptrs, n)
 
   // run is the SqlQuery-shaped twin of exec: takes the bundle the
   // `_sql` macro produces and threads sql + params through to exec.

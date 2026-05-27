@@ -185,6 +185,42 @@ test "stmt cache: hot-loop INSERTs reuse the prepared statement" =
   assert::ok(last.get_i64(0, 0) == 199)
   db.close()
 
+test "exec_blocking inserts row + skips the worker round-trip" =
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS bl_a", [])
+  let _create i64 = await db.exec("CREATE TABLE bl_a (id INTEGER, name TEXT)", [])
+  let n i64 = db.exec_blocking("INSERT INTO bl_a VALUES (?, ?)", [Int(5), Text("eve")])
+  assert::ok(n == 1)
+  let rows = await db.query("SELECT id, name FROM bl_a", [])
+  assert::ok(rows.count() == 1)
+  assert::ok(rows.get_i64(0, 0) == 5)
+  assert::ok(rows.get_string(0, 1) == "eve")
+  db.close()
+
+test "exec_blocking returns negative SQLite code on bad SQL" =
+  let db = fresh_db()
+  let n i64 = db.exec_blocking("THIS IS NOT VALID SQL", [])
+  assert::ok(n < 0)
+  db.close()
+
+test "exec_blocking + async exec interleave on the same Connection" =
+  // The shared db_mu must let async-worker calls and direct
+  // exec_blocking calls take turns without corrupting the stmt cache.
+  let db = fresh_db()
+  let _drop i64 = await db.exec("DROP TABLE IF EXISTS bl_b", [])
+  let _create i64 = await db.exec("CREATE TABLE bl_b (id INTEGER)", [])
+  let _a i64 = await db.exec("INSERT INTO bl_b VALUES (?)", [Int(1)])
+  let _b i64 = db.exec_blocking("INSERT INTO bl_b VALUES (?)", [Int(2)])
+  let _c i64 = await db.exec("INSERT INTO bl_b VALUES (?)", [Int(3)])
+  let _d i64 = db.exec_blocking("INSERT INTO bl_b VALUES (?)", [Int(4)])
+  let rows = await db.query("SELECT id FROM bl_b ORDER BY id", [])
+  assert::ok(rows.count() == 4)
+  assert::ok(rows.get_i64(0, 0) == 1)
+  assert::ok(rows.get_i64(1, 0) == 2)
+  assert::ok(rows.get_i64(2, 0) == 3)
+  assert::ok(rows.get_i64(3, 0) == 4)
+  db.close()
+
 test "explicit Int / Text construction round-trips through match" =
   match Int(42):
     case Int(v): assert::ok(v == 42)
