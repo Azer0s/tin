@@ -1,20 +1,19 @@
-// bench/sqlite/tin_inserts - high-level API: INSERT N rows via
-// db.exec_is on the Connection.  One FFI call per row, no SqlValue
-// boxing, no params-array allocation.  This is the idiomatic Tin
-// path for hot-loop inserts; for maximum throughput see
-// tin_inserts_stmt.tin which prepares the stmt once.
+// bench/sqlite/tin_inserts_stmt - low-level API: prepare once, then
+// stmt.exec_is per row.  Skips the per-call stmt cache lookup that
+// the high-level db.exec_is path does, at the cost of explicit
+// prepare/close + Stmt holding.
 //
-// Usage: ./tin_inserts N
+// Usage: ./tin_inserts_stmt N
 
 use sqlite
 use strings
 use measure
 
-const DB_PATH = "/tmp/tin_sqlite_bench.db"
+const DB_PATH = "/tmp/tin_sqlite_bench_stmt.db"
 
 fn main(args [string]) =
   if len(args) < 2:
-    echo("usage: tin_inserts N")
+    echo("usage: tin_inserts_stmt N")
     return
 
   let total i64 = strings::atol(args[1])
@@ -26,13 +25,14 @@ fn main(args [string]) =
   let _c  i64 = db.exec("CREATE TABLE bench (i INTEGER, name TEXT)", [])
   let _b  i64 = db.exec("BEGIN", [])
 
-  let sql string = "INSERT INTO bench (i, name) VALUES (?, ?)"
+  let stmt = db.prepare("INSERT INTO bench (i, name) VALUES (?, ?)").unwrap()
 
   let t0 i64 = measure::now_us()
   for let i i64 = 0; i < total; i = i + 1:
-    let _n i64 = db.exec_is(sql, i, "row")
+    let _n i64 = stmt.exec_is(i, "row")
   let t1 i64 = measure::now_us()
 
+  stmt.close()
   let _co i64 = db.exec("COMMIT", [])
 
   let elapsed_us i64 = t1 - t0

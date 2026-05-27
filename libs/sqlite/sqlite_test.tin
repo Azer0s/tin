@@ -1,8 +1,6 @@
-// libs/sqlite/sqlite_test - smoke + correctness tests.
-//
-// Each test creates and drops an isolated table so the suite stays
-// deterministic across re-runs.  The shared db file lives in /tmp;
-// tests use unique table names to avoid collisions.
+// libs/sqlite/sqlite_test - end-to-end tests for the blocking
+// sqlite bindings.  Each test creates and drops an isolated table so
+// the suite stays deterministic across re-runs.
 
 use sqlite
 use { sql } from sqlite
@@ -15,68 +13,67 @@ fn fresh_db() sqlite::Connection =
 
 test "open + exec + close round-trip" =
   let db = fresh_db()
-  let n i64 = await db.exec("DROP TABLE IF EXISTS smoke_a", [])
+  let n  i64 = db.exec("DROP TABLE IF EXISTS smoke_a", [])
   assert::ok(n == 0)
-  let n2 i64 = await db.exec("CREATE TABLE smoke_a (id INTEGER)", [])
+  let n2 i64 = db.exec("CREATE TABLE smoke_a (id INTEGER)", [])
   assert::ok(n2 == 0)
   db.close()
 
 test "exec with Int param inserts row" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_b", [])
-  let _create i64 = await db.exec("CREATE TABLE smoke_b (id INTEGER)", [])
-  let r i64 = await db.exec("INSERT INTO smoke_b VALUES (?)", [Int(42)])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS smoke_b", [])
+  let _create i64 = db.exec("CREATE TABLE smoke_b (id INTEGER)", [])
+  let r i64 = db.exec("INSERT INTO smoke_b VALUES (?)", [Int(42)])
   assert::ok(r == 1)
   db.close()
 
 test "exec with Text param inserts row" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_c", [])
-  let _create i64 = await db.exec("CREATE TABLE smoke_c (name TEXT)", [])
-  let r i64 = await db.exec("INSERT INTO smoke_c VALUES (?)", [Text("alice")])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS smoke_c", [])
+  let _create i64 = db.exec("CREATE TABLE smoke_c (name TEXT)", [])
+  let r i64 = db.exec("INSERT INTO smoke_c VALUES (?)", [Text("alice")])
   assert::ok(r == 1)
   db.close()
 
 test "exec with mixed Int + Text params inserts row" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_d", [])
-  let _create i64 = await db.exec("CREATE TABLE smoke_d (id INTEGER, name TEXT)", [])
-  let r i64 = await db.exec("INSERT INTO smoke_d VALUES (?, ?)",
-    [Int(7), Text("bob")])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS smoke_d", [])
+  let _create i64 = db.exec("CREATE TABLE smoke_d (id INTEGER, name TEXT)", [])
+  let r i64 = db.exec("INSERT INTO smoke_d VALUES (?, ?)", [Int(7), Text("bob")])
   assert::ok(r == 1)
   db.close()
 
 test "exec without params still works" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS smoke_e", [])
-  let _create i64 = await db.exec("CREATE TABLE smoke_e (x INTEGER)", [])
-  let r i64 = await db.exec("INSERT INTO smoke_e VALUES (99)", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS smoke_e", [])
+  let _create i64 = db.exec("CREATE TABLE smoke_e (x INTEGER)", [])
+  let r i64 = db.exec("INSERT INTO smoke_e VALUES (99)", [])
   assert::ok(r == 1)
   db.close()
 
 test "exec on bad SQL returns negative error code" =
   let db = fresh_db()
-  let n i64 = await db.exec("THIS IS NOT VALID SQL", [])
+  let n i64 = db.exec("THIS IS NOT VALID SQL", [])
   assert::ok(n < 0)
   db.close()
 
 test "query returns Rows with correct row + column counts" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_a", [])
-  let _create i64 = await db.exec("CREATE TABLE q_a (id INTEGER, name TEXT)", [])
-  let _ia i64 = await db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(1), Text("alice")])
-  let _ib i64 = await db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(2), Text("bob")])
-  let rows = await db.query("SELECT id, name FROM q_a ORDER BY id", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_a", [])
+  let _create i64 = db.exec("CREATE TABLE q_a (id INTEGER, name TEXT)", [])
+  let _ia i64 = db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(1), Text("alice")])
+  let _ib i64 = db.exec("INSERT INTO q_a VALUES (?, ?)", [Int(2), Text("bob")])
+  let rows = db.query("SELECT id, name FROM q_a ORDER BY id", []).unwrap()
   assert::ok(rows.count() == 2)
   assert::ok(rows.cols()  == 2)
   db.close()
 
 test "query Int and Text getters return correct cell values" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_b", [])
-  let _create i64 = await db.exec("CREATE TABLE q_b (id INTEGER, name TEXT)", [])
-  let _ia i64 = await db.exec("INSERT INTO q_b VALUES (?, ?)", [Int(7), Text("hello")])
-  let rows = await db.query("SELECT id, name FROM q_b", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_b", [])
+  let _create i64 = db.exec("CREATE TABLE q_b (id INTEGER, name TEXT)", [])
+  let _ia i64 = db.exec("INSERT INTO q_b VALUES (?, ?)", [Int(7), Text("hello")])
+  let rows = db.query("SELECT id, name FROM q_b", []).unwrap()
   assert::ok(rows.count() == 1)
   let id   i64    = rows.get_i64(0, 0)
   let name string = rows.get_string(0, 1)
@@ -86,12 +83,12 @@ test "query Int and Text getters return correct cell values" =
 
 test "query with WHERE param filters rows" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_c", [])
-  let _create i64 = await db.exec("CREATE TABLE q_c (id INTEGER)", [])
-  let _ia i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(1)])
-  let _ib i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(2)])
-  let _ic i64 = await db.exec("INSERT INTO q_c VALUES (?)", [Int(3)])
-  let rows = await db.query("SELECT id FROM q_c WHERE id >= ? ORDER BY id", [Int(2)])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_c", [])
+  let _create i64 = db.exec("CREATE TABLE q_c (id INTEGER)", [])
+  let _ia i64 = db.exec("INSERT INTO q_c VALUES (?)", [Int(1)])
+  let _ib i64 = db.exec("INSERT INTO q_c VALUES (?)", [Int(2)])
+  let _ic i64 = db.exec("INSERT INTO q_c VALUES (?)", [Int(3)])
+  let rows = db.query("SELECT id FROM q_c WHERE id >= ? ORDER BY id", [Int(2)]).unwrap()
   assert::ok(rows.count() == 2)
   assert::ok(rows.get_i64(0, 0) == 2)
   assert::ok(rows.get_i64(1, 0) == 3)
@@ -99,18 +96,18 @@ test "query with WHERE param filters rows" =
 
 test "query on empty table returns zero rows" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_d", [])
-  let _create i64 = await db.exec("CREATE TABLE q_d (x INTEGER)", [])
-  let rows = await db.query("SELECT x FROM q_d", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_d", [])
+  let _create i64 = db.exec("CREATE TABLE q_d (x INTEGER)", [])
+  let rows = db.query("SELECT x FROM q_d", []).unwrap()
   assert::ok(rows.count() == 0)
   db.close()
 
 test "Real param + get_f64 round-trip" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_f", [])
-  let _create i64 = await db.exec("CREATE TABLE q_f (x REAL)", [])
-  let _i i64 = await db.exec("INSERT INTO q_f VALUES (?)", [Real(3.14159)])
-  let rows = await db.query("SELECT x FROM q_f", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_f", [])
+  let _create i64 = db.exec("CREATE TABLE q_f (x REAL)", [])
+  let _i i64 = db.exec("INSERT INTO q_f VALUES (?)", [Real(3.14159)])
+  let rows = db.query("SELECT x FROM q_f", []).unwrap()
   assert::ok(rows.count() == 1)
   let v f64 = rows.get_f64(0, 0)
   assert::ok(v > 3.14158 && v < 3.14160)
@@ -118,12 +115,11 @@ test "Real param + get_f64 round-trip" =
 
 test "implicit coerce: bare i64/string in params array" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_imp", [])
-  let _create i64 = await db.exec("CREATE TABLE q_imp (id INTEGER, name TEXT)", [])
-  // Annotated [SqlValue] binding drives element-wise implicit coerce.
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_imp", [])
+  let _create i64 = db.exec("CREATE TABLE q_imp (id INTEGER, name TEXT)", [])
   let params [sqlite::SqlValue] = [42, "alice"]
-  let _i i64 = await db.exec("INSERT INTO q_imp VALUES (?, ?)", params)
-  let rows = await db.query("SELECT id, name FROM q_imp", [])
+  let _i i64 = db.exec("INSERT INTO q_imp VALUES (?, ?)", params)
+  let rows = db.query("SELECT id, name FROM q_imp", []).unwrap()
   assert::ok(rows.count() == 1)
   assert::ok(rows.get_i64(0, 0) == 42)
   assert::ok(rows.get_string(0, 1) == "alice")
@@ -131,10 +127,10 @@ test "implicit coerce: bare i64/string in params array" =
 
 test "is_null detects SQL NULL columns" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS q_e", [])
-  let _create i64 = await db.exec("CREATE TABLE q_e (a INTEGER, b TEXT)", [])
-  let _ia i64 = await db.exec("INSERT INTO q_e VALUES (?, NULL)", [Int(1)])
-  let rows = await db.query("SELECT a, b FROM q_e", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS q_e", [])
+  let _create i64 = db.exec("CREATE TABLE q_e (a INTEGER, b TEXT)", [])
+  let _ia i64 = db.exec("INSERT INTO q_e VALUES (?, NULL)", [Int(1)])
+  let rows = db.query("SELECT a, b FROM q_e", []).unwrap()
   assert::ok(rows.count() == 1)
   assert::ok(rows.is_null(0, 0) == false)
   assert::ok(rows.is_null(0, 1) == true)
@@ -142,13 +138,13 @@ test "is_null detects SQL NULL columns" =
 
 test "_sql macro: identifier placeholders rewrite to `?` + params array" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_a", [])
-  let _create i64 = await db.exec("CREATE TABLE m_a (id INTEGER, name TEXT)", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS m_a", [])
+  let _create i64 = db.exec("CREATE TABLE m_a (id INTEGER, name TEXT)", [])
   let id   i64    = 11
   let name string = "carol"
-  let n i64 = await db.run("INSERT INTO m_a VALUES ({id}, {name})"_sql)
+  let n i64 = db.run("INSERT INTO m_a VALUES ({id}, {name})"_sql)
   assert::ok(n == 1)
-  let rows = await db.fetch("SELECT id, name FROM m_a"_sql)
+  let rows = db.fetch("SELECT id, name FROM m_a"_sql).unwrap()
   assert::ok(rows.count() == 1)
   assert::ok(rows.get_i64(0, 0) == 11)
   assert::ok(rows.get_string(0, 1) == "carol")
@@ -156,75 +152,46 @@ test "_sql macro: identifier placeholders rewrite to `?` + params array" =
 
 test "_sql macro: WHERE clause with single ident binds correctly" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_b", [])
-  let _create i64 = await db.exec("CREATE TABLE m_b (id INTEGER)", [])
-  let _i1 i64 = await db.exec("INSERT INTO m_b VALUES (1)", [])
-  let _i2 i64 = await db.exec("INSERT INTO m_b VALUES (2)", [])
-  let _i3 i64 = await db.exec("INSERT INTO m_b VALUES (3)", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS m_b", [])
+  let _create i64 = db.exec("CREATE TABLE m_b (id INTEGER)", [])
+  let _i1 i64 = db.exec("INSERT INTO m_b VALUES (1)", [])
+  let _i2 i64 = db.exec("INSERT INTO m_b VALUES (2)", [])
+  let _i3 i64 = db.exec("INSERT INTO m_b VALUES (3)", [])
   let cutoff i64 = 2
-  let rows = await db.fetch("SELECT id FROM m_b WHERE id >= {cutoff} ORDER BY id"_sql)
+  let rows = db.fetch("SELECT id FROM m_b WHERE id >= {cutoff} ORDER BY id"_sql).unwrap()
   assert::ok(rows.count() == 2)
   assert::ok(rows.get_i64(0, 0) == 2)
   assert::ok(rows.get_i64(1, 0) == 3)
   db.close()
 
-test "stmt cache: hot-loop INSERTs reuse the prepared statement" =
-  // Correctness check: the cached statement must be reset+bound on
-  // each iteration with no state leaking between calls (e.g. stale
-  // bindings, partial step state).  A 200-iteration loop also
-  // exercises the cache cap; a single SQL string stays cached and
-  // never gets evicted.
+test "Connection.exec_is: shape-specialized fast path" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS m_cache", [])
-  let _create i64 = await db.exec("CREATE TABLE m_cache (id INTEGER)", [])
-  for let i i64 = 0; i < 200; i = i + 1:
-    let _n i64 = await db.exec("INSERT INTO m_cache VALUES (?)", [Int(i)])
-  let rows = await db.query("SELECT COUNT(*) FROM m_cache", [])
-  assert::ok(rows.get_i64(0, 0) == 200)
-  let last = await db.query("SELECT id FROM m_cache ORDER BY id DESC LIMIT 1", [])
-  assert::ok(last.get_i64(0, 0) == 199)
-  db.close()
-
-test "exec_blocking inserts row + skips the worker round-trip" =
-  let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS bl_a", [])
-  let _create i64 = await db.exec("CREATE TABLE bl_a (id INTEGER, name TEXT)", [])
-  let n i64 = db.exec_blocking("INSERT INTO bl_a VALUES (?, ?)", [Int(5), Text("eve")])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS h_a", [])
+  let _create i64 = db.exec("CREATE TABLE h_a (id INTEGER, name TEXT)", [])
+  let n i64 = db.exec_is("INSERT INTO h_a VALUES (?, ?)", 5, "eve")
   assert::ok(n == 1)
-  let rows = await db.query("SELECT id, name FROM bl_a", [])
+  let rows = db.query("SELECT id, name FROM h_a", []).unwrap()
   assert::ok(rows.count() == 1)
   assert::ok(rows.get_i64(0, 0) == 5)
   assert::ok(rows.get_string(0, 1) == "eve")
   db.close()
 
-test "exec_blocking returns negative SQLite code on bad SQL" =
+test "stmt cache: hot-loop INSERTs reuse the prepared statement" =
   let db = fresh_db()
-  let n i64 = db.exec_blocking("THIS IS NOT VALID SQL", [])
-  assert::ok(n < 0)
-  db.close()
-
-test "exec_blocking + async exec interleave on the same Connection" =
-  // The shared db_mu must let async-worker calls and direct
-  // exec_blocking calls take turns without corrupting the stmt cache.
-  let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS bl_b", [])
-  let _create i64 = await db.exec("CREATE TABLE bl_b (id INTEGER)", [])
-  let _a i64 = await db.exec("INSERT INTO bl_b VALUES (?)", [Int(1)])
-  let _b i64 = db.exec_blocking("INSERT INTO bl_b VALUES (?)", [Int(2)])
-  let _c i64 = await db.exec("INSERT INTO bl_b VALUES (?)", [Int(3)])
-  let _d i64 = db.exec_blocking("INSERT INTO bl_b VALUES (?)", [Int(4)])
-  let rows = await db.query("SELECT id FROM bl_b ORDER BY id", [])
-  assert::ok(rows.count() == 4)
-  assert::ok(rows.get_i64(0, 0) == 1)
-  assert::ok(rows.get_i64(1, 0) == 2)
-  assert::ok(rows.get_i64(2, 0) == 3)
-  assert::ok(rows.get_i64(3, 0) == 4)
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS m_cache", [])
+  let _create i64 = db.exec("CREATE TABLE m_cache (id INTEGER)", [])
+  for let i i64 = 0; i < 200; i = i + 1:
+    let _n i64 = db.exec("INSERT INTO m_cache VALUES (?)", [Int(i)])
+  let rows = db.query("SELECT COUNT(*) FROM m_cache", []).unwrap()
+  assert::ok(rows.get_i64(0, 0) == 200)
+  let last = db.query("SELECT id FROM m_cache ORDER BY id DESC LIMIT 1", []).unwrap()
+  assert::ok(last.get_i64(0, 0) == 199)
   db.close()
 
 test "Stmt: prepare-once + bind/step/reset loop inserts all rows" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS s_a", [])
-  let _create i64 = await db.exec("CREATE TABLE s_a (id INTEGER, name TEXT)", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS s_a", [])
+  let _create i64 = db.exec("CREATE TABLE s_a (id INTEGER, name TEXT)", [])
   let stmt = db.prepare("INSERT INTO s_a VALUES (?, ?)").unwrap()
   for let i i64 = 0; i < 5; i = i + 1:
     let _b1 i32 = stmt.bind_int(1, i)
@@ -233,20 +200,20 @@ test "Stmt: prepare-once + bind/step/reset loop inserts all rows" =
     assert::ok(n == 1)
     stmt.reset()
   stmt.close()
-  let rows = await db.query("SELECT COUNT(*) FROM s_a", [])
+  let rows = db.query("SELECT COUNT(*) FROM s_a", []).unwrap()
   assert::ok(rows.get_i64(0, 0) == 5)
   db.close()
 
 test "Stmt: exec_is combinator binds int+text + step in one call" =
   let db = fresh_db()
-  let _drop i64 = await db.exec("DROP TABLE IF EXISTS s_b", [])
-  let _create i64 = await db.exec("CREATE TABLE s_b (id INTEGER, name TEXT)", [])
+  let _drop i64 = db.exec("DROP TABLE IF EXISTS s_b", [])
+  let _create i64 = db.exec("CREATE TABLE s_b (id INTEGER, name TEXT)", [])
   let stmt = db.prepare("INSERT INTO s_b VALUES (?, ?)").unwrap()
   for let i i64 = 0; i < 5; i = i + 1:
     let n i64 = stmt.exec_is(i, "row")
     assert::ok(n == 1)
   stmt.close()
-  let rows = await db.query("SELECT COUNT(*), MAX(id) FROM s_b", [])
+  let rows = db.query("SELECT COUNT(*), MAX(id) FROM s_b", []).unwrap()
   assert::ok(rows.get_i64(0, 0) == 5)
   assert::ok(rows.get_i64(0, 1) == 4)
   db.close()
