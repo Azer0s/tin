@@ -135,6 +135,15 @@ const (
 	// Tag (e.g. #pure, #no_recurse, #sideffect)
 	CONTROL_TAG // #ident
 
+	// Suffix-macro marker that follows a literal token (INT_LIT,
+	// FLOAT_LIT, STRING_LIT, BOOL_LIT) when the source has the form
+	// `<lit>_<ident>(::<ident>)*(!)?` with no intervening whitespace.
+	// Literal field holds the qualified suffix path with an optional
+	// trailing `!` (e.g. "GiB", "GiB!", "units::memory::GiB",
+	// "units::memory::GiB!"). The parser detects the LIT+SUFFIX_IDENT
+	// pair at expression sites and dispatches to suffix-macro lookup.
+	SUFFIX_IDENT
+
 	// Indentation
 	NEWLINE
 	INDENT
@@ -177,8 +186,9 @@ var tokenNames = map[TokenType]string{
 	AT: "@", TILDE: "~", DOTDOTDOT: "...",
 	LPAREN: "(", RPAREN: ")", LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]",
 	COLON: ":", SEMI: ";", COMMA: ",", DOT: ".", HASH: "#",
-	CONTROL_TAG: "TAG",
-	NEWLINE:     "NEWLINE", INDENT: "INDENT", DEDENT: "DEDENT",
+	CONTROL_TAG:  "TAG",
+	SUFFIX_IDENT: "SUFFIX",
+	NEWLINE:      "NEWLINE", INDENT: "INDENT", DEDENT: "DEDENT",
 	EOF: "EOF", ILLEGAL: "ILLEGAL",
 }
 
@@ -264,12 +274,115 @@ func (l *Lexer) Tokenize() ([]Token, error) {
 		}
 
 		l.tokens = append(l.tokens, tok)
+
+		// Suffix-macro pickup: after any literal that can carry a
+		// suffix (INT, FLOAT, STRING, BOOL), if the next chars are
+		// `_<ident-start>` with no intervening whitespace, scan the
+		// qualified suffix path and emit a SUFFIX_IDENT token. The
+		// parser pairs the two and dispatches to the suffix-macro
+		// expander. `_<digit>` does NOT start a suffix; that was
+		// already consumed by the digit-separator rule inside
+		// readNumber, so we only see `_<letter|underscore>` here.
+		//
+		// Degenerate numeric literals (`0x` / `0b` / `0o` with no
+		// digits after the prefix) are NOT suffix carriers: a `0x_FF`
+		// is a malformed hex literal followed by `_FF`, not a `0x`
+		// suffixed by `FF`. Without this guard, the test fixture for
+		// "lexer rejects leading-underscore numeric literal" would
+		// hide its real error behind a "no suffix macro `FF`" gripe.
+		if suffixCarrier(tok.Type) && !isDegenerateNumericLit(tok) &&
+			l.peek() == '_' && isSuffixStart(l.peekAt(1)) {
+			sufTok, err := l.readSuffixIdent(l.line, l.col)
+			if err != nil {
+				return nil, err
+			}
+
+			l.tokens = append(l.tokens, sufTok)
+		}
+
 		if tok.Type == EOF {
 			break
 		}
 	}
 
 	return l.tokens, nil
+}
+
+// isDegenerateNumericLit reports whether tok is a hex/binary/octal
+// literal that has no digits after its prefix (e.g. "0x", "0b").
+// These are malformed; following them with a SUFFIX_IDENT would
+// shadow the real "missing digits" error.
+func isDegenerateNumericLit(tok Token) bool {
+	if tok.Type != INT_LIT {
+		return false
+	}
+
+	s := tok.Literal
+	if len(s) != 2 || s[0] != '0' {
+		return false
+	}
+
+	c := s[1]
+
+	return c == 'x' || c == 'X' || c == 'b' || c == 'B' || c == 'o' || c == 'O'
+}
+
+// suffixCarrier reports whether tt is a literal token that a suffix
+// macro can attach to. Char and atom literals are deliberately
+// excluded; the spec only covers int/float/string/bool kinds.
+func suffixCarrier(tt TokenType) bool {
+	switch tt { //nolint:exhaustive // only the four literal kinds carry suffixes
+	case INT_LIT, FLOAT_LIT, STRING_LIT, BOOL_LIT:
+		return true
+	default:
+		return false
+	}
+}
+
+// isSuffixStart matches the first char of a suffix-macro name: an
+// underscore is rejected (would create `1__foo`) and digits are
+// rejected (`1_0` is a digit separator). Letters only.
+func isSuffixStart(ch rune) bool {
+	return unicode.IsLetter(ch)
+}
+
+// readSuffixIdent consumes `_<ident>(::<ident>)*(!)?` and returns it
+// as a SUFFIX_IDENT token. The leading underscore is consumed but not
+// included in the token's Literal; the trailing `!` IS included so
+// the parser can dispatch directly on the full name. Caller has
+// already verified l.peek() == '_' and isSuffixStart(l.peekAt(1)).
+func (l *Lexer) readSuffixIdent(line, col int) (Token, error) {
+	l.advance() // consume the leading `_`
+
+	var sb strings.Builder
+
+	for {
+		if !unicode.IsLetter(l.peek()) && l.peek() != '_' {
+			return Token{}, fmt.Errorf(
+				"suffix-macro name must start with a letter at %d:%d, got %q",
+				line, col, l.peek())
+		}
+		// Scan one ident segment.
+		for l.pos < len(l.src) &&
+			(unicode.IsLetter(l.peek()) || unicode.IsDigit(l.peek()) || l.peek() == '_') {
+			sb.WriteRune(l.advance())
+		}
+		// Continue across `::` separators.
+		if l.peek() == ':' && l.peekAt(1) == ':' {
+			sb.WriteRune(l.advance())
+			sb.WriteRune(l.advance())
+
+			continue
+		}
+
+		break
+	}
+	// Optional trailing `!` denotes the bang form.
+	if l.peek() == '!' {
+		sb.WriteRune(l.advance())
+	}
+
+	return Token{Type: SUFFIX_IDENT, Literal: sb.String(), Line: line, Col: col}, nil
 }
 
 func (l *Lexer) peek() rune {
@@ -956,6 +1069,29 @@ func (l *Lexer) readIdentOrKeyword(line, col int) (Token, error) {
 	}
 
 	word := sb.String()
+	// Suffix-macro on bool keywords: `true_flag` should lex as
+	// BOOL_LIT("true") followed by SUFFIX_IDENT("flag"), not as one
+	// ident "true_flag". The Tokenize loop's suffix-pickup branch fires
+	// on BOOL_LIT, so we just need to return the keyword early and
+	// rewind so the `_<letter>` tail is the next lexer input.
+	if strings.HasPrefix(word, "true_") || strings.HasPrefix(word, "false_") {
+		split := 4 // "true"
+		if word[0] == 'f' {
+			split = 5 // "false"
+		}
+		// Need at least one suffix char AFTER the underscore: `true_X`
+		// is `true` + suffix `X`, but bare `true_` (with nothing after
+		// the underscore) is just a regular identifier `true_`.
+		if len(word) > split+1 && isSuffixStart(rune(word[split+1])) {
+			// Rewind past everything after the keyword.
+			rewind := len(word) - split
+			l.pos -= rewind
+			l.col -= rewind
+
+			return Token{Type: BOOL_LIT, Literal: word[:split], Line: line, Col: col}, nil
+		}
+	}
+
 	if tt, ok := keywords[word]; ok {
 		lit := word
 		if tt == BOOL_LIT {

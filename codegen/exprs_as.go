@@ -11,27 +11,17 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
-// isPtrArithBinExpr reports whether node is a `+` / `-` BinExpr that
-// is plausibly pointer arithmetic.  We can't fully type-check here
-// (the AsExpr emitter runs before the operand has been evaluated to
-// know its LLVM type), so the heuristic peels through nested
-// arithmetic and looks for the BinExpr shape.  False positives at
-// most produce the funny warning on integer-only arithmetic, which
-// is acceptable noise; false negatives would silently skip the warn.
-func isPtrArithBinExpr(n ast.Node) bool {
+// isPtrArithSyntax reports whether node is a `+` / `-` BinExpr.
+// Used as a cheap pre-filter; the actual ptr-arith determination is
+// made post-evaluation by checking the operand's resolved LLVM type
+// (see the call site in genAsExpr).
+func isPtrArithSyntax(n ast.Node) bool {
 	bin, ok := n.(*ast.BinExpr)
 	if !ok || bin == nil {
 		return false
 	}
 
-	if bin.Op != "+" && bin.Op != "-" {
-		return false
-	}
-	// Direct BinExpr arithmetic: this is the candidate.  Whether
-	// the operand actually has pointer type is decided by the
-	// child BinExpr emitter; the warning fires when it would
-	// have been ptr arith and the target is integer.
-	return true
+	return bin.Op == "+" || bin.Op == "-"
 }
 
 func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error) {
@@ -67,27 +57,39 @@ func (cg *CodeGen) genAsExpr(block *ir.Block, e *ast.AsExpr) (value.Value, error
 	// user.  Other AsExpr targets (`as *Trait`, `as any`) stay
 	// rejected because they keep pointer semantics and extend the
 	// view's lifetime past the expression.
-	if irtypes.IsInt(targetType) {
-		// Buddy... I see what you're trying to do here and you're
-		// fooling no one. But if you really try to shoot yourself in
-		// the foot, I won't stop you.
-		if isPtrArithBinExpr(e.Expr) {
+	prevTransient := cg.transientPtrAllowed
+	mayBePtrArith := irtypes.IsInt(targetType) && isPtrArithSyntax(e.Expr)
+
+	if mayBePtrArith {
+		cg.transientPtrAllowed = true
+	}
+
+	val, err := cg.genExpr(block, e.Expr)
+
+	if mayBePtrArith {
+		cg.transientPtrAllowed = prevTransient
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Type-driven warning: only fire when the operand actually resolved
+	// to a pointer.  Plain integer/byte arithmetic like `(@'0' + n) as
+	// byte` evaluates to an int and never reaches this branch -- the
+	// pre-Wtransient syntactic check used to flag those as false
+	// positives.
+	if mayBePtrArith {
+		if _, isPtr := val.Type().(*irtypes.PointerType); isPtr {
+			// Buddy... I see what you're trying to do here and you're
+			// fooling no one. But if you really try to shoot yourself in
+			// the foot, I won't stop you.
 			cg.warn("transient-ptr-int-cast", e.Pos(),
 				"casting a pointer-arithmetic result to an integer "+
 					"smuggles the address past the lifetime checker. "+
 					"The integer outlives the view; casting back to a "+
 					"pointer is unchecked and likely use-after-free.")
 		}
-
-		prevTransient := cg.transientPtrAllowed
-		cg.transientPtrAllowed = true
-
-		defer func() { cg.transientPtrAllowed = prevTransient }()
-	}
-
-	val, err := cg.genExpr(block, e.Expr)
-	if err != nil {
-		return nil, err
 	}
 
 	// Trait-pointer downcast: `e as *Concrete` where e is *Trait_iface.

@@ -49,15 +49,14 @@ test "pure memo: many call sites with same arg" =
   assert::equals(step(8), 40328)
   assert::equals(step(8), 40328)
 
-// 3. #pure with {#allow_sideffect} must NOT fold. The block is opaque to
+// 3. #pure with do{#allow_sideffect}: must NOT fold. The block is opaque to
 //    CTFE; the call survives to runtime and the side effect is observable.
 
 fn{#pure} traced_square(n i64) i64 =
   let r i64 = n * n
 
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "traced_square({n}) = {r}"
-  }
 
   return r
 

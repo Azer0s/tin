@@ -330,10 +330,25 @@ func (p *Parser) parseTopLevel() (ast.Node, error) {
 	// Collect leading control tags: fn{#pure #recurse} ...
 	tags := p.parseTags()
 
-	// If parseTags() consumed a {#tag} block, the next token must be a body brace
-	// for a tagged block statement.
+	// `{#tag} { body }` C-brace tagged blocks were removed; use
+	// `do{#tag}: body` at statement scope instead.  Top-level tags
+	// still attach to the following fn/struct/macro/etc decl below.
 	if len(tags) > 0 && p.check(lexer.LBRACE) {
-		return p.parseTaggedBlockWithTags(tags)
+		return nil, p.errorf("`{#tag} { body }` blocks were removed; use `do{#tag}: body` (indent block) or `do{#tag}: stmt` (single-statement inline) instead")
+	}
+
+	// Top-level tags only attach to fn/struct/macro/static - the cases
+	// below that thread `tags` into their downstream parser.  Everywhere
+	// else they were silently dropped (e.g. `{#async} let x = 5` parsed
+	// clean and ran without the tag taking effect).  Surface the typo
+	// instead.  `test` is NOT on this list: parseTestDecl takes no tags
+	// argument, so accepting them here would re-introduce the silent
+	// drop bug.
+	if len(tags) > 0 {
+		t := p.peek().Type
+		if t != lexer.KW_FN && t != lexer.KW_STRUCT && t != lexer.KW_MACRO && t != lexer.KW_STATIC {
+			return nil, p.errorf("tags here are only valid before `fn`, `struct`, `macro` or `static`; got %s", p.peek().Literal)
+		}
 	}
 
 	switch p.peek().Type {
@@ -422,12 +437,18 @@ func (p *Parser) parseTags() []string {
 
 		if p.check(lexer.CONTROL_TAG) {
 			for p.check(lexer.CONTROL_TAG) {
-				tags = append(tags, p.advance().Literal)
-				// optional @fn / @field qualifier
+				name := p.advance().Literal
+				// Optional @qualifier. Most existing consumers use the
+				// bare name and ignore the qualifier; `#suffix@int`
+				// (and any future tag that semantically depends on the
+				// qualifier) joins them as `name@qual` so the consumer
+				// can parse it out without changing the slice shape.
 				if p.check(lexer.AT) {
-					p.advance()
-					p.advance() // qualifier ident
+					p.advance() // consume @
+					name = name + "@" + p.advance().Literal
 				}
+
+				tags = append(tags, name)
 			}
 
 			if p.check(lexer.RBRACE) {

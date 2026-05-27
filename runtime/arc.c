@@ -20,8 +20,14 @@
 #  include <mimalloc.h>
 #endif
 
+// Launder ptr before subtracting sizeof(TinRCHdr) so LLVM cannot trace
+// the result back to a potential alloca and reason its way to UB.  All
+// retain/release/struct-free paths funnel through here, so every reader
+// of the header gets the laundered view.  See runtime.h for the full
+// rationale on _tin_pointer_launder.
 static inline TinRCHdr *_rc_hdr(void *ptr) {
-    return (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    return (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
 }
 
 #if TIN_USE_MIMALLOC
@@ -104,12 +110,20 @@ void _tin_make_shared(void *ptr) {
     __atomic_or_fetch(&hdr->flags, TIN_RC_SHARED, __ATOMIC_RELEASE);
 }
 
-// Increment reference count; immortal and NULL pointers short-circuit.
-// Non-atomic when SHARED is clear; atomic when SHARED is set.  The
-// non-atomic path also clears UNIQUE (rc is moving above 1).  ACQUIRE
-// on the flag load pairs with the RELEASE store in _tin_make_shared.
+// Increment reference count; immortal, NULL and foreign pointers
+// short-circuit.  Non-atomic when SHARED is clear; atomic when SHARED is
+// set.  The non-atomic path also clears UNIQUE (rc is moving above 1).
+// ACQUIRE on the flag load pairs with the RELEASE store in
+// _tin_make_shared.
+//
+// The provenance check at the top makes this safe to emit from codegen
+// for any pointer (libc malloc, addr(), static, stack, Tin arena alike):
+// _tin_is_managed's arena range + header magic probe short-circuits
+// before any hdr field is touched on foreign pointers, both fixing the
+// latent corruption of allocator metadata AND silencing the matching
+// valgrind "invalid read N bytes before block" reports.
 void _tin_retain(void *ptr) {
-    if (!ptr) return;
+    if (!_tin_is_managed(ptr)) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
     uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
     if (flags & TIN_RC_IMMORTAL) return;
@@ -131,9 +145,11 @@ void _tin_retain(void *ptr) {
 // post-release rc lands at 1 on the non-atomic path, set UNIQUE so
 // the single remaining owner can take the in-place mutation fast path
 // at the next CoW site.  Skips free() when the ARENA bit is set --
-// the block's storage is owned by an external arena/pool.
+// the block's storage is owned by an external arena/pool.  Foreign
+// (non-Tin-managed) pointers short-circuit at _tin_is_managed -- see
+// the matching comment in _tin_retain.
 void _tin_release(void *ptr) {
-    if (!ptr) return;
+    if (!_tin_is_managed(ptr)) return;
     TinRCHdr *hdr = _rc_hdr(ptr);
     uint32_t flags = __atomic_load_n(&hdr->flags, __ATOMIC_ACQUIRE);
     if (flags & TIN_RC_IMMORTAL) return;

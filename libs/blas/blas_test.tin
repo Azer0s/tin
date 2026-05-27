@@ -1,3 +1,4 @@
+//!-suppressions=blas.supp
 // libs/blas/blas_test - inline correctness tests for the CBLAS bindings.
 //
 // Inputs are chosen so the result is exactly representable in IEEE 754

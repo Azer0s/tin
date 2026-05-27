@@ -1,6 +1,7 @@
-// For-loop iteration variables are views into the container, not owned
-// by the loop body's scope; `move` on them is rejected.
+// `for ref` iteration variables alias storage in the source container;
+// moving would steal the slot and leave a dangling alias.  Plain
+// `for item in xs` is move-eligible -- it makes a per-iteration copy.
 fn main() =
   let xs = ["a", "b", "c"]
-  for item in xs:
+  for ref item in xs:
     echo move item

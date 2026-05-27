@@ -151,6 +151,15 @@ func (cg *CodeGen) computeFnsTouchingExtern() {
 // structKey is the canonical name (incl. package prefix) used to find
 // the originating source file for `//!-Wno-` lookups.
 func (cg *CodeGen) checkStructUnwrappedCResources(structKey string, sd *ast.StructDecl) {
+	// `#no_copy` structs reject value-form let-bindings and value-form
+	// parameters at compile time, so the "copies will alias the
+	// resource" failure mode this diagnostic guards against is already
+	// structurally impossible -- owners hold the struct via *T and the
+	// single deinit fires on the last pointer drop.
+	if hasTag(sd.Tags, "no_copy") {
+		return
+	}
+
 	for _, f := range sd.Fields {
 		// Weak fields are explicitly non-owning -- the user has told the
 		// compiler this pointer is a borrow, not a managed handle, and

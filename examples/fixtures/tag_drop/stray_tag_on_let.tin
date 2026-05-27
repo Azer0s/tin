@@ -1,0 +1,3 @@
+// {#tag} attached to a non-fn/non-struct statement used to be silently
+// dropped, which masked typos.  Should error.
+{#async} let x = 5

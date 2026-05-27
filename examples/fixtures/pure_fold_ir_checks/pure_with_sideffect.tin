@@ -1,5 +1,5 @@
 fn{#pure} noisy(n i64) i64 =
-  { #allow_sideffect } { echo "n={n}" }
+  do{#allow_sideffect}: echo "n={n}"
   return n + 1
 
 fn main() i64 = return noisy(3)

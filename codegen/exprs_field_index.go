@@ -16,6 +16,18 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 	if _, isNil := e.Expr.(*ast.NilLit); isNil {
 		return nil, cg.nodeErr(e, "field access on nil literal")
 	}
+	// `(*p).field` where `p` is a pointer-to-named-struct could have
+	// been written `p.field` -- the auto-deref below handles either
+	// shape identically.  Default-off via -Wpedantic.
+	if d, ok := e.Expr.(*ast.DerefExpr); ok {
+		if inner := cg.astInferType(d.Expr); inner != nil {
+			if pt, isPtr := inner.(*irtypes.PointerType); isPtr && cg.typeNameOf(pt.ElemType) != "" {
+				cg.warn(DiagRedundantDeref, e.Pos(),
+					"`(*p).%s` could be written `p.%s` -- the compiler auto-derefs a *Struct on `.field`",
+					e.Field, e.Field)
+			}
+		}
+	}
 
 	// `(p + n).field` is a permitted transient consumption: the
 	// pointer-arithmetic view is read (or written) in-place and never
@@ -227,6 +239,19 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	cg.transientPtrAllowed = true
 
 	defer func() { cg.transientPtrAllowed = prevTransient }()
+	// `(*p)[i]` where `p` is a `*[T]` could have been written `p[i]` --
+	// the auto-deref below loads through the pointer the same way.
+	// Default-off via -Wpedantic.
+	if d, ok := e.Expr.(*ast.DerefExpr); ok {
+		if inner := cg.astInferType(d.Expr); inner != nil {
+			if pt, isPtr := inner.(*irtypes.PointerType); isPtr {
+				if isFatArrayPtr(pt.ElemType) || isStringType(pt.ElemType) {
+					cg.warn(DiagRedundantDeref, e.Pos(),
+						"`(*p)[i]` could be written `p[i]` -- the compiler auto-derefs a *[T] / *string on `[i]`")
+				}
+			}
+		}
+	}
 
 	// `arr[lo..hi]` is the canonical range-slice form -- routes to
 	// the unified slice helper that copies into a fresh `_tin_rc_alloc`'d
@@ -268,6 +293,20 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 	arr, err := cg.genExpr(block, e.Expr)
 	if err != nil {
 		return nil, err
+	}
+
+	// Auto-deref: `p[i]` where `p` is `*[T]` (pointer to a fat array)
+	// or `*string` -- load through the pointer once so the fat-array
+	// dispatch below sees the value, not the pointer.  Mirrors the
+	// struct.field auto-deref in genFieldAccess at the top of this
+	// file; without it, `let p = &xs; p[0]` silently mis-typed the
+	// pointer as a fat array and read garbage at runtime.
+	if arr != nil {
+		if pt, ok := arr.Type().(*irtypes.PointerType); ok {
+			if isFatArrayPtr(pt.ElemType) || isStringType(pt.ElemType) {
+				arr = block.NewLoad(pt.ElemType, arr)
+			}
+		}
 	}
 
 	// Clear returnTypeHint while typing the index sub-expression.

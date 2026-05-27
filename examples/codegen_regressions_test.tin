@@ -427,3 +427,11 @@ test "codegen: field-access alloca hoisted out of loop body" =
   expect_substr("field_access_alloca_loop_96.tin",
     "total=6000000")
 
+test "lexer: identifier ending at `true_` / `false_` doesn't panic" =
+  expect_substr("lexer_bool_keyword_underscore_ident_97.tin",
+    "ok  1")
+
+test "macro: backtick body leaves {n} inside strings literal" =
+  expect_substr("macro_backtick_no_substitute_in_string_98.tin",
+    "undefined identifier: n")
+

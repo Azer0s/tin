@@ -8,15 +8,12 @@
 //   let n = await conn.read(&buf[0], 4096)
 //   await conn.write(&buf[0], n)
 //
-// Ownership: the file descriptor lives behind an *rc::Cell so copies of
-// Conn share ownership instead of double-closing on scope exit. Calling
-// .close() is optional (idempotent - POSIX close on an already-closed fd
-// is safe); the cell's dtor at last drop closes whatever the cell still
-// holds. Read the fd via the .fd() accessor.
+// Ownership: the fd lives behind an *rc::Cell so copies of Conn / Server
+// share ownership and io::close runs exactly once at last drop.  The .fd
+// field is cached at construction; reads are zero-cost.
 
 use io
 use rc
-use sync
 use errors
 use result
 use { Result } from result
@@ -43,43 +40,41 @@ data TcpError(errors::Err, print) =
   fn ::print(this TcpError) string = return this.message()
 
 struct Conn (io::AsyncReader, io::AsyncWriter, io::Closeable) =
-  _fd_cell *rc::Cell[i32]
-
-  // fd returns the raw underlying file descriptor.
-  fn fd(this Conn) i32 = return this._fd_cell.payload()
+  fd   i32                    // cached at construction; zero-cost reads
+  cell *rc::Cell[i32]         // io::close at last drop
 
   // read reads up to n bytes from the connection into buf.
   // Returns Future[i64] - use `await conn.read(buf, n)`.
   fn AsyncReader::read(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn io::async_read(this.fd(), buf, n)
+    return spawn io::async_read(this.fd, buf, n)
 
   // write writes up to n bytes from buf to the connection.
   // Returns Future[i64] - use `await conn.write(buf, n)`.
   fn AsyncWriter::write(this Conn, buf *byte, n i64) Future[i64] =
-    return spawn io::async_write(this.fd(), buf, n)
+    return spawn io::async_write(this.fd, buf, n)
 
   fn Closeable::close(this Conn) =
-    io::close(this.fd())
+    io::close(this.fd)
+    this.cell.set(-1)
 
-  fn valid(this Conn) bool =
-    return this.fd() >= 0
+  fn valid(this Conn) bool = return this.fd >= 0
 
 struct Server (io::Closeable) =
-  _fd_cell *rc::Cell[i32]
-
-  fn fd(this Server) i32 = return this._fd_cell.payload()
+  fd   i32
+  cell *rc::Cell[i32]
 
   // accept waits for the next connection.
   fn accept(this Server) Result[Conn, errors::Err] =
-    let fd = tin_tcp_accept_c(this.fd())
+    let fd = tin_tcp_accept_c(this.fd)
 
     if fd < 0:
       return Err(AcceptFailed)
 
-    return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
+    return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
   fn Closeable::close(this Server) =
-    io::close(this.fd())
+    io::close(this.fd)
+    this.cell.set(-1)
 
 // listen creates a TCP server on the given port.
 fn listen(port i32) Result[Server, errors::Err] =
@@ -88,7 +83,7 @@ fn listen(port i32) Result[Server, errors::Err] =
   if fd < 0:
     return Err(CannotBind(port))
 
-  return Ok(Server{_fd_cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Server{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
 // dial connects to host:port via TCP.
 fn dial(host string, port i32) Result[Conn, errors::Err] =
@@ -97,6 +92,6 @@ fn dial(host string, port i32) Result[Conn, errors::Err] =
   if fd < 0:
     return Err(DialFailed(host, port))
 
-  return Ok(Conn{_fd_cell: rc::Cell[i32].new(fd, io::close)})
+  return Ok(Conn{fd: fd, cell: rc::Cell[i32].new(fd, io::close_if_valid)})
 
 export { Conn, Server, TcpError, listen, dial } as tcp

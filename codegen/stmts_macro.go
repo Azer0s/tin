@@ -47,12 +47,20 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 	expanded := substituteMacroNode(body, subst)
 	// Backtick literal body: parse the content as tin source, substitute params, then codegen.
 	if btl, ok := expanded.(*ast.BacktickLit); ok {
-		node, err := parseExprString(btl.Content)
+		// Inside backticks, param substitution happens ONLY through
+		// the explicit `{paramname}` (or `{expr-using-param}`) form.
+		// Bare `n` in the backtick body is left untouched and will
+		// surface as an undefined-identifier error at codegen, so
+		// authors can't accidentally treat the backtick like an
+		// expression body.  `{n * 4000}` evaluates the substitution
+		// (and falls through to constant folding) at codegen time.
+		content := interpolateMacroBacktick(btl.Content, macro.Params, args)
+
+		node, err := parseExprString(content)
 		if err != nil {
 			return nil, fmt.Errorf("macro %s: backtick parse error: %w", macro.Name, err)
 		}
-		// Substitute params into the parsed tree (backtick was an opaque string).
-		node = substituteMacroNode(node, subst)
+
 		retagMacroBody(node, args, callPos)
 
 		return cg.genExpr(block, node)
@@ -61,6 +69,201 @@ func (cg *CodeGen) expandMacro(block *ir.Block, macro *ast.MacroDecl, args []ast
 	retagMacroBody(expanded, args, callPos)
 
 	return cg.genExpr(block, expanded)
+}
+
+// interpolateMacroBacktick walks the backtick body string and replaces
+// every `{expr}` segment with `expr-with-paramnames-substituted` as
+// rendered tin source.  Each param name inside the brace span is
+// swapped for the corresponding argument's PrintExpr form before the
+// surrounding context is reassembled.  The result is a tin-source
+// string that the macro-expansion pipeline reparses and codegens.
+//
+// `{` and `}` outside of an identifier-bearing region are passed
+// through unchanged (e.g. struct-lit braces in `Value{re: 0.0,
+// im: {n} as f64}` survive).  Only `{` immediately followed by a
+// valid expression chunk before its matching `}` is treated as an
+// interpolation.  Nested braces are not supported and would surface as
+// a parse error from the eventual reparse.
+func interpolateMacroBacktick(content string, params []string, args []ast.Node) string {
+	subst := map[string]string{}
+
+	for i, p := range params {
+		if i < len(args) {
+			subst[p] = ast.PrintExpr(args[i])
+		}
+	}
+
+	var out strings.Builder
+
+	i := 0
+
+	isIdentCont := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '_'
+	}
+
+	for i < len(content) {
+		c := content[i]
+		// Skip string literals: `{n}` inside `"..."` is a runtime
+		// string-interp slot, not a macro interpolation.  To inject a
+		// param into a string, use concat: `"hello " ++ {n}`.
+		if c == '"' {
+			out.WriteByte(c)
+
+			i++
+
+			for i < len(content) && content[i] != '"' {
+				if content[i] == '\\' && i+1 < len(content) {
+					out.WriteByte(content[i])
+					out.WriteByte(content[i+1])
+
+					i += 2
+
+					continue
+				}
+
+				out.WriteByte(content[i])
+
+				i++
+			}
+
+			if i < len(content) {
+				out.WriteByte(content[i])
+
+				i++
+			}
+
+			continue
+		}
+
+		if c != '{' {
+			out.WriteByte(c)
+
+			i++
+
+			continue
+		}
+		// Struct-literal / block braces are preceded by an identifier
+		// character (`Value{...}`, `T{...}`).  Interpolation braces
+		// stand alone (`{n}` after whitespace or punctuation).  Use
+		// the preceding char to disambiguate.
+		if i > 0 && isIdentCont(content[i-1]) {
+			out.WriteByte(c)
+
+			i++
+
+			continue
+		}
+		// Scan to the matching `}` at depth 0.
+		depth := 1
+		j := i + 1
+
+		for j < len(content) && depth > 0 {
+			switch content[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+
+			if depth == 0 {
+				break
+			}
+
+			j++
+		}
+
+		if depth != 0 || j >= len(content) {
+			// Unbalanced; pass through verbatim.
+			out.WriteByte(c)
+
+			i++
+
+			continue
+		}
+		// content[i+1:j] is the inner expression.
+		inner := content[i+1 : j]
+		out.WriteString(substituteParamsInSource(inner, subst))
+
+		i = j + 1
+	}
+
+	return out.String()
+}
+
+// substituteParamsInSource scans `src` for whole-word identifiers
+// matching a key in `subst` and replaces them with the mapped source.
+// Identifiers inside string literals or back-tick spans are left
+// alone.  Used by interpolateMacroBacktick to resolve `{n * 4000}`
+// into `4 * 4000` when n=4.
+func substituteParamsInSource(src string, subst map[string]string) string {
+	var out strings.Builder
+
+	isIdentStart := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+	}
+	isIdentCont := func(b byte) bool {
+		return isIdentStart(b) || (b >= '0' && b <= '9')
+	}
+
+	i := 0
+
+	for i < len(src) {
+		c := src[i]
+		// Skip string literals so identifiers inside them stay literal.
+		if c == '"' {
+			out.WriteByte(c)
+
+			i++
+
+			for i < len(src) && src[i] != '"' {
+				if src[i] == '\\' && i+1 < len(src) {
+					out.WriteByte(src[i])
+					out.WriteByte(src[i+1])
+
+					i += 2
+
+					continue
+				}
+
+				out.WriteByte(src[i])
+
+				i++
+			}
+
+			if i < len(src) {
+				out.WriteByte(src[i])
+
+				i++
+			}
+
+			continue
+		}
+
+		if !isIdentStart(c) {
+			out.WriteByte(c)
+
+			i++
+
+			continue
+		}
+
+		j := i + 1
+		for j < len(src) && isIdentCont(src[j]) {
+			j++
+		}
+
+		ident := src[i:j]
+		if repl, ok := subst[ident]; ok {
+			out.WriteString(repl)
+		} else {
+			out.WriteString(ident)
+		}
+
+		i = j
+	}
+
+	return out.String()
 }
 
 // substituteMacroNode replaces identifier nodes matching a macro parameter
@@ -206,6 +409,40 @@ func substituteMacroNode(node ast.Node, subst map[string]ast.Node) ast.Node {
 	}
 
 	return node
+}
+
+// genSuffixCall is the codegen path for a SuffixCallExpr produced by
+// the parser when it sees `<literal>_<suffix>` (optionally with
+// `(extras...)` and a `!`). Resolves the suffix to a `#suffix@<kind>`
+// macro, builds args = [literal, ...extras], dispatches to
+// expandMacro, and emits the result.
+func (cg *CodeGen) genSuffixCall(block *ir.Block, s *ast.SuffixCallExpr) (value.Value, error) {
+	macro := cg.lookupSuffixMacro(s.SuffixName)
+	if macro == nil {
+		return nil, cg.nodeErr(s,
+			"no suffix macro `%s` in scope; import it with `use { %s } from ...` or use the fully-qualified `<lit>_pkg::%s` form",
+			s.SuffixName, strings.TrimSuffix(s.SuffixName, "!"), s.SuffixName)
+	}
+
+	kind := suffixLiteralKind(s.Literal)
+	if kind == "" {
+		return nil, cg.nodeErr(s, "suffix macro `%s` applied to non-literal expression", s.SuffixName)
+	}
+
+	if !macroAcceptsSuffixKind(macro, kind) {
+		return nil, cg.nodeErr(s,
+			"suffix macro `%s` does not accept @%s literals; declared kinds: %s",
+			s.SuffixName, kind, macroDeclaredSuffixKinds(macro))
+	}
+
+	args := append([]ast.Node{s.Literal}, s.ExtraArgs...)
+	if len(args) != len(macro.Params) {
+		return nil, cg.nodeErr(s,
+			"suffix macro `%s` expects %d arg(s) (1 literal + %d extras), got %d total",
+			s.SuffixName, len(macro.Params), len(macro.Params)-1, len(args))
+	}
+
+	return cg.expandMacro(block, macro, args, s.Pos())
 }
 
 // markOutParamVarsHeapOwned marks variables passed as &varName (address-of) to

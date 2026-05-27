@@ -180,6 +180,19 @@ func buildFlagsHash() string {
 		}
 
 		h.Write([]byte{0})
+
+		// valgrindBuild flips runtime.c onto a different compile path
+		// (-DTIN_VALGRIND) so the produced binary differs even when
+		// every other input is identical.  Mixing into the cache key
+		// keeps the default and --valgrind builds in separate cache
+		// slots; without this, a cached non-valgrind binary would
+		// short-circuit a `tin test --valgrind` invocation and the
+		// runtime.c recompile would never even be considered.
+		if valgrindBuild {
+			h.Write([]byte{1})
+		}
+
+		h.Write([]byte{0})
 		h.Write([]byte(targetGOOS))
 		h.Write([]byte{0})
 		h.Write([]byte(targetGOARCH))

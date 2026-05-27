@@ -1,15 +1,15 @@
 # C interop matrix
 
-A reference of every shape Tin ↔ C interop must support, organized by
+A reference of every shape Tin <-> C interop must support, organized by
 direction. Each row corresponds to one test fixture under
 `examples/c_interop_matrix/`. The matrix exists so a regression in
 one corner of the boundary doesn't go unnoticed - every supported
 pattern has a runnable proof.
 
 Direction conventions:
-- **Tin → C**: Tin code calls a C library function via `extern("...")`.
+- **Tin -> C**: Tin code calls a C library function via `extern("...")`.
   The Tin program owns the lifecycle (`tin run`, `tin test`, `tin build`).
-- **C → Tin** (`#interop`): C code calls a Tin function exported via
+- **C -> Tin** (`#interop`): C code calls a Tin function exported via
   `fn{#interop}`. Tin is built with `tin build --lib` and the C program
   drives.
 
@@ -17,9 +17,9 @@ Direction conventions:
 
 | Shape | Where it lives | What changes |
 |-------|---------------|--------------|
-| Scalar ≤8B | Single register (RDI/RSI/... or x0/x1/...) | None |
-| Scalar > 8B, ≤16B | Two registers, by SysV class | None |
-| Struct ≤16B by value | Two registers, all-integer / packed | Trivial coerce |
+| Scalar <=8B | Single register (RDI/RSI/... or x0/x1/...) | None |
+| Scalar > 8B, <=16B | Two registers, by SysV class | None |
+| Struct <=16B by value | Two registers, all-integer / packed | Trivial coerce |
 | Struct > 16B by value | Memory: x86_64 SysV uses `byval`, AAPCS64 uses indirect pointer | Codegen needs explicit byval/sret matching clang |
 | Struct return > 16B | Hidden first param: `sret` on both ABIs | Same |
 | Fat pointer (`string`, `[T]`) | `{ptr, len, cap}` 24B internally | Lowered to `*T` on extern boundary |
@@ -27,7 +27,7 @@ Direction conventions:
 
 ---
 
-## Tin → C: every supported pattern
+## Tin -> C: every supported pattern
 
 ### Scalars
 
@@ -35,7 +35,7 @@ Direction conventions:
 |-----|-----------------------------------|--------------------------------------|-------|
 | T1  | `fn f(x i32) i32`                 | `int32_t f(int32_t)`                 | Baseline |
 | T2  | `fn f(x f64, y f64) f64`          | `double f(double, double)`           | SSE registers |
-| T3  | `fn f(b bool) bool`               | `_Bool f(_Bool)`                     | i1 ↔ i8 boundary trunc/zext |
+| T3  | `fn f(b bool) bool`               | `_Bool f(_Bool)`                     | i1 <-> i8 boundary trunc/zext |
 | T4  | `fn f(out *i64)`                  | `void f(int64_t *)`                  | Out-param via pointer |
 
 ### Strings
@@ -67,26 +67,26 @@ Direction conventions:
 | ID  | Tin signature                     | C signature                          | Notes |
 |-----|-----------------------------------|--------------------------------------|-------|
 | T14 | `fn f(xs [string], n i64) i64`    | `int64_t f(const char **, int64_t)`  | Inline marshal: stack alloca of `char*[n]` |
-| T15 | `fn f(xs [atom], n i64) i64`      | `int64_t f(const char **, int64_t)`  | Same; atom→name lookup per element |
+| T15 | `fn f(xs [atom], n i64) i64`      | `int64_t f(const char **, int64_t)`  | Same; atom->name lookup per element |
 
 ### Structs
 
 | ID  | Tin signature                     | C signature                          | Notes |
 |-----|-----------------------------------|--------------------------------------|-------|
-| T16 | small struct ≤16B by value        | `T f(T)`                             | Register coerce |
+| T16 | small struct <=16B by value        | `T f(T)`                             | Register coerce |
 | T17 | large struct >16B by value        | `T f(T)`                             | byval / sret ABI (see ABI shim) |
 | T18 | `fn f(p *T)` then read fields     | `void f(T *)`                        | Live view via c_data_ptr |
 | T19 | `fn make() *T`                    | `T *make(void)`                      | Non-handover: borrow; mutations visible |
 | T19h| `fn{#handover} make() *T`         | `T *make(void)`                      | Tin RC-ifies; frees C-side |
 | T20 | nested struct param               | `T f(Outer{Inner ...})`              | Recursive native lowering |
-| T21 | `struct{#packed}` ≤8B by value    | `__attribute__((packed)) T`          | Coerces to integer register |
+| T21 | `struct{#packed}` <=8B by value    | `__attribute__((packed)) T`          | Coerces to integer register |
 | T22 | `struct{#packed}` 9-16B by value  | same                                 | Two-eightbyte split |
 
 ### Callbacks
 
 | ID  | Tin signature                     | C signature                          | Notes |
 |-----|-----------------------------------|--------------------------------------|-------|
-| T23 | `fn f(cb fn(i64) i64) i64`        | `int64_t f(int64_t (*)(int64_t))`    | Tin fat-fn-ptr → trampoline |
+| T23 | `fn f(cb fn(i64) i64) i64`        | `int64_t f(int64_t (*)(int64_t))`    | Tin fat-fn-ptr -> trampoline |
 | T24 | `fn f(cb fn(string) i64) i64`     | `int64_t f(int64_t (*)(const char*))`| String marshal in dispatcher |
 | T25 | callback with captured Tin local  | same                                 | env block trampoline |
 | T26 | C stores cb, invokes later        | `void store_cb(...); int call_later(...)` | Trampoline outlives caller fn |
@@ -97,7 +97,7 @@ Direction conventions:
 | ID  | Tin signature                     | C signature                          | Notes |
 |-----|-----------------------------------|--------------------------------------|-------|
 | T28 | `printf("%d", x)`                 | `int printf(const char *, ...)`      | i32 in vararg slot |
-| T29 | `printf("%s", s)`                 | same                                 | string → data ptr in vararg |
+| T29 | `printf("%s", s)`                 | same                                 | string -> data ptr in vararg |
 
 ### Pointers / handles
 
@@ -124,7 +124,7 @@ Direction conventions:
 
 ---
 
-## C → Tin (`#interop`): every supported pattern
+## C -> Tin (`#interop`): every supported pattern
 
 ### Scalars
 
@@ -149,7 +149,7 @@ Direction conventions:
 
 | ID  | Tin signature                                | C signature                                       | Notes |
 |-----|----------------------------------------------|---------------------------------------------------|-------|
-| C5  | `fn{#interop} apply(cb fn(i32) i32, n i32) i32` | `int32_t apply(int32_t (*cb)(int32_t), int32_t)` | C-fn → Tin closure (thunk) |
+| C5  | `fn{#interop} apply(cb fn(i32) i32, n i32) i32` | `int32_t apply(int32_t (*cb)(int32_t), int32_t)` | C-fn -> Tin closure (thunk) |
 | C6  | `fn{#interop} make_adder(b i64) fn(i64) i64` | `tin_cb_i64_from_i64_t make_adder(int64_t)`      | Tin returns closure to C |
 
 ### Pointers / opaque handles
@@ -190,7 +190,7 @@ line per row and the runner test asserts each.
 
 | ID  | Pattern                                                            |
 |-----|--------------------------------------------------------------------|
-| X1  | C makes thing → passes to Tin → Tin stores callback → C invokes later |
+| X1  | C makes thing -> passes to Tin -> Tin stores callback -> C invokes later |
 | X2  | Tin defines closure, passes to C, C-driver main returns, atexit    |
 | X4  | C calls Tin which calls C which calls Tin (re-entry)               |
 | X5  | Multiple Tin closures returned to C, each captures different env   |
@@ -223,10 +223,10 @@ matrix lists them to make the boundary explicit.
 
 Both directions live under `examples/c_interop_matrix/`:
 
-- `tin_to_c/matrix.tin` + `matrix.c` — one Tin test per row (`T1` ...
+- `tin_to_c/matrix.tin` + `matrix.c` -- one Tin test per row (`T1` ...
   `T37`). `./tin test examples/c_interop_matrix/tin_to_c/matrix.tin`
   builds, links, and runs every row.
-- `c_to_tin/lib.tin` + `driver.c` — Tin `#interop` library plus a C
+- `c_to_tin/lib.tin` + `driver.c` -- Tin `#interop` library plus a C
   driver that calls each `c_<letter>_*` function. The runner test
   `examples/c_interop_matrix_c_to_tin_test.tin` builds the lib with
   `tin build --lib`, links with `driver.c` and the runtime, runs the

@@ -39,6 +39,19 @@ int32_t _tin_str_eq(TinString a, TinString b) {
     return memcmp(a.ptr, b.ptr, (size_t)a.len) == 0;
 }
 
+// strcmp-shaped (0 == equal, nonzero == not equal) equality on
+// Tin strings.  Used by codegen as the string-eq backend so that
+// the comparison honours TinString.len instead of running past the
+// last byte to find a NUL terminator -- Tin strings carry their own
+// length, and substring slices in particular have no NUL at the
+// slice boundary, so strcmp would read past the allocation and trip
+// valgrind on "Invalid read 0 bytes after block".
+int32_t _tin_str_memcmp(const char *a, int64_t a_len, const char *b, int64_t b_len) {
+    if (a_len != b_len) return 1;
+    if (a_len == 0)     return 0;
+    return memcmp(a, b, (size_t)a_len) == 0 ? 0 : 1;
+}
+
 // Construct a TinString from a byte buffer (copies the bytes).
 // Uses _tin_rc_alloc so the returned string is ARC-managed (like _tin_str_concat).
 TinString _tin_string_from_bytes(const char *ptr, int64_t len) {

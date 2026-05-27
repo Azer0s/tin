@@ -183,6 +183,25 @@ const (
 	// Removing the cast is a pure cleanup; the resulting program is
 	// type-identical and shorter.  Default-on.
 	DiagRedundantTypeCast = "redundant-type-cast"
+	// DiagRedundantDeref fires on `(*p).field` and `(*p)[i]` when the
+	// compiler's auto-deref would have done the same load -- writing
+	// `p.field` or `p[i]` is shorter and idiomatic.  Only triggers
+	// when the inner pointer dereference is the entire deref, i.e.
+	// the `*` exists solely to load through `p` before the dot/index;
+	// chained or non-pointer derefs are left alone.  Default-off
+	// (pedantic) -- a stylistic nit, not a correctness issue.
+	DiagRedundantDeref = "redundant-deref"
+	// DiagParamMutation fires on a function body that mutates one of
+	// its parameters (assigns to it, writes through a compound target
+	// rooted at it, or hands it to a pointer-receiver method).  Now
+	// that autocopy isolates the mutation from the caller's binding,
+	// such a write is silently a no-op as far as the caller sees;
+	// the warning makes the user confront whether they meant a
+	// pointer receiver (`*T`) or are deliberately operating on a
+	// local copy.  Receiver `this` and explicitly `*T`-typed
+	// parameters are exempt -- both unambiguously signal intent.
+	// Default-off (pedantic).
+	DiagParamMutation = "param-mutation"
 	// DiagRedundantImportPrefix fires when a file imports a nested
 	// package (e.g. `use net::dns`) and then refers to it through the
 	// fully qualified prefix (`net::dns::lookup_host`) instead of the
@@ -407,6 +426,7 @@ var wpedanticWarnings = []string{
 	DiagBareAsyncCall, DiagSyncUsesAwait, DiagDroppableFiber, DiagNonTinThread,
 	DiagSyncFnCoercedToAsync, DiagUncheckedNilDeref, DiagUncheckedDiv, DiagUncheckedIndex,
 	DiagUncheckedReturnedNil, DiagAliasMutation, DiagInteropSelfCall,
+	DiagRedundantDeref, DiagParamMutation,
 }
 
 // diagState tracks the user's preferences for one named warning.

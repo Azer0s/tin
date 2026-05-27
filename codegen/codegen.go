@@ -461,7 +461,7 @@ type CodeGen struct {
 	// monoMods holds dedicated content-addressed modules carrying
 	// monomorphized fn bodies (step 5 of incremental compilation).
 	// Keyed by mono_hash; populated by extractMonoModules during
-	// finalize. main.go reads these via MonoModules() to drive
+	// finalize. cmd/tin/main.go reads these via MonoModules() to drive
 	// .build/mono/<hash>/bin.o caching.
 	monoMods map[string]*ir.Module
 	// structFieldLLVMTypes: struct name -> []LLVM type per user field (for getfield/setfield)
@@ -581,12 +581,24 @@ type CodeGen struct {
 	// musttail calls for mutual tail recursion (non-RC params/return, no defers).
 	mutualTCOEligible bool
 
+	// curIsRefIterGet is true while compiling a `fn ref_iter::get` impl.
+	// Switches the entry retain of `this` and the return retain of the
+	// `*T` result off: the caller of these methods is a for-ref loop
+	// (or a loop-like context) that already pins the source container,
+	// so the borrow they emit is a pure no-op that costs four atomic
+	// ops per iteration on the hot path.
+	curIsRefIterGet bool
+
 	// tcoReportFn is called when a TCO transformation is applied.
 	// caller is the function being compiled; callee is the target (empty for self-TCO).
 	tcoReportFn func(caller, callee string)
 
 	// strcmpFn: lazily declared C strcmp
 	strcmpFn *ir.Func
+	// tinStrMemcmpFn: lazily declared _tin_str_memcmp (length-aware
+	// string equality; used for Tin string == /!= so we don't read
+	// past the slice boundary like strcmp would).
+	tinStrMemcmpFn *ir.Func
 	// anyEqFn: lazily declared _tin_any_eq runtime helper
 	anyEqFn *ir.Func
 
@@ -628,6 +640,16 @@ type CodeGen struct {
 	// Computed once per function body before codegen via
 	// computeImplicitMoveSites; reset at function boundary.
 	implicitMoveSites map[*ast.Identifier]bool
+
+	// methodMayMutateReceiverByType: structName -> methodName -> true
+	// when that specific (struct, method) pair has a pointer receiver
+	// and can therefore mutate `this`.  collectMutatedTargets prefers
+	// this map when it can resolve the receiver expression's type:
+	// distinguishing (A, foo) from (B, foo) lets value-receiver
+	// foo-on-A skip the autocopy even when foo-on-B has a *B
+	// receiver.  Falls back to the bare-name map (over-approximate)
+	// when the receiver type cannot be inferred from the call site.
+	methodMayMutateReceiverByType map[string]map[string]bool
 
 	// methodMayMutateReceiver: method base name -> true if any
 	// definition with this base name takes a pointer receiver (and
@@ -694,7 +716,7 @@ type CodeGen struct {
 	pureFoldDisabled bool
 
 	// stacktraceUsed is set when codegen recognizes a `stacktrace()`
-	// builtin call. main.go branches on the post-Generate value to decide
+	// builtin call. cmd/tin/main.go branches on the post-Generate value to decide
 	// whether to emit unwind tables, link libunwind, and pass `-rdynamic`
 	// (see docs/plans/stacktrace-libunwind.md "Conditional unwind-table
 	// emission"). When false the program pays zero binary-size or runtime
@@ -913,6 +935,15 @@ type CodeGen struct {
 	// save / restore around the recursion so a permitted parent
 	// doesn't accidentally bless deeper non-transient uses.
 	transientPtrAllowed bool
+
+	// identExprContext lets genIdentifier give a fix-it that matches the
+	// shape the bare type name actually appeared in: an array-literal
+	// element vs a match-case pattern vs a generic expression.  Callers
+	// set the value, recurse into genExpr, then restore on the way out.
+	// Without this, the diagnostic falls back to the "match by type"
+	// hint -- which is wrong for the much more common gh#27 case of
+	// `[*Leaf] * n` where the user wanted a multi-init array fill.
+	identExprContext string
 
 	// dfSuppressWarnings is non-zero while the dataflow pass is iterating
 	// a loop body to fixpoint. The first few iterations see a transient

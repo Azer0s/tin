@@ -94,66 +94,67 @@ var (
 // New creates a new CodeGen instance.
 func New(filename string) *CodeGen {
 	cg := &CodeGen{
-		filename:                 filename,
-		mod:                      newModuleWithTriple(),
-		structFields:             make(map[string][]string),
-		structFieldTags:          make(map[string]map[string]string),
-		structFieldTinTypes:      make(map[string][]ast.TypeExpr),
-		genericStructsByArity:    make(map[string]map[int]*ast.StructDecl),
-		genericStructTmplFiles:   make(map[string]string),
-		traitMethodOrder:         make(map[string][]string),
-		traitVtableGlobals:       make(map[string]*ir.Global),
-		traitBorrowVtableGlobals: make(map[string]*ir.Global),
-		traitDataReleaseThunks:   make(map[string]*ir.Func),
-		wildcardMonos:            make(map[string]*ir.Func),
-		traitInstKeys:            make(map[string]string),
-		traitAsyncMethodNames:    make(map[string][]string),
-		traitBareToQualInstKey:   make(map[string]string),
-		implicitConvFns:          make(map[string][]implicitConvEntry),
-		coerceConvFns:            make(map[string][]coerceConvEntry),
-		structVtableOrder:        make(map[string][]string),
-		enumValues:               make(map[string]int64),
-		genericTypeAliases:       make(map[string]*ast.TypeDecl),
-		opTraitImpls:             make(map[string][]opTraitImplEntry),
-		exports:                  make(map[string]string),
-		importedPkgs:             make(map[string]bool),
-		loadedSrcPaths:           make(map[string]bool),
-		constrainedFuncs:         make(map[string]*ast.FuncDecl),
-		genericFuncs:             make(map[string]*ast.FuncDecl),
-		genericFuncOverloads:     make(map[string][]*ast.FuncDecl),
-		genericFuncHomeScopes:    make(map[string]*scope),
-		constrainedFuncInstances: make(map[string]*ir.Func),
-		genericMethodTemplates:   make(map[string]*ast.FuncDecl),
-		macros:                   make(map[string]*ast.MacroDecl),
-		funcDecls:                make(map[string]*ast.FuncDecl),
-		fnParamConventions:       make(map[string]map[string]ParamConvention),
-		methodMayMutateReceiver:  make(map[string]bool),
-		ctfeCache:                make(map[string]ctfeMemoEntry),
-		topLevelVarPos:           make(map[string]ast.Pos),
-		externTLSVars:            make(map[string]*ir.Global),
-		structTypeIDs:            make(map[string]int32),
-		fnTypeIDs:                make(map[string]int32),
-		nextTypeID:               6, // 0-5 reserved for anyTag* primitives (fn=5)
-		structImpls:              make(map[string][]string),
-		deadStrippedMethods:      make(map[string]map[string][]string),
-		structFieldLLVMTypes:     make(map[string][]irtypes.Type),
-		traitChainedInits:        make(map[string][]*ir.Func),
-		traitChainedDeinits:      make(map[string][]*ir.Func),
-		atomCodes:                make(map[string]int32),
-		atomCodeToName:           make(map[int32]string),
-		unionTypeMembers:         make(map[string][]ast.TypeExpr),
-		nativeUnionDecls:         make(map[string]*ast.UnionDecl),
-		unionTypeIDs:             make(map[string]int32),
-		dataTypeIDs:              make(map[string]int32),
-		dataVariants:             make(map[string]map[string]*dataVariantInfo),
-		dataVariantLookup:        make(map[string][]string),
-		dataValueReleaseFns:      make(map[string]*ir.Func),
-		dataValueRetainFns:       make(map[string]*ir.Func),
-		dataValueDeepCopyFns:     make(map[string]*ir.Func),
-		coroCallable:             make(map[string]bool),
-		coloredCallable:          make(map[string]bool),
-		boxedFns:                 make(map[string]bool),
-		fnParkingClass:           make(map[string]bool),
+		filename:                      filename,
+		mod:                           newModuleWithTriple(),
+		structFields:                  make(map[string][]string),
+		structFieldTags:               make(map[string]map[string]string),
+		structFieldTinTypes:           make(map[string][]ast.TypeExpr),
+		genericStructsByArity:         make(map[string]map[int]*ast.StructDecl),
+		genericStructTmplFiles:        make(map[string]string),
+		traitMethodOrder:              make(map[string][]string),
+		traitVtableGlobals:            make(map[string]*ir.Global),
+		traitBorrowVtableGlobals:      make(map[string]*ir.Global),
+		traitDataReleaseThunks:        make(map[string]*ir.Func),
+		wildcardMonos:                 make(map[string]*ir.Func),
+		traitInstKeys:                 make(map[string]string),
+		traitAsyncMethodNames:         make(map[string][]string),
+		traitBareToQualInstKey:        make(map[string]string),
+		implicitConvFns:               make(map[string][]implicitConvEntry),
+		coerceConvFns:                 make(map[string][]coerceConvEntry),
+		structVtableOrder:             make(map[string][]string),
+		enumValues:                    make(map[string]int64),
+		genericTypeAliases:            make(map[string]*ast.TypeDecl),
+		opTraitImpls:                  make(map[string][]opTraitImplEntry),
+		exports:                       make(map[string]string),
+		importedPkgs:                  make(map[string]bool),
+		loadedSrcPaths:                make(map[string]bool),
+		constrainedFuncs:              make(map[string]*ast.FuncDecl),
+		genericFuncs:                  make(map[string]*ast.FuncDecl),
+		genericFuncOverloads:          make(map[string][]*ast.FuncDecl),
+		genericFuncHomeScopes:         make(map[string]*scope),
+		constrainedFuncInstances:      make(map[string]*ir.Func),
+		genericMethodTemplates:        make(map[string]*ast.FuncDecl),
+		macros:                        make(map[string]*ast.MacroDecl),
+		funcDecls:                     make(map[string]*ast.FuncDecl),
+		fnParamConventions:            make(map[string]map[string]ParamConvention),
+		methodMayMutateReceiver:       make(map[string]bool),
+		methodMayMutateReceiverByType: make(map[string]map[string]bool),
+		ctfeCache:                     make(map[string]ctfeMemoEntry),
+		topLevelVarPos:                make(map[string]ast.Pos),
+		externTLSVars:                 make(map[string]*ir.Global),
+		structTypeIDs:                 make(map[string]int32),
+		fnTypeIDs:                     make(map[string]int32),
+		nextTypeID:                    6, // 0-5 reserved for anyTag* primitives (fn=5)
+		structImpls:                   make(map[string][]string),
+		deadStrippedMethods:           make(map[string]map[string][]string),
+		structFieldLLVMTypes:          make(map[string][]irtypes.Type),
+		traitChainedInits:             make(map[string][]*ir.Func),
+		traitChainedDeinits:           make(map[string][]*ir.Func),
+		atomCodes:                     make(map[string]int32),
+		atomCodeToName:                make(map[int32]string),
+		unionTypeMembers:              make(map[string][]ast.TypeExpr),
+		nativeUnionDecls:              make(map[string]*ast.UnionDecl),
+		unionTypeIDs:                  make(map[string]int32),
+		dataTypeIDs:                   make(map[string]int32),
+		dataVariants:                  make(map[string]map[string]*dataVariantInfo),
+		dataVariantLookup:             make(map[string][]string),
+		dataValueReleaseFns:           make(map[string]*ir.Func),
+		dataValueRetainFns:            make(map[string]*ir.Func),
+		dataValueDeepCopyFns:          make(map[string]*ir.Func),
+		coroCallable:                  make(map[string]bool),
+		coloredCallable:               make(map[string]bool),
+		boxedFns:                      make(map[string]bool),
+		fnParkingClass:                make(map[string]bool),
 		knownParkingExterns: map[string]bool{
 			// Channel ops: park on empty / full + closed.
 			"tin_channel_recv_blocking":  true,
@@ -286,36 +287,66 @@ func (cg *CodeGen) initBuiltinTupleTemplates() {
 }
 
 // registerBuiltinTraits pre-populates cg.traits with synthetic declarations for
-// built-in special traits (iter[t]) so structs can implement them without an
-// explicit "trait iter[t] = ..." declaration in the source file.
+// built-in special traits (iter[t], ref_iter[t]) so structs can implement them
+// without an explicit "trait iter[t] = ..." declaration in the source file.
 func (cg *CodeGen) registerBuiltinTraits() {
-	if cg.traitFor(CanonKey("iter")) != nil {
-		return // already declared by user
+	if cg.traitFor(CanonKey("iter")) == nil {
+		// iter[t]: fn len(this iter[t]) i64 = virtual
+		//          fn get(this iter[t], i i64) t = virtual
+		selfType := &ast.GenericType{Name: "iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
+		lenMethod := &ast.FuncDecl{
+			Name:      "len",
+			IsVirtual: true,
+			Params:    []ast.Param{{Name: "this", Type: selfType}},
+			RetType:   &ast.SimpleType{Name: "i64"},
+		}
+		getMethod := &ast.FuncDecl{
+			Name:      "get",
+			IsVirtual: true,
+			Params: []ast.Param{
+				{Name: "this", Type: selfType},
+				{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
+			},
+			RetType: &ast.SimpleType{Name: "t"},
+		}
+		iterTrait := &ast.TraitDecl{
+			Name:       "iter",
+			TypeParams: []string{"t"},
+			Methods:    []*ast.FuncDecl{lenMethod, getMethod},
+		}
+		cg.recordTrait(CanonKey("iter"), iterTrait)
 	}
-	// iter[t]: fn len(this iter[t]) i64 = virtual
-	//          fn get(this iter[t], i i64) t = virtual
-	selfType := &ast.GenericType{Name: "iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
-	lenMethod := &ast.FuncDecl{
-		Name:      "len",
-		IsVirtual: true,
-		Params:    []ast.Param{{Name: "this", Type: selfType}},
-		RetType:   &ast.SimpleType{Name: "i64"},
+
+	if cg.traitFor(CanonKey("ref_iter")) == nil {
+		// ref_iter[t]: fn len(this ref_iter[t]) i64 = virtual
+		//              fn get(this ref_iter[t], i i64) *t = virtual
+		//
+		// Like iter[t] but get returns a pointer into the source storage
+		// so the loop body can mutate elements through `for ref x in xs`.
+		// Required for ref-iteration over a custom container.
+		selfType := &ast.GenericType{Name: "ref_iter", TypeParams: []ast.TypeExpr{&ast.SimpleType{Name: "t"}}}
+		lenMethod := &ast.FuncDecl{
+			Name:      "len",
+			IsVirtual: true,
+			Params:    []ast.Param{{Name: "this", Type: selfType}},
+			RetType:   &ast.SimpleType{Name: "i64"},
+		}
+		getMethod := &ast.FuncDecl{
+			Name:      "get",
+			IsVirtual: true,
+			Params: []ast.Param{
+				{Name: "this", Type: selfType},
+				{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
+			},
+			RetType: &ast.PointerType{Elem: &ast.SimpleType{Name: "t"}},
+		}
+		refIterTrait := &ast.TraitDecl{
+			Name:       "ref_iter",
+			TypeParams: []string{"t"},
+			Methods:    []*ast.FuncDecl{lenMethod, getMethod},
+		}
+		cg.recordTrait(CanonKey("ref_iter"), refIterTrait)
 	}
-	getMethod := &ast.FuncDecl{
-		Name:      "get",
-		IsVirtual: true,
-		Params: []ast.Param{
-			{Name: "this", Type: selfType},
-			{Name: "i", Type: &ast.SimpleType{Name: "i64"}},
-		},
-		RetType: &ast.SimpleType{Name: "t"},
-	}
-	iterTrait := &ast.TraitDecl{
-		Name:       "iter",
-		TypeParams: []string{"t"},
-		Methods:    []*ast.FuncDecl{lenMethod, getMethod},
-	}
-	cg.recordTrait(CanonKey("iter"), iterTrait)
 }
 
 // registerBuiltinOpTraits pre-populates cg.traits with synthetic alias-form

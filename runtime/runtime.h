@@ -126,6 +126,23 @@ void  _tin_heap_init(void);
 // otherwise.  Backs the _tin_retain_ptr / _tin_release_ptr provenance
 // check.  See runtime/heap_arena.c for the range-check rationale.
 int   _tin_is_managed(void *ptr);
+
+// Strip LLVM's provenance tracking from a pointer via an empty
+// volatile inline-asm "barrier" (same pattern as the Linux kernel's
+// READ_ONCE / barrier()).  Zero machine instructions are emitted; only
+// the compiler view changes.  Required at every site that reads at
+// `ptr - sizeof(TinRCHdr)` for a pointer that may originate from an
+// alloca - without it, at -O2 ThinLTO LLVM inlines the read, classifies
+// it as UB-on-foreign-pointer, poison-propagates, and SimplifyCFG
+// collapses the caller's body to `unreachable`.  See heap_arena.c for
+// the full diagnosis.  Volatile is load-bearing: without it later
+// LLVM/clang releases may notice the asm is empty and pure and dissolve
+// the barrier.
+static inline __attribute__((always_inline)) void *_tin_pointer_launder(void *p) {
+    void *r;
+    __asm__ __volatile__("" : "=r"(r) : "0"(p));
+    return r;
+}
 // Mark an ARC-managed block as shared across fiber/thread boundaries.
 // After this call, every retain/release on the block uses atomic
 // memory ops.  Idempotent and uses release ordering so the bit-set

@@ -14,6 +14,30 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
+// chanPtrFieldLoad loads `Channel._ptr` and returns it as a plain
+// `i8*` regardless of whether the field is declared `*void` (default
+// addrspace) or `volatile *void` (addrspace 1).  Channel ships with
+// the volatile form so codegen does not emit an ARC retain/release
+// for the foreign posix_memalign block; the matching-type load + an
+// addrspacecast keeps the inline send/recv fast paths compatible
+// with that declaration without forcing the runtime extern signatures
+// to also live in addrspace 1.
+func chanPtrFieldLoad(block *ir.Block, chanStructTy irtypes.Type, ptrFieldIdx int64, gep value.Value) value.Value {
+	st, ok := chanStructTy.(*irtypes.StructType)
+	if !ok || ptrFieldIdx < 0 || int(ptrFieldIdx) >= len(st.Fields) {
+		return block.NewLoad(irtypes.I8Ptr, gep)
+	}
+
+	fieldTy := st.Fields[ptrFieldIdx]
+	loaded := block.NewLoad(fieldTy, gep)
+
+	if pt, ok := fieldTy.(*irtypes.PointerType); ok && pt.AddrSpace != 0 {
+		return block.NewAddrSpaceCast(loaded, irtypes.I8Ptr)
+	}
+
+	return loaded
+}
+
 func (cg *CodeGen) genInlineAsyncDrive(block *ir.Block, callNode *ast.CallExpr) (value.Value, error) {
 	cg.ensureCoroIntrinsics()
 	cg.ensureFiberRuntime()
@@ -338,7 +362,12 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
-	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
+	// _ptr is declared `volatile *void` so the field's LLVM type is
+	// `i8 addrspace(1)*`.  Load with the matching type, then drop the
+	// address space for the extern call (LLVM rejects bitcast across
+	// address spaces, hence the explicit addrspacecast).  Loading
+	// straight as `i8*` would trip the IR verifier on linux x86_64.
+	chPtr := chanPtrFieldLoad(block, chanStructTy, ptrFieldIdx, ptrFieldGEP)
 
 	// Alloca for val so send_blocking can take &val.  HOIST to function
 	// entry: emitting in `block` would put it inside the caller's for-loop
@@ -400,15 +429,12 @@ func (cg *CodeGen) genDirectChanSend(block *ir.Block, thisPtr value.Value, valAr
 	yieldBlk := cg.newBlock("chan.send.yield")
 	checkHandoffBlk.NewCondBr(isHandoff, handoffBlk, yieldBlk)
 
-	// Handoff: attempt pre-registration in the sender's next recv channel so the
-	// worker can go directly to BLOCKED after coro.suspend instead of routing via
-	// LQ.  If _tin_prepark_next_recv succeeds it sets pending_park, which takes
-	// priority over handoff_yield in the worker's yield-path check.  Either way
-	// the same coro.suspend is used; the worker picks the right path from flags.
-	preparkFn := cg.ensureExternDecl("_tin_prepark_next_recv", irtypes.I32,
-		[]*ir.Param{ir.NewParam("pid", irtypes.I64)}, false)
-	handoffBlk.NewCall(preparkFn, pid)
-	// On resume the send is already complete - go straight to doneBlk.
+	// Handoff: the prepark optimization (advisory pre-registration of
+	// the sender's next recv) was disabled in stdlib/sync/channel_arc.c.
+	// Don't emit the call - it was returning 0 on entry, so every chan-send
+	// handoff site paid for an extern call into a no-op.
+	_ = pid
+	// On resume the send is already complete: go straight to doneBlk.
 	cg.emitInlineChanSuspend("chan.send.handoff", handoffBlk, doneBlk, doneBlk)
 
 	// Park and retry: outer coro suspends until the channel has room.
@@ -465,7 +491,9 @@ func (cg *CodeGen) genDirectChanRecv(block *ir.Block, thisPtr value.Value, elemT
 	ptrFieldGEP := block.NewGetElementPtr(chanStructTy, thisPtr,
 		constant.NewInt(irtypes.I32, 0),
 		constant.NewInt(irtypes.I32, ptrFieldIdx))
-	chPtr := block.NewLoad(irtypes.I8Ptr, ptrFieldGEP)
+	// `_ptr` is `volatile *void` (addrspace 1); see chanPtrFieldLoad
+	// for the matching-addrspace load + addrspacecast rationale.
+	chPtr := chanPtrFieldLoad(block, chanStructTy, ptrFieldIdx, ptrFieldGEP)
 
 	// Alloca for result - written by _tin_channel_recv_direct, persists across
 	// suspensions so the retry loop can safely re-use the slot on wakeup.

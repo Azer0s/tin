@@ -181,14 +181,31 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	// Register in funcDecls so that #pure tag checking applies to methods too.
 	key := methodScopeName(structName, m)
 	cg.funcDecls[key] = m
-	// Track receiver shape so the borrow analyzer can keep `t` as a
-	// candidate borrow when every method named `m.Name` takes a value
-	// receiver.  A single pointer-receiver definition (mutating) flips
-	// the flag for that name globally -- conservative: we only need
-	// one definition to potentially mutate before we refuse to borrow.
-	if len(m.Params) > 0 {
+	// Track receiver-mutation so the borrow analyzer can keep `t` as a
+	// candidate borrow when no method named `m.Name` actually writes to
+	// `this`.  The bare-name map is the conservative fallback for call
+	// sites where the receiver type can't be inferred; the per-type map
+	// records the precise (structName, methodName) shape so resolvable
+	// sites avoid the over-approximation -- e.g. value-receiver `foo`
+	// on A keeps its borrow even when pointer-receiver `foo` on B
+	// exists elsewhere.
+	//
+	// Pointer-receiver alone does NOT imply mutation: methods like
+	// `fn payload(this *Cell[T]) T = return this._payload` borrow
+	// `this` to dodge an autocopy but never write through it.  Probe
+	// the body for an actual mutation rooted at the receiver name.
+	if len(m.Params) > 0 && m.Body != nil {
 		if _, isPtr := m.Params[0].Type.(*ast.PointerType); isPtr {
-			cg.methodMayMutateReceiver[m.Name] = true
+			recv := m.Params[0].Name
+			if recv != "" && cg.collectMutatedTargets(m.Body)[recv] {
+				cg.methodMayMutateReceiver[m.Name] = true
+
+				if cg.methodMayMutateReceiverByType[structName] == nil {
+					cg.methodMayMutateReceiverByType[structName] = map[string]bool{}
+				}
+
+				cg.methodMayMutateReceiverByType[structName][m.Name] = true
+			}
 		}
 	}
 
@@ -244,6 +261,76 @@ func (cg *CodeGen) predeclareMethod(structName string, m *ast.FuncDecl) error {
 	}
 
 	return nil
+}
+
+// refineMethodMutationToFixpoint iterates the receiver-mutation
+// analysis over every method in `stmts` until both the bare-name and
+// per-type maps stop growing.  The single in-line analysis inside
+// predeclareMethod is source-order-sensitive: when method foo() calls
+// this.bar() on the same struct and bar() is declared AFTER foo() in
+// source, foo's mutation through bar is missed (bar isn't yet in the
+// map at the moment foo is analyzed).  Re-running until stable lets a
+// chain of N inter-method calls resolve in N passes.
+func (cg *CodeGen) refineMethodMutationToFixpoint(stmts []ast.Node) {
+	// Monotonic-grow fixpoint: each pass adds at least one entry to one
+	// of the maps, or exits via the !changed gate. With N methods in
+	// the program, the maximum depth of "method A mutates via method B
+	// mutates via method C..." chains is bounded by N, so the loop is
+	// guaranteed to terminate. Use a high panic-bound instead of a
+	// silent cap to catch the impossible case where someone introduces
+	// a back-edge in the propagation that breaks monotonicity.
+	const panicBound = 4096
+
+	for pass := 0; pass < panicBound; pass++ {
+		changed := false
+
+		for _, node := range stmts {
+			sd, ok := node.(*ast.StructDecl)
+			if !ok || len(sd.TypeParams) > 0 {
+				continue
+			}
+
+			aug := cg.augmentStructFromTraits(sd)
+			for _, m := range aug.Methods {
+				if len(m.Params) == 0 || m.Body == nil {
+					continue
+				}
+
+				if _, isPtr := m.Params[0].Type.(*ast.PointerType); !isPtr {
+					continue
+				}
+
+				recv := m.Params[0].Name
+				if recv == "" {
+					continue
+				}
+
+				if !cg.collectMutatedTargets(m.Body)[recv] {
+					continue
+				}
+
+				if !cg.methodMayMutateReceiver[m.Name] {
+					cg.methodMayMutateReceiver[m.Name] = true
+					changed = true
+				}
+
+				if cg.methodMayMutateReceiverByType[aug.Name] == nil {
+					cg.methodMayMutateReceiverByType[aug.Name] = map[string]bool{}
+				}
+
+				if !cg.methodMayMutateReceiverByType[aug.Name][m.Name] {
+					cg.methodMayMutateReceiverByType[aug.Name][m.Name] = true
+					changed = true
+				}
+			}
+		}
+
+		if !changed {
+			return
+		}
+	}
+
+	panic("refineMethodMutationToFixpoint: did not converge in 4096 passes; check for non-monotonic add to methodMayMutateReceiver*")
 }
 
 // predeclareFuncAs is the common implementation for predeclareFunc / predeclareMethod.

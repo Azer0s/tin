@@ -117,7 +117,7 @@ through `opt` and `ld.lld` directly; `clang` is only invoked for C
 source compilation and a few one-shot tooling probes.
 
 ```sh
-go build .
+go build ./cmd/tin
 ./tin
 ```
 

@@ -1,5 +1,5 @@
 // Binding a pointer-arithmetic result to a let is rejected outside
-// `{#unsafe}`: the resulting view's lifetime cannot be tracked
+// `do{#unsafe}:`: the resulting view's lifetime cannot be tracked
 // once it leaves the expression.
 
 fn main() =

@@ -14,6 +14,29 @@ import (
 	"github.com/Azer0s/tin/ast"
 )
 
+// arrayElemIdentContext picks the identExprContext label for an array
+// literal's element AST.  `*Ident` shapes get the pointer variant so
+// the diagnostic can recommend `[&T{...}] * N` (which yields *T); bare
+// `Ident` shapes get the value variant which recommends `[T{...}] * N`.
+// Anything else (calls, literals, ops) falls back to the value form --
+// it'll never reach the type-as-value error path anyway.
+func arrayElemIdentContext(elem ast.Node) string {
+	// `*T` in expression position parses as DerefExpr (the unary `*`
+	// operator).  When the operand is a bare identifier and that
+	// identifier turns out to be a type name, the user almost
+	// certainly wrote `[*T] * N` intending a slice of *T -- bias the
+	// fix-it toward the pointer construction form (`[&T{...}] * N`)
+	// rather than the value form (`[T{...}] * N`, which gives the
+	// wrong element type).
+	if d, ok := elem.(*ast.DerefExpr); ok {
+		if _, identOK := d.Expr.(*ast.Identifier); identOK {
+			return "array_lit_element_ptr"
+		}
+	}
+
+	return "array_lit_element"
+}
+
 func (cg *CodeGen) genArrayLit(block *ir.Block, e *ast.ArrayLit) (value.Value, error) {
 	return cg.genArrayLitWithElemType(block, e, nil)
 }
@@ -44,8 +67,18 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 	}
 
 	vals := make([]value.Value, len(e.Elems))
+
+	// Mark each element evaluation as happening inside an array literal
+	// so genIdentifier's "type-as-value" error points at the right
+	// fix-it ([default(T)] * N) instead of the match-arm hint.
+	prevIdentCtx := cg.identExprContext
+
 	for i, elem := range e.Elems {
+		cg.identExprContext = arrayElemIdentContext(elem)
+
 		v, err := cg.genArgWithTargetType(block, elem, targetElemType)
+		cg.identExprContext = prevIdentCtx
+
 		if err != nil {
 			return nil, err
 		}
@@ -166,7 +199,14 @@ func (cg *CodeGen) genArrayFillBinExpr(block *ir.Block, valNode, countNode ast.N
 		})
 	}
 
+	// Tag valNode evaluation as inside an array literal so a bare
+	// type name in `[Leaf] * n` gets the multi-init fix-it from
+	// genIdentifier instead of the generic constructor hint.
+	prevIdentCtx := cg.identExprContext
+	cg.identExprContext = arrayElemIdentContext(valNode)
 	v, err := cg.genExpr(block, valNode)
+	cg.identExprContext = prevIdentCtx
+
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +269,14 @@ func (cg *CodeGen) genArrayFillBinExpr(block *ir.Block, valNode, countNode ast.N
 // genArrayFillLit generates code for [value; count] fill array literals.
 // Returns a heap-allocated fat-ptr {T*, i64} dynamic array of `count` copies of `value`.
 func (cg *CodeGen) genArrayFillLit(block *ir.Block, e *ast.ArrayFillLit) (value.Value, error) {
+	// `[v; N]` -- same array-element rationale as genArrayLit /
+	// genArrayFillBinExpr: tag the value's evaluation so a bare type
+	// name lands on the multi-init fix-it.
+	prevIdentCtx := cg.identExprContext
+	cg.identExprContext = arrayElemIdentContext(e.Value)
 	v, err := cg.genExpr(block, e.Value)
+	cg.identExprContext = prevIdentCtx
+
 	if err != nil {
 		return nil, err
 	}

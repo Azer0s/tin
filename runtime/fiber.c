@@ -83,6 +83,15 @@ typedef struct {
     // Fibers waiting for this one to finish (protected by _table_mu).
     int64_t  waiters[FIBER_MAX_WAITERS];
     int      waiter_cnt;
+    // Park/unpark hot cluster, isolated on its own cache line:
+    // every _fib_lock/_fib_unlock CASes state_lock and then reads or
+    // writes pending_wakeup / pending_park / pending_join / status.
+    // Keeping them contiguous and aligned to 64 bytes means a single
+    // cache line covers the whole transition, and cross-core unparks
+    // (sender thread writing pending_wakeup, worker thread reading
+    // it) don't invalidate unrelated fields like done_mu / done_cv /
+    // waiters that share TinFiber.  state_lock leads the cluster.
+    _Alignas(64) _Atomic(uint32_t) state_lock;
     // pending_wakeup: set by _tin_fiber_unpark when the fiber is still RUNNING
     // (its coro.suspend hasn't fired yet).  The worker loop checks and clears
     // this flag after _coro_resume returns; if set, it re-enqueues instead of
@@ -97,6 +106,22 @@ typedef struct {
     // also safe.  The worker loop now checks it inside state_lock (state_lock
     // is acquired first; _table_mu is NOT taken for this check).
     int      pending_join;
+    // pending_park: set by _tin_fiber_park (called from async I/O / timer C
+    // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
+    // pending_join: the fiber sets pending_park, continues to its next yield,
+    // and the worker blocks it after _coro_resume returns.  Without this,
+    // the wakeup can fire between _tin_fiber_park and the yield, see BLOCKED,
+    // and enqueue a concurrent resume - causing a double-resume race.
+    // Protected by _table_mu.
+    int      pending_park;
+    // Set to 1 by _tin_fiber_set_direct_recv when a channel sender delivers data
+    // directly to this fiber's recv `out` buffer (bypassing the ring buffer).
+    // The worker loop propagates this to _direct_recv_flag TLS before resuming,
+    // allowing recv_direct's fast path to return 0 without acquiring the mutex.
+    // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
+    // provides release); read by worker after _fib_lock (acquire), safe.
+    // Kept in the cluster because the sender writes it through state_lock too.
+    int      direct_recv_done;
     // os_waiter_cnt: number of non-fiber (OS) threads currently blocked in
     // _tin_fiber_join waiting on done_cv.  Incremented (under _table_mu) before
     // releasing _table_mu for the OS-blocking wait; decremented after the wait.
@@ -109,14 +134,6 @@ typedef struct {
     // even if the fiber completes before _tin_fiber_join is reached.
     // os_waiter_cnt is separate: it is 0 until the OS-blocking wait actually starts.
     int      prejoined;
-    // pending_park: set by _tin_fiber_park (called from async I/O / timer C
-    // helpers) to signal the worker loop.  Same deferred-BLOCKED pattern as
-    // pending_join: the fiber sets pending_park, continues to its next yield,
-    // and the worker blocks it after _coro_resume returns.  Without this,
-    // the wakeup can fire between _tin_fiber_park and the yield, see BLOCKED,
-    // and enqueue a concurrent resume - causing a double-resume race.
-    // Protected by _table_mu.
-    int      pending_park;
     // If the fiber panicked and the panic was caught by the worker loop,
     // this field holds the message as an ARC-managed buffer (via _tin_rc_alloc)
     // so it can be safely wrapped in a TinString by the awaiting fiber.
@@ -126,13 +143,6 @@ typedef struct {
     // Set to 1 when _tin_fiber_get_panic_msg reads a non-NULL panic_msg.
     // Used at shutdown to detect fire-and-forget panics nobody awaited.
     int      panic_checked;
-    // Set to 1 by _tin_fiber_set_direct_recv when a channel sender delivers data
-    // directly to this fiber's recv `out` buffer (bypassing the ring buffer).
-    // The worker loop propagates this to _direct_recv_flag TLS before resuming,
-    // allowing recv_direct's fast path to return 0 without acquiring the mutex.
-    // Visibility: written by sender before _tin_fiber_unpark_fib (_fib_unlock
-    // provides release); read by worker after _fib_lock (acquire), safe.
-    int      direct_recv_done;
     // Set by _tin_fiber_spawn when this fiber spawns a child while running on a
     // worker.  Cleared by the worker loop at the start of each resume and again
     // when the yield path reads it.  Causes the first post-spawn yield to go to
@@ -157,12 +167,6 @@ typedef struct {
     // recv_direct if data wasn't delivered before the LQ pop.  Cleared on recv
     // fast-path, on re-park, and on fiber completion (to remove stale entry).
     void    *preregistered_ch;
-    // Per-fiber spinlock: protects status, pending_park, and pending_wakeup
-    // in the park/unpark hot path.  Replacing the global _table_mu for these
-    // transitions eliminates cross-core cache-line bouncing between workers
-    // when each worker is running a different fiber (e.g. TINMAXPROCS=2).
-    // Lock ordering: _table_mu (outer) -> state_lock (inner) - never reverse.
-    _Atomic(uint32_t) state_lock;
     // Set by _tin_fiber_join_any when a fiber is waiting for any of N targets.
     // _fire_done_waiters checks this to do a CAS-based single-winner wakeup.
     // Protected by _table_mu.
@@ -399,15 +403,38 @@ static TinRunnable _rq_pop(void) {
 #define WORKER_MAX      256                   // max TINMAXPROCS supported
 
 typedef struct {
-    _Atomic(int64_t) top;       // steal pointer (thieves read/CAS)
-    char _pad0[56];             // keep top on its own cache line
-    _Atomic(int64_t) bottom;    // owner pointer (owner reads/writes)
-    char _pad1[56];             // keep bottom on its own cache line
-    TinRunnable      buf[WORKER_LQ_SIZE];
+    // top and bottom each get their own cache line via alignas, so the
+    // thief side (CASing top) and the owner side (writing bottom) don't
+    // false-share.  Previously this was hand-rolled with `_pad0[56]`,
+    // which broke whenever sizeof(int64_t) or earlier struct fields
+    // drifted; the alignas form is layout-stable.  buf[] also takes a
+    // cache-line boundary - without it, `bottom` (8 bytes at offset 64)
+    // shares its line with `buf[0..2]`, and a steal of slot 0 racing
+    // with an owner push at the wrap point dirties the owner's bottom
+    // line.
+    _Alignas(64) _Atomic(int64_t) top;     // steal pointer (thieves read/CAS)
+    _Alignas(64) _Atomic(int64_t) bottom;  // owner pointer (owner reads/writes)
+    _Alignas(64) TinRunnable      buf[WORKER_LQ_SIZE];
     TinFiber        *fibs[WORKER_LQ_SIZE];
 } WorkerLocalQueue;
 
-static WorkerLocalQueue _worker_lqs[WORKER_MAX];
+// Lock the cache-line layout that the steal-bounce comments above
+// promise: top at 0, bottom at 64, buf at 128.  A future field
+// insertion or removed _Alignas would silently drop bottom and buf[0]
+// back into the same line, restoring the false-sharing that motivated
+// the padding.  Caught at C-compile time instead.
+_Static_assert(offsetof(WorkerLocalQueue, top) == 0,
+               "WLQ: top must be at offset 0");
+_Static_assert(offsetof(WorkerLocalQueue, bottom) == 64,
+               "WLQ: bottom must own cache line at offset 64");
+_Static_assert(offsetof(WorkerLocalQueue, buf) == 128,
+               "WLQ: buf must own cache line at offset 128");
+
+// Per-entry alignment so adjacent workers' queues start on cache-line
+// boundaries.  Without this, worker N's `top` could share a line with
+// worker N-1's `fibs[63]` -- every steal would bounce the neighbour's
+// cache.  alignas on the typedef + on the array element gets both halves.
+static _Alignas(64) WorkerLocalQueue _worker_lqs[WORKER_MAX];
 static _Atomic(int)     _worker_idx_counter = 0;
 
 // Forward-declared here so _lq_push/_lq_pop/_worker_push can use them;
@@ -629,6 +656,12 @@ void  _tin_clear_preregistered_ch(void) {
 static pthread_t *_workers    = NULL;
 static int        _worker_cnt = 0;
 
+// Cross-TU flag for "more than one worker exists" -- read by channel_arc.c
+// to elide the Peterson MFENCE when there can be no concurrent fiber on
+// another core (TINMAXPROCS=1).  Set once at fiber init, never updated
+// thereafter, so a relaxed load is safe in the channel hot path.
+int _tin_mt_active = 0;
+
 // Returns 1 if the calling thread is one of the M:N worker threads.
 // Used to decide whether to access _current_pid (a __thread variable) inside
 // _tin_fiber_join: accessing a __thread variable for the first time on a thread
@@ -710,6 +743,205 @@ void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl) {
     }
     _fib_unlock(f);
 }
+
+// Symmetric transfer (E): resume `f` directly from the caller's worker
+// stack, bypassing unpark -> queue -> worker-loop -> resume.  The caller
+// stays alive on the C stack; when `f` next yields, control returns
+// here and the caller continues.  Used by send_blocking's direct-handoff
+// path so the sender doesn't have to yield/be-rescheduled after waking
+// the receiver -- the receiver runs inline, then control flows back to
+// the sender's send() return.
+//
+// Returns 1 if the direct resume happened, 0 if we bailed out (caller
+// must fall back to the normal unpark + handoff_yield path).
+//
+// ARM-only: on x86 the chain serialization regresses pipeline/fanout
+// 3-8% (those benches benefit from worker-level parallelism that E
+// folds into one thread).  Gated at compile time so the function and
+// its TLS slot don't even exist on x86.
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+static __thread int _in_direct_resume = 0;
+
+// Forward decls -- both are defined further down in this file.
+static void _fire_done_waiters(TinFiber *f);
+static int  _free_slot_push(int64_t pid);
+
+int _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl) {
+    TinFiber *f = (TinFiber *)fib;
+    if (!f || !_is_worker || _in_direct_resume) return 0;
+
+    // Per-chain gate: if any chain work is already queued on this
+    // worker, don't pile more synchronous work on top.  Lets multiple
+    // outstanding chains drain in parallel via the scheduler.
+    if (_handoff_q.head != _handoff_q.tail) return 0;
+    if (_worker_runnext_pid >= 0) return 0;
+
+    _fib_lock(f);
+    if (f->status != FIBER_BLOCKED) {
+        // RUNNING or RUNNABLE: another path already owns this fiber.
+        _fib_unlock(f);
+        return 0;
+    }
+    f->status = FIBER_RUNNING;
+    int drf = f->direct_recv_done;
+    f->direct_recv_done = 0;
+    _fib_unlock(f);
+
+    // Save caller worker TLS so we can restore on return.
+    TinFiber *prev_fib  = _current_fib;
+    int64_t   prev_pid  = _current_pid;
+    void     *prev_hdl  = _current_hdl;
+    int       prev_drf  = _direct_recv_flag;
+    void     *prev_dc   = _tin_defer_chain;
+    int       prev_irm  = _inline_result_mode;
+    int       prev_cd   = _coro_done;
+    void     *prev_cr   = _coro_result;
+
+    // Install target as the current fiber.
+    _current_fib        = f;
+    _current_pid        = pid;
+    _current_hdl        = hdl;
+    _direct_recv_flag   = drf;
+    _tin_defer_chain    = f->saved_defer_chain;
+    _inline_result_mode = 0;
+    _coro_done          = 0;
+    _coro_result        = NULL;
+    f->spawned_child    = 0;
+    f->handoff_yield    = 0;
+
+    _in_direct_resume = 1;
+    _tin_panic_catch_begin();
+    _coro_resume(hdl);
+    const char *panicked = _tin_panic_catch_end();
+    _in_direct_resume = 0;
+
+    // Save target's defer chain back into its TinFiber; mirror worker
+    // loop's order at line 1082.
+    f->saved_defer_chain = _tin_defer_chain;
+    _tin_defer_chain     = NULL;
+
+    TinRunnable r = { hdl, pid };
+    int target_done   = _coro_done;
+    void *target_result = _coro_result;
+
+    if (__builtin_expect(panicked != NULL, 0)) {
+        // Mirror worker_loop's panic branch (look for the
+        // `panicked != NULL` arm in worker_loop below).  Target's TLS
+        // is still active here.
+        _direct_recv_flag = 0;
+        if (target_result) {
+            _tin_inline_result_free(target_result);
+            target_result = NULL;
+            _coro_result  = NULL;
+        }
+        _tin_coro_free(hdl);
+        pthread_mutex_lock(&_table_mu);
+        size_t plen = strlen(panicked);
+        char *pmsg_buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
+        memcpy(pmsg_buf, panicked, plen + 1);
+        f->panic_msg = pmsg_buf;
+        atomic_store(&_has_unhandled_panics, 1);
+        f->status    = FIBER_DONE;
+        atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
+        _fire_done_waiters(f);
+        pthread_mutex_lock(&f->done_mu);
+        pthread_cond_broadcast(&f->done_cv);
+        pthread_mutex_unlock(&f->done_mu);
+        pthread_mutex_unlock(&_table_mu);
+        goto restore;
+    }
+
+    if (__builtin_expect(target_done, 0)) {
+        // Mirror worker_loop's _coro_done branch (look for the
+        // `_coro_done` true arm in worker_loop below).
+        _tin_coro_free(hdl);
+        if (f->preregistered_ch) {
+            _tin_chan_remove_recv_waiter(f->preregistered_ch, f->pid);
+            f->preregistered_ch = NULL;
+        }
+        pthread_mutex_lock(&_table_mu);
+        f->result = target_result;
+        f->status = FIBER_DONE;
+        atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
+        int had_waiters = (f->waiter_cnt > 0) || (f->os_waiter_cnt > 0) || f->prejoined;
+        _fire_done_waiters(f);
+        pthread_mutex_lock(&f->done_mu);
+        pthread_cond_broadcast(&f->done_cv);
+        pthread_mutex_unlock(&f->done_mu);
+        if (!had_waiters && !f->panic_msg) {
+            free(f->result);
+            f->result = NULL;
+            if (_free_slot_push(f->pid))
+                _fiber_struct_reclaim(f);
+        }
+        pthread_mutex_unlock(&_table_mu);
+        goto restore;
+    }
+
+    // Mirror worker_loop's "yielded / parked / joined" branch (the
+    // else arm where neither panicked nor target_done fired).
+    // IMPORTANT: handle pending_join before pending_park to match
+    // worker_loop semantics.
+    _fib_lock(f);
+    if (__builtin_expect(f->pending_join, 0)) {
+        f->pending_join = 0;
+        int wake = f->pending_wakeup;
+        if (wake) f->pending_wakeup = 0;
+        if (wake) {
+            f->status = FIBER_RUNNABLE;
+            _fib_unlock(f);
+            _lq_push(r, f);
+        } else {
+            f->status = FIBER_BLOCKED;
+            _fib_unlock(f);
+        }
+    } else if (f->pending_park) {
+        f->pending_park = 0;
+        if (f->pending_wakeup) {
+            f->pending_wakeup = 0;
+            f->status = FIBER_RUNNABLE;
+            _fib_unlock(f);
+            _lq_push(r, f);
+        } else {
+            f->status = FIBER_BLOCKED;
+            _fib_unlock(f);
+        }
+    } else if (f->status == FIBER_RUNNING) {
+        int had_spawn   = f->spawned_child;
+        int had_handoff = f->handoff_yield;
+        f->spawned_child = 0;
+        f->handoff_yield = 0;
+        f->status = FIBER_RUNNABLE;
+        _fib_unlock(f);
+        if (__builtin_expect(had_spawn, 0)) {
+            _yield_to_global(r);
+        } else if (had_handoff) {
+            _handoff_push(r, f);
+        } else if (_worker_selfnext_pid < 0) {
+            _worker_selfnext_pid = r.pid;
+            _worker_selfnext_hdl = r.hdl;
+            _worker_selfnext_fib = f;
+        } else {
+            _lq_push(r, f);
+        }
+    } else {
+        _fib_unlock(f);
+    }
+
+restore:
+    // Restore caller TLS last (worker loop sets _current_pid=-1 / _hdl=NULL
+    // at the END of each iter, AFTER post-resume processing).
+    _current_fib        = prev_fib;
+    _current_pid        = prev_pid;
+    _current_hdl        = prev_hdl;
+    _direct_recv_flag   = prev_drf;
+    _tin_defer_chain    = prev_dc;
+    _inline_result_mode = prev_irm;
+    _coro_done          = prev_cd;
+    _coro_result        = prev_cr;
+    return 1;
+}
+#endif // ARM-only E
 
 // _enqueue_waiter wakes wpid (already locked under _table_mu).
 // Caller must hold w's state_lock; this function releases it.
@@ -1073,7 +1305,7 @@ static void *_worker_thread(void *_) {
 
 // Public API
 
-void _tin_fiber_init(void) {
+static void _tin_fiber_init_once(void) {
     pthread_mutex_lock(&_table_mu);
     if (!_fibers) {
         const char *env = getenv("TINMAXFIBERS");
@@ -1100,7 +1332,8 @@ void _tin_fiber_init(void) {
         if (nworkers <= 0) nworkers = 1;
     }
 
-    _worker_cnt = nworkers;
+    _worker_cnt   = nworkers;
+    _tin_mt_active = (nworkers > 1) ? 1 : 0;
     _workers    = (pthread_t *)malloc((size_t)nworkers * sizeof(pthread_t));
     if (!_workers) { fputs("tin: worker alloc OOM\n", stderr); exit(1); }
 
@@ -1108,7 +1341,14 @@ void _tin_fiber_init(void) {
         int rc = pthread_create(&_workers[i], NULL, _worker_thread, NULL);
         if (rc != 0) {
             fprintf(stderr, "tin: pthread_create worker %d: %d\n", i, rc);
-            exit(1);
+            // _exit, not exit: earlier iterations may have already
+            // spawned workers that are now running.  Calling atexit
+            // handlers + flushing stdio from this half-initialised
+            // state has been observed to deadlock the test runner
+            // (CI hung 30 min after EAGAIN on a constrained runner).
+            // _exit bypasses both and lets `tin test` see a clean
+            // exit-code-1 child.
+            _exit(1);
         }
     }
 
@@ -1116,6 +1356,17 @@ void _tin_fiber_init(void) {
     _tin_io_init();
     // Start the timer thread.
     _tin_timer_init();
+}
+
+// _tin_fiber_init: idempotent + thread-safe.  Concurrent callers (REPL
+// dlsym path, accidental main re-entry from an LTO bug, foreign C
+// threads calling into the runtime) all serialize through pthread_once,
+// which is futex-backed - the losers block in the kernel rather than
+// spinning, which matters on 1-vCPU CI runners where sched_yield on
+// SCHED_OTHER is effectively a no-op since glibc 2.32.
+void _tin_fiber_init(void) {
+    static pthread_once_t _init_once = PTHREAD_ONCE_INIT;
+    pthread_once(&_init_once, _tin_fiber_init_once);
 }
 
 // Reclaim a TinFiber struct: update live-count stats, apply peak decay every

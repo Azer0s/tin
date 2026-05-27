@@ -5,6 +5,7 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -24,13 +25,13 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) required by tin codegen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
           clang --version
           opt --version | head -2
           ld.lld --version
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Verify inline channel fast path is generated
         run: |
@@ -47,6 +48,12 @@ jobs:
 
       - name: Run example tests
         run: ./tin test examples/... -lm
+
+      - name: Run libs/blas tests
+        run: ./tin test libs/blas/...
+
+      - name: Run libs/blas tests under valgrind
+        run: ./tin test --valgrind libs/blas/...
 
       - name: Run fiber example tests
         run: |
@@ -76,7 +83,7 @@ jobs:
             examples/fibers/yield_cpu.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=full "/tmp/tin_fiber_vg_${name}"
           done
 
@@ -86,7 +93,7 @@ jobs:
             [[ "$(basename "$f")" == fiber_* ]] && continue
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            ./tin build --valgrind "$f" -o "/tmp/tin_arc_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_arc_${name}"
           done
 
@@ -127,7 +134,7 @@ jobs:
           for f in examples/io_stress/*.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_io_${name}.test" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done
 
@@ -148,13 +155,13 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) + valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
           clang --version
           opt --version | head -2
           ld.lld --version
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Verify inline channel fast path is generated
         run: |
@@ -165,6 +172,12 @@ jobs:
 
       - name: Run example tests
         run: ./tin test examples/... -lm
+
+      - name: Run libs/blas tests
+        run: ./tin test libs/blas/...
+
+      - name: Run libs/blas tests under valgrind
+        run: ./tin test --valgrind libs/blas/...
 
       - name: Run fiber example tests
         run: |
@@ -190,7 +203,7 @@ jobs:
             examples/fibers/yield_cpu.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_fiber_vg_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=full "/tmp/tin_fiber_vg_${name}"
           done
 
@@ -200,7 +213,7 @@ jobs:
             [[ "$(basename "$f")" == fiber_* ]] && continue
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build "$f" -o "/tmp/tin_arc_${name}" -lm
+            ./tin build --valgrind "$f" -o "/tmp/tin_arc_${name}" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_arc_${name}"
           done
 
@@ -233,7 +246,7 @@ jobs:
           for f in examples/io_stress/*.tin; do
             name=$(basename "$f" .tin)
             echo "=== valgrind: $name ==="
-            ./tin build-test "$f" -o "/tmp/tin_io_${name}.test" -lm
+            ./tin build-test --valgrind "$f" -o "/tmp/tin_io_${name}.test" -lm
             valgrind --error-exitcode=1 --leak-check=no "/tmp/tin_io_${name}.test"
           done
 
@@ -257,7 +270,7 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
 
       - name: Build compiler
-        run: go build -o tin .
+        run: go build -o tin ./cmd/tin
 
       - name: Run example tests
         run: ./tin test examples/...

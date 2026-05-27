@@ -145,17 +145,42 @@ func (cg *CodeGen) genIdentifier(block *ir.Block, e *ast.Identifier) (value.Valu
 		} else if v != nil {
 			return v, nil
 		}
-		// Common confusion: the user wrote `case T:` in a match arm,
-		// thinking T is a pattern that matches values of type T.  The
-		// match parser treats T as an expression (since it has no `is`
-		// keyword) so we end up here.  Detect known type names and
-		// redirect to the `match a.(type)` form Tin uses for runtime
-		// type matching.
+		// A bare type name reached expression position.  Pick the fix-it
+		// that matches the immediate enclosing context: callers that
+		// know they're about to evaluate a match-case pattern, an
+		// array-literal element, etc. set cg.identExprContext so this
+		// message points at the right shape.  Default is the generic
+		// constructor / default-value hint.
 		if cg.isKnownTypeName(e.Name) {
-			return nil, cg.nodeErr(e,
-				"`%s` is a type, not a value - to match by type, write "+
-					"`match <scrutinee>.(type)` (the case arms then bind the "+
-					"matched type, e.g. `case x i64: ...`)", e.Name)
+			switch cg.identExprContext {
+			case "match_arm":
+				return nil, cg.nodeErr(e,
+					"`%s` is a type, not a value - to match by type, write "+
+						"`match <scrutinee>.(type)` (the case arms then bind the "+
+						"matched type, e.g. `case x %s: ...`)", e.Name, e.Name)
+			case "array_lit_element":
+				return nil, cg.nodeErr(e,
+					"`%s` is a type, not a value - the element of an array "+
+						"literal must be a value expression. To fill N slots, "+
+						"write `[default(%s)] * N` (zero value) or "+
+						"`[%s{...}] * N` (fresh instances).",
+					e.Name, e.Name, e.Name)
+			case "array_lit_element_ptr":
+				// User wrote `[*T] * N` -- element type is *T, so `&T{...}`
+				// is the matching constructor (yields a *T) and
+				// `default(*T)` gives nil pointers.
+				return nil, cg.nodeErr(e,
+					"`%s` is a type, not a value - the element of an array "+
+						"literal must be a value expression. To fill N slots, "+
+						"write `[default(*%s)] * N` (nil pointers) or "+
+						"`[&%s{...}] * N` (fresh-instance pointers).",
+					e.Name, e.Name, e.Name)
+			default:
+				return nil, cg.nodeErr(e,
+					"`%s` is a type, not a value - to construct an instance "+
+						"write `%s{...}`; for the zero value, write `default(%s)`.",
+					e.Name, e.Name, e.Name)
+			}
 		}
 
 		return nil, cg.nodeErr(e, "undefined identifier: %s", e.Name)

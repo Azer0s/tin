@@ -1,0 +1,29 @@
+// Regression: `p[i] = val` where p : *[T] should auto-deref the
+// pointer.  Before the fix, the lvalue path emitted GEP in
+// FatArray-sized strides, producing a `*FatArray` lvalue that the
+// type-checker rejected with "cannot assign value of type i64
+// (declared type [i64])".  Mirrors the rvalue auto-deref in
+// genIndexExpr.
+
+use assert
+
+fn set_at(p *[i64], i i64, v i64) =
+  p[i] = v
+
+fn fill_one(p *[i64]) =
+  p[0] = 99
+  p[1] = 100
+
+test "p[i] = v with p : *[i64] writes through the pointer" =
+  let xs = [1, 2, 3, 4]
+  set_at(&xs, 2, 42)
+  assert::ok(xs[2] == 42)
+  assert::ok(xs[0] == 1)
+  assert::ok(xs[3] == 4)
+
+test "multiple writes through *[i64] hit the same buffer" =
+  let xs = [10, 20, 30]
+  fill_one(&xs)
+  assert::ok(xs[0] == 99)
+  assert::ok(xs[1] == 100)
+  assert::ok(xs[2] == 30)

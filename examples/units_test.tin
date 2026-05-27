@@ -1,0 +1,88 @@
+// Suffix macros: units::time, ::angle, ::si, ::chem.  Each test pins
+// the expected expansion so a regression in macro substitution or in
+// the stdlib unit definitions surfaces here.
+
+use assert
+use { ns, us, ms, s, min, h, d } from units::time
+use { deg, rad } from units::angle
+use { m, mm, cm, km, g, mg, ug, kg } from units::si
+use { Da, kDa, MDa, M, mM, uM, nM, pM, eV, keV, MeV } from units::chem
+use math::complex
+use { i } from math::complex
+
+test "time suffixes produce nanosecond-correct Durations" =
+  assert::ok(1_ns.nanoseconds() == 1)
+  assert::ok(1_us.nanoseconds() == 1000)
+  assert::ok(1_ms.nanoseconds() == 1000000)
+  assert::ok(1_s.nanoseconds() == 1000000000)
+  assert::ok(1_min.nanoseconds() == 60000000000)
+  assert::ok(1_h.nanoseconds() == 3600000000000)
+  assert::ok(1_d.nanoseconds() == 86400000000000)
+
+test "time suffixes scale linearly" =
+  assert::ok(250_ms.nanoseconds() == 250000000)
+  assert::ok(30_s.milliseconds() == 30000)
+  assert::ok(2_h.minutes() == 120)
+
+test "angle deg converts to radians (PI/4 within float epsilon)" =
+  let q = 45.0_deg
+  // 45 deg = pi/4 = 0.7853981633974483
+  assert::ok(q > 0.7853981633 && q < 0.7853981635)
+
+test "angle rad is identity" =
+  let one = 1.0_rad
+  assert::ok(one == 1.0)
+  let half_pi = 1.5707963267948966_rad
+  assert::ok(half_pi == 1.5707963267948966)
+
+test "si length suffixes normalise to metres" =
+  assert::ok(5.0_km == 5000.0)
+  assert::ok(100.0_cm == 1.0)
+  assert::ok(500.0_mm == 0.5)
+  assert::ok(1.0_m == 1.0)
+
+test "si mass suffixes normalise to grams (int + float)" =
+  assert::ok(5_g == 5.0)
+  assert::ok(2_kg == 2000.0)
+  assert::ok(500_mg == 0.5)
+  assert::ok(250_ug == 0.00025)
+  // Float literals also accepted on int+float suffixes.
+  assert::ok(1.5_kg == 1500.0)
+  assert::ok(2.5_g == 2.5)
+
+test "chem mass suffixes normalise to daltons" =
+  assert::ok(1_Da == 1.0)
+  assert::ok(14.4_kDa == 14400.0)
+  assert::ok(2_MDa == 2000000.0)
+
+test "chem concentration suffixes normalise to molar" =
+  assert::ok(1_M == 1.0)
+  assert::ok(250_uM == 0.00025)
+  assert::ok(50_mM == 0.05)
+  assert::ok(1_nM == 0.000000001)
+
+test "chem energy suffixes normalise to eV" =
+  assert::ok(1_eV == 1.0)
+  assert::ok(2.5_keV == 2500.0)
+  assert::ok(10_MeV == 10000000.0)
+
+test "fully-qualified path resolves cross-package suffix" =
+  assert::ok(5.0_units::si::km == 5000.0)
+  assert::ok(1_units::time::s.seconds() == 1)
+  assert::ok(1_units::chem::kDa == 1000.0)
+
+test "complex::i suffix builds imaginary Values" =
+  let z = 2_i
+  assert::ok(z.re == 0.0)
+  assert::ok(z.im == 2.0)
+  let w = 3.5_i
+  assert::ok(w.re == 0.0)
+  assert::ok(w.im == 3.5)
+
+test "complex::i mixes with real arithmetic" =
+  let z = 3.0 + 4_i
+  assert::ok(z.re == 3.0)
+  assert::ok(z.im == 4.0)
+  let abs_z = z.abs()
+  // sqrt(9 + 16) = 5
+  assert::ok(abs_z == 5.0)

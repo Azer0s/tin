@@ -796,6 +796,13 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	prevTCOLoopTop := cg.tcoLoopTop
 	prevTCOParams := cg.tcoParams
 	prevMutualTCO := cg.mutualTCOEligible
+	prevIsRefIterGet := cg.curIsRefIterGet
+	// Mark functions implementing `ref_iter::get` so the entry retain
+	// of `this` and the return retain of the `*T` result are both
+	// suppressed -- the caller (for-ref loop) already holds the source
+	// container alive via dataPtr, so the +1 the borrow would otherwise
+	// add is pure overhead that the matching loop-level release pays.
+	cg.curIsRefIterGet = isRefIterGetImpl(n)
 
 	defer func() {
 		cg.curFn = prevFn
@@ -815,6 +822,7 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		cg.tcoLoopTop = prevTCOLoopTop
 		cg.tcoParams = prevTCOParams
 		cg.mutualTCOEligible = prevMutualTCO
+		cg.curIsRefIterGet = prevIsRefIterGet
 	}()
 
 	// Register function in current scope so recursion works.
@@ -859,6 +867,31 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 	// store does not decrement the caller's shared buffer rc.
 	paramMutatedSet := cg.collectMutatedTargets(n.Body)
 
+	// -Wparam-mutation: flag bodies that write to a parameter.  Now
+	// that autocopy isolates the mutation from the caller's binding,
+	// the write is silently a no-op as far as the caller sees -- the
+	// warning surfaces the discrepancy so users either switch to a
+	// pointer receiver (`*T`) or explicitly own the local copy.
+	// Parameters already declared `*T` are exempt (intent is explicit);
+	// `this` is NOT exempt because the value-receiver-vs-pointer-
+	// receiver choice is the precise design call this diagnostic
+	// exists to surface.  Default-off via -Wpedantic.
+	for _, astParam := range n.Params {
+		if astParam.IsVarArgs || astParam.Name == "" {
+			continue
+		}
+
+		if _, isPtr := astParam.Type.(*ast.PointerType); isPtr {
+			continue
+		}
+
+		if paramMutatedSet[astParam.Name] {
+			cg.warn(DiagParamMutation, n.Pos(),
+				"parameter `%s` of `%s` is mutated inside the body but caller's binding is untouched (autocopy); switch to a `*T` receiver if the caller should see the write",
+				astParam.Name, n.Name)
+		}
+	}
+
 	// Alloca parameters and register them in scope.
 	// Iterate tin params; skip varargs (no LLVM parameter), but register a
 	// null placeholder so the name is defined inside the body.
@@ -890,6 +923,16 @@ func (cg *CodeGen) genFuncDeclAs(n *ast.FuncDecl, scopeName string) error {
 		// params keep today's owned model so the assign rc machinery
 		// has a +1 to release-old against.
 		paramBorrowed := isRC && !paramMutatedSet[astParam.Name]
+		// ref_iter::get's `this` is always a pure borrow: the body's
+		// only job is to hand back `&this.field[...]`.  The caller
+		// (for-ref loop) keeps the source container alive while the
+		// iface lives, so the entry retain + scope-exit release pair
+		// the borrow analyzer would otherwise emit is dead weight on
+		// every iteration -- 4 atomic ops per loop trip on a hot path.
+		if cg.curIsRefIterGet && astParam.Name == "this" {
+			paramBorrowed = true
+		}
+
 		if !paramBorrowed {
 			cg.emitRetain(entry, p)
 		}

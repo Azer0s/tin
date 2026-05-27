@@ -1,0 +1,30 @@
+# libgomp (GNU OpenMP runtime, used by OpenBLAS) leaves a small
+# always-reachable bookkeeping block allocated during dlopen's
+# initialize_env path.  These are never freed because libgomp has no
+# matching destructor; they live for the lifetime of the process and
+# are unrelated to anything Tin allocates.
+#
+# Without these, --errors-for-leak-kinds=all flags the two blocks as
+# valgrind errors and fails the blas tests on Linux.
+{
+   libgomp-initialize-env-malloc-still-reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:gomp_malloc
+   fun:gomp_init_num_threads
+   fun:initialize_env
+   fun:call_init
+   ...
+}
+{
+   libgomp-initialize-env-calloc-still-reachable
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   fun:gomp_malloc_cleared
+   fun:add_initial_icv_to_list
+   fun:initialize_env
+   fun:call_init
+   ...
+}

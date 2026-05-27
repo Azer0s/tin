@@ -1,0 +1,27 @@
+// stdlib/units/time - duration literal suffixes.
+//
+// All suffixes expand at parse time to a `time::Duration` constructed
+// from the underlying nanosecond count.  `30_s` becomes the literal
+// 30_000_000_000-nanosecond Duration value; no runtime multiply.
+//
+// Import:
+//   use { ms, s, min } from units::time
+//   use { sleep } from time
+//
+//   await sleep(30_s)
+//   await sleep(250_ms)
+//
+// Floats are not accepted; use `time::sleep(time::from_ms(...))` with
+// arithmetic for non-integral durations.
+
+use time
+
+macro{#suffix@int #no_excl #no_parens} ns(n)  = `time::from_ns({n})`
+macro{#suffix@int #no_excl #no_parens} us(n)  = `time::from_ns({n * 1000})`
+macro{#suffix@int #no_excl #no_parens} ms(n)  = `time::from_ns({n * 1000000})`
+macro{#suffix@int #no_excl #no_parens} s(n)   = `time::from_ns({n * 1000000000})`
+macro{#suffix@int #no_excl #no_parens} min(n) = `time::from_ns({n * 60000000000})`
+macro{#suffix@int #no_excl #no_parens} h(n)   = `time::from_ns({n * 3600000000000})`
+macro{#suffix@int #no_excl #no_parens} d(n)   = `time::from_ns({n * 86400000000000})`
+
+export { ns, us, ms, s, min, h, d } as time

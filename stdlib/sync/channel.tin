@@ -56,7 +56,7 @@ struct Channel[T] =
   // C-level ref_count in TinChannel -- bump on _fiber_retain, drop on
   // deinit -- which keeps the hot path branch-free.
   //!-Wno-unwrapped-c-resource
-  _ptr *void
+  _ptr volatile *void
 
   // make(cap) requires cap > 0. cap <= 0 panics: zero-capacity
   // ("rendezvous") channels are not supported -- the implementation

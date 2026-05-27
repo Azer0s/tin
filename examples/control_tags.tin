@@ -100,9 +100,8 @@ test "#pure: mutually recursive pure functions" =
 // #pure with #allow_sideffect escape hatch
 
 fn{#pure} debug_square(n i64) i64 =
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "computing square of {n}"
-  }
   return n * n
 
 test "#pure: #allow_sideffect permits echo in block" =
@@ -110,14 +109,12 @@ test "#pure: #allow_sideffect permits echo in block" =
 
 // Multiple sequential #allow_sideffect blocks in the same function
 fn{#pure} logging_compute(n i64) i64 =
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "start: n={n}"
-  }
   let result i64 = n * n * n
 
-  { #allow_sideffect } {
+  do{#allow_sideffect}:
     echo "done: result={result}"
-  }
 
   return result
 

@@ -144,12 +144,11 @@ fn{#async} write_all_impl(fd i32, buf *byte, n i64) =
   loop:
     if sent >= n:
       break
-    { #unsafe } {
+    do{#unsafe}:
       let w = await spawn async_write(fd, buf + sent, n - sent)
       if w <= 0:
         break
       sent = sent + w
-    }
 
 // read_exact reads exactly n bytes from fd into buf, retrying until full or EOF.
 // Returns a Future[i64] holding the total bytes read - use `await io::read_exact(fd, buf, n)`.
@@ -162,17 +161,27 @@ fn{#async} read_exact_impl(fd i32, buf *byte, n i64) i64 =
   loop:
     if got >= n:
       break
-    { #unsafe } {
+    do{#unsafe}:
       let r = await spawn async_read(fd, buf + got, n - got)
       if r <= 0:
         return got
       got = got + r
-    }
 
   return got
 
 // close closes a file descriptor.
 fn close(fd i32) = extern("_tin_fd_close")
+
+// close_if_valid closes fd only when it is non-negative. Use as the
+// rc::Cell dtor for fds that may be explicitly closed before the cell
+// drops: the explicit close path swaps the cell's payload to -1 via
+// `cell.set(-1)`, then this dtor at scope exit sees -1 and skips the
+// second close. Without this guard, dial-based Conn types double-close
+// their fd, and between the two close calls the kernel may have
+// recycled the fd number to an unrelated file.
+fn close_if_valid(fd i32) =
+  if fd >= 0:
+    close(fd)
 
 // Synchronous (blocking) read/write at the syscall level. For fiber-friendly
 // I/O use async_read / async_write instead; these block the OS thread.
@@ -286,7 +295,7 @@ export {
   remove, rename,
   async_read, async_write, sleep,
   write_all, read_exact,
-  close,
+  close, close_if_valid,
   read_sync, write_sync,
   STDIN, STDOUT, STDERR,
   BufferedReader, bufreader,

@@ -33,7 +33,7 @@ fn alloc[t]() *t =
 // no language facility for casting raw `*void` memory into a
 // fat-pointer `[*t]` slice.  Until a `mem::view_slice` builtin
 // lands, callers can drop down to `mem::malloc(n * 8)` and walk
-// the buffer with pointer arithmetic inside an `{#unsafe}` block.
+// the buffer with pointer arithmetic inside a `do{#unsafe}:` block.
 
 // free releases memory previously allocated by malloc/calloc/realloc
 fn free(ptr *void) = extern("free")

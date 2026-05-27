@@ -24,6 +24,14 @@
 //
 // Reference: Dmitry Vyukov, "1024cores Bounded MPMC Queue".
 
+// posix_memalign requires _POSIX_C_SOURCE >= 200112L on strict POSIX
+// builds; without it some toolchains warn/error on implicit declaration
+// under -Werror.  Must come before stdlib.h.
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -37,6 +45,11 @@ void _tin_release(void *ptr);
 void _tin_release_any(int32_t tag, void *data);
 void _tin_release_closure(void *env);
 void _tin_panic(const char *msg);
+
+// Set once in fiber.c::_tin_fiber_init from TINMAXPROCS; 1 when >1 worker
+// thread exists, 0 otherwise.  Used to elide the Peterson MFENCE in the
+// channel fast paths when no concurrent fiber on another core is possible.
+extern int _tin_mt_active;
 
 // rc_kind values must mirror codegen/runtime.go rcKind. Channel uses
 // the kind discriminator to pick the right shape inside each slot:
@@ -110,6 +123,9 @@ extern __thread int _direct_recv_flag;
 void _tin_fiber_set_direct_recv(void *fib);
 void _tin_fiber_unpark_fib(void *fib, int64_t pid, void *hdl);
 void _tin_fiber_mark_handoff_yield(void);
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+int  _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl);
+#endif
 void  _tin_set_recv_hint(void *ch, void *out);
 void *_tin_get_recv_hint_ch(void);
 void *_tin_get_recv_hint_out(void);
@@ -223,42 +239,75 @@ static void _wq_grow_or_panic(TinWaiterQueue *wq, TinFastMutex *fmu, int has_out
 // TinChannel - Vyukov MPMC ring buffer + fiber waiter queues.
 //
 // Cache-line layout:
-//   [0..N]:      ref_count + wq_fmu (waiter-queue lock, uncontended on fast path)
-//   [N..N+64]:   cap, cap_mask, elem_size, rc_kind, closed, wq counters, wq pointers
-//   [aligned]:   enq_pos on its own 64-byte cache line (producer hot)
-//   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot)
-//   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters
-//   [separate]:  data_buf (cap * elem_size bytes)
+//   [line 0]:    hot read-mostly fields (cap_mask, elem_size, seq_buf,
+//                data_buf, cap, rc_kind, single_thread, closed,
+//                recv/send_wq_cnt) -- every fast-path send/recv loads
+//                this one line.
+//   [line 1]:    ref_count -- isolated so cross-thread retain/release
+//                doesn't ping the hot line.
+//   [line 2..N]: wq_fmu + waiter queues -- slow path only.
+//   [aligned]:   enq_pos on its own 64-byte cache line (producer hot).
+//   [aligned]:   deq_pos on its own 64-byte cache line (consumer hot).
+//   [separate]:  seq_buf (aligned_alloc, cap * 8 bytes) - per-slot seq counters.
+//   [separate]:  data_buf (cap * elem_size bytes).
 // ---------------------------------------------------------------------------
 typedef struct TinChannel {
-    atomic_int       ref_count;
-    TinFastMutex     wq_fmu;     // waiter-queue lock (slow path only)
+    // Line 0 holds hot read-mostly metadata (~52 bytes used).  Every
+    // fast-path send/recv touches this line: lf_enqueue reads cap_mask
+    // and seq_buf, the wrappers read rc_kind, single_thread, closed,
+    // and the wq_cnts.  Packing them all here means the hot path loads
+    // 1 cache line of metadata + 1 line for enq_pos (or deq_pos) = 2
+    // lines per op instead of the 3..4 the field-by-field layout used
+    // to cost.  Writes to wq_cnt (slow path, when a fiber parks or
+    // unparks) do invalidate this line on remote cores, but that's
+    // rare.
+    _Alignas(64) int64_t          cap_mask;     // 0..7
+    int64_t                       elem_size;    // 8..15
+    _Atomic(int64_t)             *seq_buf;      // 16..23
+    char                         *data_buf;     // 24..31
+    int64_t                       cap;          // 32..39
+    int                           rc_kind;      // 40..43
+#if defined(__x86_64__) || defined(_M_X64)
+    int                           single_thread; // 44..47, x86 only
+#else
+    int                           _pad_st;       // 44..47, keep layout uniform
+#endif
+    atomic_bool                   closed;        // 48
+    char                          _pad_hot[3];   // 49..51
+    _Atomic(int32_t)              recv_wq_cnt;   // 52..55
+    _Atomic(int32_t)              send_wq_cnt;   // 56..59
+    // 60..63 implicit pad to alignment of next line
 
-    int64_t          cap;
-    int64_t          cap_mask;   // cap - 1 for bitwise AND wrap
-    int64_t          elem_size;
-    atomic_bool      closed;
-    int              rc_kind;
+    // Line 1: ref_count, isolated from the hot line.
+    _Alignas(64) atomic_int       ref_count;
 
-    // Atomic counters for parked waiters.  Checked outside wq_fmu on the fast
-    // path: if 0, no wakeup is needed and wq_fmu is never touched.
-    _Atomic(int32_t) recv_wq_cnt;
-    _Atomic(int32_t) send_wq_cnt;
+    // Lines 2..N: slow-path only (waiter queue lock and queues).
+    _Alignas(64) TinFastMutex     wq_fmu;       // waiter-queue lock
+    TinWaiterQueue                recv_wq;       // protected by wq_fmu
+    TinWaiterQueue                send_wq;       // protected by wq_fmu
 
-    TinWaiterQueue   recv_wq;    // protected by wq_fmu
-    TinWaiterQueue   send_wq;    // protected by wq_fmu
-
-    // Vyukov MPMC ring buffer state.
-    // enq_pos and deq_pos are on separate cache lines to prevent producer-
-    // consumer false sharing.  The 56-byte pads round each out to 64 bytes.
-    _Atomic(int64_t) enq_pos;
-    char             _pad_enq[56];
-    _Atomic(int64_t) deq_pos;
-    char             _pad_deq[56];
-
-    _Atomic(int64_t) *seq_buf;   // cap entries; seq[i] initialized to i
-    char             *data_buf;  // cap * elem_size bytes
+    // Ring-buffer positions: each on its own cache line.
+    _Alignas(64) _Atomic(int64_t) enq_pos;
+    char                          _pad_enq[56];
+    _Alignas(64) _Atomic(int64_t) deq_pos;
+    char                          _pad_deq[56];
 } TinChannel;
+
+// Lock the line-0 field offsets that the hot-path comments above
+// promise. atomic_bool is 1 byte on every tier-1 toolchain (gcc/clang
+// on x86/arm/darwin) but C11 permits it to be wider. A widened
+// atomic_bool would silently shift recv_wq_cnt off the 4-byte
+// boundary the relaxed atomic load assumes, and the field would also
+// cross into line 1, false-sharing with ref_count. Caught at
+// C-compile time instead.
+_Static_assert(sizeof(atomic_bool) == 1,
+               "TinChannel layout assumes atomic_bool == 1 byte");
+_Static_assert(offsetof(TinChannel, closed) == 48,
+               "TinChannel.closed must sit at line-0 offset 48");
+_Static_assert(offsetof(TinChannel, recv_wq_cnt) == 52,
+               "TinChannel.recv_wq_cnt must sit at line-0 offset 52");
+_Static_assert(offsetof(TinChannel, send_wq_cnt) == 56,
+               "TinChannel.send_wq_cnt must sit at line-0 offset 56");
 
 // ---------------------------------------------------------------------------
 // Allocate / retain / release
@@ -284,8 +333,20 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     while (po2 < cap) po2 <<= 1;
     cap = po2;
 
-    TinChannel *ch = (TinChannel *)calloc(1, sizeof(TinChannel));
-    if (!ch) { fputs("tin: channel alloc failed\n", stderr); exit(1); }
+    // _Alignas(64) on internal fields makes _Alignof(TinChannel) == 64,
+    // but plain calloc / malloc on glibc only guarantees 16-byte
+    // alignment.  When the struct base is not 64-aligned, enq_pos /
+    // deq_pos land at struct-base + offset which is also not 64-aligned,
+    // so they straddle cache lines and reintroduce the producer/consumer
+    // false sharing the alignas was meant to prevent.  posix_memalign is
+    // the cross-platform way to ask for a 64-aligned allocation;
+    // memset to zero matches calloc semantics so atomic_init / wq_alloc
+    // and friends see the same zero-init they had before.
+    TinChannel *ch = NULL;
+    if (posix_memalign((void **)&ch, 64, sizeof(TinChannel)) != 0 || !ch) {
+        fputs("tin: channel alloc failed\n", stderr); exit(1);
+    }
+    memset(ch, 0, sizeof(TinChannel));
 
     atomic_init(&ch->ref_count, 1);
     tin_fmutex_init(&ch->wq_fmu);
@@ -294,6 +355,9 @@ void *_tin_channel_new(int64_t cap, int64_t elem_size, int rc_kind) {
     ch->elem_size = elem_size;
     atomic_store_explicit(&ch->closed, false, memory_order_relaxed);
     ch->rc_kind   = rc_kind;
+#if defined(__x86_64__) || defined(_M_X64)
+    ch->single_thread = _tin_mt_active ? 0 : 1;
+#endif
     atomic_store_explicit(&ch->recv_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->send_wq_cnt, 0, memory_order_relaxed);
     atomic_store_explicit(&ch->enq_pos, 0, memory_order_relaxed);
@@ -362,6 +426,27 @@ void _tin_channel_free(void *ptr) {
 // ---------------------------------------------------------------------------
 
 static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc_kind) {
+#if defined(__x86_64__) || defined(_M_X64)
+    // Single-thread fast path (x86 only): with no concurrent worker,
+    // the producer and consumer cannot interleave inside this function
+    // (no yield points), so the Vyukov CAS + per-slot seq machinery is
+    // overkill.  A plain head-tail check suffices.  Saves the LOCK
+    // CMPXCHG and the acquire load per op.  Gated to x86 because on
+    // ARM the CAS is cheap and the per-op branch costs more than it
+    // saves -- measured on M4 Pro.
+    if (__builtin_expect(ch->single_thread, 0)) {
+        int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        if (enq - deq >= ch->cap) return 0;  // full
+        void *dst = ch->data_buf + (enq & ch->cap_mask) * (int64_t)esz;
+        rc_release_slot(dst, rc_kind);
+        _chan_elem_copy(dst, val, esz);
+        rc_retain_slot(dst, rc_kind);
+        atomic_store_explicit(&ch->enq_pos, enq + 1, memory_order_relaxed);
+        return 1;
+    }
+#endif
+
     int64_t pos = atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
@@ -379,7 +464,13 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
                 rc_release_slot(dst, rc_kind);
                 _chan_elem_copy(dst, val, esz);
                 rc_retain_slot(dst, rc_kind);
-                atomic_store_explicit(pseq, pos + 1, memory_order_release);
+                // seq_cst publish (LOCK XCHG on x86) so the store buffer
+                // drains here -- the caller's subsequent recv_wq_cnt load
+                // then sees any concurrent parker's increment without a
+                // separate atomic_thread_fence call.  Replaces the
+                // release-store + post-call MFENCE pair with a single
+                // LOCK op.
+                atomic_store_explicit(pseq, pos + 1, memory_order_seq_cst);
                 return 1;
             }
         } else if (diff < 0) {
@@ -391,6 +482,20 @@ static inline int lf_enqueue(TinChannel *ch, const void *val, size_t esz, int rc
 }
 
 static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind) {
+#if defined(__x86_64__) || defined(_M_X64)
+    // x86-only ST fast path -- see twin in lf_enqueue.
+    if (__builtin_expect(ch->single_thread, 0)) {
+        int64_t enq = (int64_t)atomic_load_explicit(&ch->enq_pos, memory_order_relaxed);
+        int64_t deq = (int64_t)atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
+        if (deq >= enq) return 0;  // empty
+        void *src = ch->data_buf + (deq & ch->cap_mask) * (int64_t)esz;
+        _chan_elem_copy(out, src, esz);
+        if (rc_kind != TIN_RC_NONE) memset(src, 0, esz);
+        atomic_store_explicit(&ch->deq_pos, deq + 1, memory_order_relaxed);
+        return 1;
+    }
+#endif
+
     int64_t pos = atomic_load_explicit(&ch->deq_pos, memory_order_relaxed);
     for (;;) {
         _Atomic(int64_t) *pseq = ch->seq_buf + (pos & ch->cap_mask);
@@ -407,7 +512,8 @@ static inline int lf_dequeue(TinChannel *ch, void *out, size_t esz, int rc_kind)
                 // out's retain). Zero the slot so a future _tin_channel_free
                 // doesn't double-release.
                 if (rc_kind != TIN_RC_NONE) memset(src, 0, esz);
-                atomic_store_explicit(pseq, pos + ch->cap, memory_order_release);
+                // seq_cst publish -- see twin in lf_enqueue for rationale.
+                atomic_store_explicit(pseq, pos + ch->cap, memory_order_seq_cst);
                 return 1;
             }
         } else if (diff < 0) {
@@ -539,7 +645,12 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
     int32_t rcnt = atomic_load_explicit(&ch->recv_wq_cnt, memory_order_relaxed);
     if (__builtin_expect(rcnt == 0, 1)) {
         if (lf_enqueue(ch, val, esz, rc_kind)) {
-            // Check again for newly-parked receivers.
+            // No explicit fence here: lf_enqueue's final seq[pos] publish
+            // is seq_cst (LOCK XCHG on x86), which drains the store
+            // buffer so the recv_wq_cnt load below sees any concurrent
+            // parker's seq_cst increment.  Replaces what used to be a
+            // release-store + atomic_thread_fence(seq_cst) pair with a
+            // single LOCK op inside lf_enqueue.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->recv_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_recv(ch);
@@ -570,10 +681,12 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
         void *rout = ch->recv_wq.outs ? ch->recv_wq.outs[idx] : NULL;
 
         if (rout && ch->cap == 1) {
-            // cap=1 recv_direct: direct delivery + handoff yield.
-            // Handoff lets the receiver run immediately; the sender parks on its
-            // next recv (which is always empty for cap=1 pipelines).
-            // This reduces round-trip parks from 2 to 1 for latency-sensitive paths.
+            // cap=1 recv_direct: direct delivery.  Try symmetric transfer
+            // first (E): resume the receiver inline on this worker's
+            // stack so the sender doesn't have to yield + be rescheduled.
+            // Falls back to unpark + handoff_yield (returning 2) when
+            // already nested in a direct resume or the receiver isn't
+            // in a BLOCKED state we can seize.
             ch->recv_wq.cnt--;
             atomic_fetch_sub_explicit(&ch->recv_wq_cnt, 1, memory_order_relaxed);
             int64_t rpid = ch->recv_wq.pids[idx];
@@ -585,6 +698,14 @@ int _tin_channel_send_blocking(void *ptr, const void *val,
             rc_retain_slot(rout, rc_kind);
             tin_fmutex_unlock(&ch->wq_fmu);
             _tin_fiber_set_direct_recv(rfib);
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+            // Symmetric transfer is an ARM-only win.  On x86 it
+            // regresses pipeline/fanout by 3-8% (it serializes a chain
+            // that would otherwise run in parallel across workers).
+            if (_tin_fiber_direct_resume(rfib, rpid, rhdl)) {
+                return 0;
+            }
+#endif
             _tin_fiber_unpark_fib(rfib, rpid, rhdl);
             _tin_fiber_mark_handoff_yield();
             return 2;
@@ -657,6 +778,7 @@ void *_tin_channel_recv_blocking(void *ptr, int64_t pid) {
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         void *data = _lf_dequeue_tls(ch);
         if (data) {
+            // No explicit fence: lf_dequeue's final seq publish is seq_cst.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);
@@ -753,6 +875,7 @@ int _tin_channel_recv_direct(void *ptr, int64_t pid, void *out) {
     if (__builtin_expect(
             atomic_load_explicit(&ch->send_wq_cnt, memory_order_relaxed) == 0, 1)) {
         if (lf_dequeue(ch, out, esz, ch->rc_kind)) {
+            // No explicit fence: lf_dequeue's final seq publish is seq_cst.
             if (__builtin_expect(
                     atomic_load_explicit(&ch->send_wq_cnt, memory_order_seq_cst) > 0, 0))
                 _wake_one_send(ch);

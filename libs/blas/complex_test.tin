@@ -1,3 +1,4 @@
+//!-suppressions=blas.supp
 // libs/blas/complex_test - inline correctness tests for the z* (double
 // precision complex) CBLAS bindings.
 //

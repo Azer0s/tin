@@ -127,7 +127,7 @@ const pureFnShimPrefix = "__tin_pure_shim_"
 func pureFnShimName(fnName string) string { return pureFnShimPrefix + fnName }
 
 // PureFnShimName is the public alias of pureFnShimName for callers outside
-// the codegen package (main.go's cache emitter). Centralizing this avoids
+// the codegen package (cmd/tin/main.go's cache emitter). Centralizing this avoids
 // the `__tin_pure_shim_<name>` literal getting duplicated across files
 // where one rename would silently desynchronise the cache lookup against
 // the emitted symbol.

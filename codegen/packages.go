@@ -46,7 +46,7 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 
 	p := parser.New(tokens, srcPath)
 	// Pre-scan for #no_parens macros imported via `use { name } from pkg` so the
-	// parser can substitute them as bare tokens (same pattern as main.go).
+	// parser can substitute them as bare tokens (same pattern as cmd/tin/main.go).
 	for name, expansion := range ScanImportedNoParensMacros(srcPath, tokens, cg.stdlibBase(), cg.libsRoots) {
 		p.RegisterNoParensMacro(name, expansion)
 	}
@@ -856,6 +856,13 @@ func (cg *CodeGen) loadPackageFromSource(pkgPath, pkgName, srcPath string) error
 		cg.macros[pkgName+"::"+bareName+"!"] = md
 		cg.macros[pkgName+"."+bareName] = md
 		cg.macros[pkgName+"::"+bareName] = md
+		// Also register under the full import path so a fully-qualified
+		// suffix like `4_units::memory::GiB` resolves without needing
+		// the user to know that `memory` is the local alias.
+		if pkgPath != "" && pkgPath != pkgName {
+			cg.macros[pkgPath+"::"+bareName+"!"] = md
+			cg.macros[pkgPath+"::"+bareName] = md
+		}
 	}
 
 	// Pass 6: propagate re-exported child packages' macros under this

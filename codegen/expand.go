@@ -155,6 +155,9 @@ func (cg *CodeGen) expandNodeMacros(node ast.Node) (ast.Node, error) {
 	}
 
 	switch n := node.(type) {
+	case *ast.SuffixCallExpr:
+		return cg.expandSuffixCall(n)
+
 	case *ast.CallExpr:
 		// Check whether this is a macro call.
 		if id, ok := n.Func.(*ast.Identifier); ok {
@@ -457,6 +460,126 @@ func macroHasTag(m *ast.MacroDecl, tag string) bool {
 	}
 
 	return false
+}
+
+// expandSuffixCall resolves a SuffixCallExpr against the macro
+// registry. The literal becomes the macro's first arg; ExtraArgs feed
+// the remainder. The macro's #suffix@<kind> tag set must include the
+// literal's kind, else a parse-time-style error fires.
+func (cg *CodeGen) expandSuffixCall(s *ast.SuffixCallExpr) (ast.Node, error) {
+	// Expand the literal and any extra args first (they may themselves
+	// contain macro calls).
+	lit, err := cg.expandNodeMacros(s.Literal)
+	if err != nil {
+		return nil, err
+	}
+
+	extra := make([]ast.Node, len(s.ExtraArgs))
+
+	for i, a := range s.ExtraArgs {
+		ea, err := cg.expandNodeMacros(a)
+		if err != nil {
+			return nil, err
+		}
+
+		extra[i] = ea
+	}
+
+	macro := cg.lookupSuffixMacro(s.SuffixName)
+	if macro == nil {
+		return nil, fmt.Errorf("no suffix macro `%s` in scope; import it with `use { %s } from ...` or use the fully-qualified `<lit>_pkg::%s` form",
+			s.SuffixName, strings.TrimSuffix(s.SuffixName, "!"), s.SuffixName)
+	}
+	// Kind check: macro must declare a #suffix@<kind> matching the literal.
+	kind := suffixLiteralKind(lit)
+	if kind == "" {
+		return nil, fmt.Errorf("suffix macro `%s` applied to non-literal expression", s.SuffixName)
+	}
+
+	if !macroAcceptsSuffixKind(macro, kind) {
+		return nil, fmt.Errorf("suffix macro `%s` does not accept @%s literals; declared kinds: %s",
+			s.SuffixName, kind, macroDeclaredSuffixKinds(macro))
+	}
+	// Arity: macro must have exactly len(extra)+1 params (the literal + extras).
+	args := append([]ast.Node{lit}, extra...)
+	if len(args) != len(macro.Params) {
+		return nil, fmt.Errorf("suffix macro `%s` expects %d arg(s) (1 literal + %d extras), got %d total",
+			s.SuffixName, len(macro.Params), len(macro.Params)-1, len(args))
+	}
+
+	cg.progress("suffix " + s.SuffixName)
+
+	return cg.expandMacroToAST(macro, args, s.Pos())
+}
+
+// lookupSuffixMacro finds a #suffix-tagged macro by qualified or bare
+// name. Resolves both bang (`name!`) and no-bang (`name`) entries.
+func (cg *CodeGen) lookupSuffixMacro(name string) *ast.MacroDecl {
+	if m, ok := cg.macros[name]; ok && isSuffixMacro(m) {
+		return m
+	}
+
+	return nil
+}
+
+// suffixLiteralKind reports the spec kind name of n (`int`, `float`,
+// `string`, `bool`). Returns "" for anything not a recognized literal.
+func suffixLiteralKind(n ast.Node) string {
+	switch n.(type) {
+	case *ast.IntLit:
+		return "int"
+	case *ast.FloatLit:
+		return "float"
+	case *ast.StringLit, *ast.InterpolatedString:
+		return "string"
+	case *ast.BoolLit:
+		return "bool"
+	}
+
+	return ""
+}
+
+// isSuffixMacro reports whether m carries any `#suffix@<kind>` tag.
+func isSuffixMacro(m *ast.MacroDecl) bool {
+	for _, t := range m.Tags {
+		if strings.HasPrefix(t, "suffix@") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// macroAcceptsSuffixKind reports whether m has a `#suffix@<kind>` tag
+// matching the given literal kind.
+func macroAcceptsSuffixKind(m *ast.MacroDecl, kind string) bool {
+	want := "suffix@" + kind
+
+	for _, t := range m.Tags {
+		if t == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+// macroDeclaredSuffixKinds returns a comma-joined list of kinds that
+// m declares via #suffix@<kind>, for diagnostics.
+func macroDeclaredSuffixKinds(m *ast.MacroDecl) string {
+	var kinds []string
+
+	for _, t := range m.Tags {
+		if strings.HasPrefix(t, "suffix@") {
+			kinds = append(kinds, "@"+strings.TrimPrefix(t, "suffix@"))
+		}
+	}
+
+	if len(kinds) == 0 {
+		return "(none)"
+	}
+
+	return strings.Join(kinds, ", ")
 }
 
 // lookupMacro tries to find a macro by the full name (e.g. "square!") in cg.macros.

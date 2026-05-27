@@ -1,0 +1,9 @@
+// Regression: lexer panicked with index-out-of-range when an
+// identifier ended at exactly `true_` or `false_` (no char after
+// the underscore).  The bool-keyword-split path indexed word[split+1]
+// without a length check.
+
+fn main() =
+  let false_ = 0
+  let true_ = 1
+  echo("ok ", false_ + true_)

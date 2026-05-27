@@ -641,19 +641,47 @@ func compileIRWithPkgs(ir string, pkgIRs []namedIR, outBin string, libMode bool,
 			}
 		}
 
-		cachedPath, hit, err := csrcCacheLookup(rtC, rtArgs)
-		if err != nil {
-			return err
+		// valgrind: when --valgrind was passed at the tin invocation,
+		// build runtime.c with -DTIN_VALGRIND=1 so heap_arena.c includes
+		// <valgrind/memcheck.h> and wraps the intentional out-of-bounds
+		// magic-probe read in vbits client requests.  Default builds
+		// don't carry any of that machinery: zero rolq sequences, no
+		// signal-handler dance, plain load + compare on the fast path.
+		// The csrc cache key includes argv so the valgrind-enabled .o
+		// lands in its own slot and doesn't collide with default builds.
+		if valgrindBuild {
+			rtArgs = append(rtArgs, "-DTIN_VALGRIND=1")
 		}
 
-		linkInputs = append(linkInputs, cachedPath)
-		if !hit {
-			tempPath := cachedPath + fmt.Sprintf(".tmp.%d.%d", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
-
+		if valgrindBuild {
+			// --valgrind: bypass the csrc cache entirely and compile
+			// fresh into a per-invocation temp .o.  The cache key
+			// already separates valgrind vs default builds, but we
+			// skip it outright so a stale slot from a prior runtime.c
+			// edit can never end up in a valgrind run -- the binary
+			// has to reflect the source on disk exactly.
+			tempPath := filepath.Join(os.TempDir(),
+				fmt.Sprintf("tin-runtime-vg-%d-%d.o", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1)))
 			rtArgs = append(rtArgs, rtC, "-o", tempPath)
+			linkInputs = append(linkInputs, tempPath)
 			jobsList = append(jobsList, compileJob{
-				desc: "runtime.c", args: rtArgs, renameTo: cachedPath,
+				desc: "runtime.c", args: rtArgs,
 			})
+		} else {
+			cachedPath, hit, err := csrcCacheLookup(rtC, rtArgs)
+			if err != nil {
+				return err
+			}
+
+			linkInputs = append(linkInputs, cachedPath)
+			if !hit {
+				tempPath := cachedPath + fmt.Sprintf(".tmp.%d.%d", os.Getpid(), atomic.AddUint64(&tempCacheCounter, 1))
+
+				rtArgs = append(rtArgs, rtC, "-o", tempPath)
+				jobsList = append(jobsList, compileJob{
+					desc: "runtime.c", args: rtArgs, renameTo: cachedPath,
+				})
+			}
 		}
 	}
 

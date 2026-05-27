@@ -1,0 +1,36 @@
+// stdlib/units/memory - byte-count literal suffixes.
+//
+// Binary (IEC) suffixes count powers of 1024:
+//   B, KiB, MiB, GiB, TiB, PiB
+// Decimal (SI) suffixes count powers of 1000:
+//   KB, MB, GB, TB, PB
+//
+// Each expands at parse time to a constant i64. `4_GiB` becomes the
+// literal 4294967296 in the IR; no runtime multiply.
+//
+// Import:
+//   use { GiB, MiB } from units::memory
+//   let buf = 4_GiB + 8_MiB
+//
+// Or use the fully-qualified form without an import:
+//   let buf = 4_units::memory::GiB
+
+macro{#suffix@int #no_excl #no_parens} B(n)   = `{n}`
+
+macro{#suffix@int #no_excl #no_parens} KiB(n) = `{n * 1024}`
+macro{#suffix@int #no_excl #no_parens} MiB(n) = `{n * 1048576}`
+macro{#suffix@int #no_excl #no_parens} GiB(n) = `{n * 1073741824}`
+macro{#suffix@int #no_excl #no_parens} TiB(n) = `{n * 1099511627776}`
+macro{#suffix@int #no_excl #no_parens} PiB(n) = `{n * 1125899906842624}`
+
+macro{#suffix@int #no_excl #no_parens} KB(n)  = `{n * 1000}`
+macro{#suffix@int #no_excl #no_parens} MB(n)  = `{n * 1000000}`
+macro{#suffix@int #no_excl #no_parens} GB(n)  = `{n * 1000000000}`
+macro{#suffix@int #no_excl #no_parens} TB(n)  = `{n * 1000000000000}`
+macro{#suffix@int #no_excl #no_parens} PB(n)  = `{n * 1000000000000000}`
+
+export {
+  B,
+  KiB, MiB, GiB, TiB, PiB,
+  KB, MB, GB, TB, PB,
+} as memory

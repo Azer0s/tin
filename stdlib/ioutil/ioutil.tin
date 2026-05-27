@@ -79,11 +79,10 @@ fn{#async} write_string_impl(w io::AsyncWriter, s string) =
 
   loop:
     if sent >= n: break
-    { #unsafe } {
+    do{#unsafe}:
       let r = await w.write(ptr + sent, n - sent)
       if r <= 0: break
       sent = sent + r
-    }
 
 fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
   let tmp = mem::malloc(n) as *byte
@@ -91,11 +90,10 @@ fn{#async} read_bytes_impl(r io::AsyncReader, n i64) [byte] =
 
   loop:
     if got >= n: break
-    { #unsafe } {
+    do{#unsafe}:
       let rd = await r.read(tmp + got, n - got)
       if rd <= 0: break
       got = got + rd
-    }
 
   let result = tmp[0..got]
 
@@ -150,11 +148,10 @@ fn{#async} write_bytes_impl(w io::AsyncWriter, data [byte]) =
 
   loop:
     if sent >= n: break
-    { #unsafe } {
+    do{#unsafe}:
       let r = await w.write(ptr + sent, n - sent)
       if r <= 0: break
       sent = sent + r
-    }
 
 // Public API
 

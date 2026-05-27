@@ -113,15 +113,12 @@ func (cg *CodeGen) classifyNonOwningBinding(entry *scopeEntry, name string) stri
 	if entry.noDeinit {
 		return "parameter, not owned by this scope"
 	}
-	// Iterator bindings: for-loop variables.  Even for the
-	// pass-by-value form (`for item in xs`) the slot is filled
-	// fresh per iteration with the corresponding retain emitted by
-	// the loop ramp -- a `move item` would skip the body's
-	// scope-exit release and leak one rc per iteration.  The ref
-	// form (`for ref item in xs`) aliases the source array and
-	// is even more obviously not movable.
-	if entry.isForIterator {
-		return "iterator binding, view into the container"
+	// Ref-form iterator bindings (`for ref item in xs`) alias storage
+	// in the source container; moving would steal the slot and leave
+	// a dangling alias.  Value-form iterators are a per-iteration
+	// copy and behave like any other local, so they are movable.
+	if entry.isForRefIterator {
+		return "ref-iterator binding, view into the container"
 	}
 	// noRelease catches synthetic borrowed bindings the runtime
 	// uses (e.g. union `is` peeks).  Same reasoning as iterators:

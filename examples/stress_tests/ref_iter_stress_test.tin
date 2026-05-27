@@ -1,0 +1,174 @@
+// Stress tests for the iter[T] / ref_iter[T] traits and the loosened
+// no-move-iterator rule.  Each test pokes a specific risk surface of the
+// codegen path (RC retain elision, dispatch fallback, alias correctness).
+
+trait iter[t] =
+  fn len(this iter[t]) i64 = virtual
+  fn get(this iter[t], i i64) t = virtual
+
+trait ref_iter[t] =
+  fn len(this ref_iter[t]) i64 = virtual
+  fn get(this ref_iter[t], i i64) *t = virtual
+
+// nums: i64 elements -- baseline shape used by ref_iter optimization.
+struct nums(iter[i64], ref_iter[i64]) =
+  vals [i64]
+  size i64
+
+  fn iter::len(this nums) i64 = return this.size
+  fn iter::get(this nums, i i64) i64 = return this.vals[i]
+
+  fn ref_iter::len(this nums) i64 = return this.size
+  fn ref_iter::get(this nums, i i64) *i64 = return &this.vals[i]
+
+// strs: string elements -- exercises RC retain on a non-primitive type.
+struct strs(iter[string], ref_iter[string]) =
+  vals [string]
+  size i64
+
+  fn iter::len(this strs) i64 = return this.size
+  fn iter::get(this strs, i i64) string = return this.vals[i]
+
+  fn ref_iter::len(this strs) i64 = return this.size
+  fn ref_iter::get(this strs, i i64) *string = return &this.vals[i]
+
+// pairs: nested struct as the element -- exercises field-walk retain.
+struct pair =
+  k i64
+  v i64
+
+struct pairs(iter[pair], ref_iter[pair]) =
+  vals [pair]
+  size i64
+
+  fn iter::len(this pairs) i64 = return this.size
+  fn iter::get(this pairs, i i64) pair = return this.vals[i]
+
+  fn ref_iter::len(this pairs) i64 = return this.size
+  fn ref_iter::get(this pairs, i i64) *pair = return &this.vals[i]
+
+// Generic constraint exercising ref_iter[T]: a generic accumulator that
+// reads through ref-iteration.  The borrow analyzer must keep ref_iter's
+// borrow vtable intact across the bound.
+fn sum_ref[T](xs T) i64 where T is ref_iter[i64] =
+  let acc = 0
+
+  for ref x in xs:
+    acc = acc + x
+
+  return acc
+
+use assert
+
+test "high-N ref-iter mutates in place (1k entries)" =
+  let vs [i64] = []
+
+  for i in 0..1000:
+    vs ++= [i]
+
+  let n = nums{vals: vs, size: 1000}
+
+  for ref x in n:
+    x = x * 2
+
+  assert::equals(n.vals[0], 0)
+  assert::equals(n.vals[1], 2)
+  assert::equals(n.vals[999], 1998)
+
+test "value-form iter does not write back" =
+  let n = nums{vals: [1, 2, 3, 4, 5], size: 5}
+
+  for x in n:
+    x = x + 100
+
+  assert::equals(n.vals[0], 1)
+  assert::equals(n.vals[4], 5)
+
+test "ref-iter over strings preserves rc balance" =
+  let s = strs{vals: ["alpha", "beta", "gamma"], size: 3}
+
+  for ref x in s:
+    x = "{x}!"
+
+  assert::equals(s.vals[0], "alpha!")
+  assert::equals(s.vals[2], "gamma!")
+
+test "ref-iter over nested struct elements" =
+  let p = pairs{vals: [pair{k: 1, v: 10}, pair{k: 2, v: 20}, pair{k: 3, v: 30}], size: 3}
+
+  for ref e in p:
+    e = pair{k: e.k * 10, v: e.v * 10}
+
+  assert::equals(p.vals[0].k, 10)
+  assert::equals(p.vals[2].v, 300)
+
+test "break inside ref-iter leaves rc balanced" =
+  let n = nums{vals: [1, 2, 3, 4, 5], size: 5}
+
+  for ref x in n:
+    if x == 3:
+      break
+    x = x * 100
+
+  assert::equals(n.vals[0], 100)
+  assert::equals(n.vals[1], 200)
+  assert::equals(n.vals[2], 3)
+  assert::equals(n.vals[3], 4)
+  assert::equals(n.vals[4], 5)
+
+test "nested ref-iter loops mutate independently" =
+  let a = nums{vals: [1, 2, 3], size: 3}
+  let b = nums{vals: [10, 20, 30], size: 3}
+
+  for ref x in a:
+    for ref y in b:
+      y = y + x // each y picks up the current x once per inner pass
+
+  // Outer iteration 1 (x=1): b becomes [11, 21, 31]
+  // Outer iteration 2 (x=2): b becomes [13, 23, 33]
+  // Outer iteration 3 (x=3): b becomes [16, 26, 36]
+  assert::equals(b.vals[0], 16)
+  assert::equals(b.vals[1], 26)
+  assert::equals(b.vals[2], 36)
+  assert::equals(a.vals[0], 1)
+  assert::equals(a.vals[2], 3)
+
+test "value-form move on string iterator binding" =
+  let xs = ["one", "two", "three"]
+  let taken [string] = []
+
+  for s in xs:
+    taken ++= [move s]
+
+  assert::equals(len(taken), 3)
+  assert::equals(taken[0], "one")
+  assert::equals(taken[2], "three")
+  // Source array still intact (the slot was a per-iteration copy).
+  assert::equals(len(xs), 3)
+  assert::equals(xs[1], "two")
+
+test "ref-iter via generic constraint (sum_ref)" =
+  let n = nums{vals: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], size: 10}
+
+  assert::equals(sum_ref(n), 55)
+  // Source must be unchanged: sum_ref only reads.
+  assert::equals(n.vals[0], 1)
+  assert::equals(n.vals[9], 10)
+
+test "interleaved iter then ref-iter on same container" =
+  let n = nums{vals: [10, 20, 30], size: 3}
+  let sum_before = 0
+
+  for x in n:
+    sum_before = sum_before + x
+
+  for ref x in n:
+    x = x + 1
+
+  let sum_after = 0
+
+  for x in n:
+    sum_after = sum_after + x
+
+  assert::equals(sum_before, 60)
+  assert::equals(sum_after, 63)

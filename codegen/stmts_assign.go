@@ -721,12 +721,27 @@ func (cg *CodeGen) genAugAssign(block *ir.Block, s *ast.AugAssignStmt) (*ir.Bloc
 		nullPtr := constant.NewNull(irtypes.I8Ptr)
 		ptrIsNull := block.NewICmp(enum.IPredEQ, oldI8Ptr, nullPtr)
 
-		// rcHdr = oldPtr - sizeof(TinRCHdr)  (TinRCHdr is 16 bytes).
+		// Launder oldI8Ptr through an empty inline-asm barrier before
+		// the header GEP, for the same reason runtime/runtime.h's
+		// _tin_pointer_launder exists: at -O2 ThinLTO LLVM can trace
+		// oldI8Ptr's provenance back to a stack-allocated slice
+		// struct, decide the `-16` GEP reads outside any reachable
+		// allocation's extent, classify the load as UB,
+		// poison-propagate, and fold the caller to `unreachable`.  The
+		// null select below guards null only; an alloca-traced ptr
+		// still poisons without launder.  SideEffect prevents the
+		// optimiser from dissolving the barrier.
+		launderTy := irtypes.NewFunc(irtypes.I8Ptr, irtypes.I8Ptr)
+		launderAsm := ir.NewInlineAsm(irtypes.NewPointer(launderTy), "", "=r,0")
+		launderAsm.SideEffect = true
+		laundered := block.NewCall(launderAsm, oldI8Ptr)
+
+		// rcHdr = laundered - sizeof(TinRCHdr)  (TinRCHdr is 16 bytes).
 		// Header layout: { u32 rc; u32 flags; u64 _pad; }.  Read only
 		// the rc field (first 4 bytes); reading the whole first
 		// 8 bytes would mix flag bits into the comparison.
 		negHdr := constant.NewInt(irtypes.I64, -16)
-		hdrPtr := block.NewGetElementPtr(irtypes.I8, oldI8Ptr, negHdr)
+		hdrPtr := block.NewGetElementPtr(irtypes.I8, laundered, negHdr)
 		// When oldPtr is null we cannot deref hdrPtr: select a safe
 		// sentinel address that always reads as rc != 1.  The constant
 		// global below stores 0 in the rc slot, which fails the

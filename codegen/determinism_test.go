@@ -18,13 +18,13 @@ import (
 // rate.  Lock the property in here.
 //
 // Skipped if the tin binary isn't present at the repo root - go test ./...
-// runs in CI where main.go has been built into ./tin already.
+// runs in CI where cmd/tin/main.go has been built into ./tin already.
 func TestIRDeterminism(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 
 	tinBin := filepath.Join(repoRoot, "tin")
 	if !fileExists(tinBin) {
-		t.Skipf("tin binary not found at %s; build with `go build -o tin .` first", tinBin)
+		t.Skipf("tin binary not found at %s; build with `go build -o tin ./cmd/tin` first", tinBin)
 	}
 
 	// One file per category of codegen path that has historically harbored

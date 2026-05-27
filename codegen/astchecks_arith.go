@@ -154,7 +154,12 @@ func (cg *CodeGen) checkArithIdentity(e *ast.BinExpr) {
 	lConst := cg.tryFoldExpr(e.Left)
 	rConst := cg.tryFoldExpr(e.Right)
 
-	chk := func(c foldedValue, side string) {
+	// constOnRight distinguishes `x OP K` from `K OP x` so the non-commutative
+	// gates (sub, div, shift) only fire on the canonical shape.  The format
+	// strings always label the variable side `x`; previously the call site
+	// reused the same string as both the gate and the `%s` substitution,
+	// which produced misfires like "0 * 1 is a no-op" on `1 * (per * ...)`.
+	chk := func(c foldedValue, constOnRight bool) {
 		if c.kind != foldInt {
 			return
 		}
@@ -163,39 +168,39 @@ func (cg *CodeGen) checkArithIdentity(e *ast.BinExpr) {
 		case "&":
 			if c.intVal == 0 {
 				cg.warn(DiagUselessIdentity, e.Pos(),
-					"%s & 0 is always 0", side)
+					"x & 0 is always 0")
 			}
 		case "|":
 			if c.intVal == -1 {
 				cg.warn(DiagUselessIdentity, e.Pos(),
-					"%s | -1 is always -1", side)
+					"x | -1 is always -1")
 			}
 		case "*":
 			switch c.intVal {
 			case 0:
 				cg.warn(DiagUselessIdentity, e.Pos(),
-					"%s * 0 is always 0", side)
+					"x * 0 is always 0")
 			case 1:
 				cg.warn(DiagUselessIdentity, e.Pos(),
-					"%s * 1 is a no-op", side)
+					"x * 1 is a no-op")
 			}
 		case "+":
 			if c.intVal == 0 {
 				cg.warn(DiagUselessIdentity, e.Pos(),
-					"%s + 0 is a no-op", side)
+					"x + 0 is a no-op")
 			}
 		case "-":
-			if c.intVal == 0 && side == "x" {
+			if c.intVal == 0 && constOnRight {
 				cg.warn(DiagUselessIdentity, e.Pos(),
 					"x - 0 is a no-op")
 			}
 		case "/":
-			if c.intVal == 1 && side == "x" {
+			if c.intVal == 1 && constOnRight {
 				cg.warn(DiagUselessIdentity, e.Pos(),
 					"x / 1 is a no-op")
 			}
 		case "<<", ">>":
-			if c.intVal == 0 && side == "x" {
+			if c.intVal == 0 && constOnRight {
 				cg.warn(DiagUselessIdentity, e.Pos(),
 					"shift by 0 is a no-op")
 			}
@@ -203,11 +208,11 @@ func (cg *CodeGen) checkArithIdentity(e *ast.BinExpr) {
 	}
 
 	if lConst.kind == foldInt && rConst.kind != foldInt {
-		chk(lConst, "0")
+		chk(lConst, false)
 	}
 
 	if rConst.kind == foldInt && lConst.kind != foldInt {
-		chk(rConst, "x")
+		chk(rConst, true)
 	}
 }
 

@@ -42,7 +42,7 @@ func parallelJobs() int {
 
 // pureFnCacheRoot is the on-disk root for the per-fn .so cache populated by
 // the Phase C2 pipeline. Mirrors the codegen-side ctfeCacheDir helper so
-// main.go can read/write the cache without importing internal codegen state.
+// cmd/tin/main.go can read/write the cache without importing internal codegen state.
 const pureFnCacheRoot = ".build/pure-fn"
 
 // pureFnCacheEnabled reports whether the per-fn .so cache should be emitted

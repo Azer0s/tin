@@ -90,7 +90,6 @@ struct Atomic[t] =
   // the chain.
   fn ptr(this Atomic[t]) *void = return this._cell.payload()
 
-  // --- new ----------------------------------------------------------
 
   static fn new(v t) Atomic[t] where t is w8 =
     let raw = tin_atomic_alloc(8)
@@ -127,7 +126,6 @@ struct Atomic[t] =
 
     return Atomic[t]{_cell: rc::Cell[*void].new(raw, tin_atomic_obj_free)}
 
-  // --- load ---------------------------------------------------------
 
   fn load(this Atomic[t]) t where t is w8 =
     let out t
@@ -164,7 +162,6 @@ struct Atomic[t] =
 
     return out
 
-  // --- store --------------------------------------------------------
 
   fn store(this Atomic[t], v t) where t is w8 =
     tin_atomic_store_64(this.ptr(), &v as *void)
@@ -181,7 +178,6 @@ struct Atomic[t] =
   fn store(this Atomic[t], v t) where t is not primitive =
     tin_atomic_obj_store(this.ptr(), &v as *void)
 
-  // --- add: numeric only, per-width ---------------------------------
 
   fn add(this Atomic[t], d t) t where t is i64 || u64 =
     return tin_atomic_add_i64(this.ptr(), d as i64) as t
@@ -195,7 +191,6 @@ struct Atomic[t] =
   fn add(this Atomic[t], d t) t where t is i8 || u8 =
     return tin_atomic_add_i8(this.ptr(), d as i8) as t
 
-  // --- cas: numeric only, per-width ---------------------------------
 
   fn cas(this Atomic[t], old t, nw t) t where t is i64 || u64 =
     return tin_atomic_cas_i64(this.ptr(), old as i64, nw as i64) as t
@@ -209,7 +204,6 @@ struct Atomic[t] =
   fn cas(this Atomic[t], old t, nw t) t where t is i8 || u8 =
     return tin_atomic_cas_i8(this.ptr(), old as i8, nw as i8) as t
 
-  // --- for_locked: non-primitive only -------------------------------
   //
   // Run a callback with the protected value held under the lock.
   // The callback receives `*t`; mutations through the pointer are

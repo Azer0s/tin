@@ -36,29 +36,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-// When valgrind/memcheck.h is available, expand to client requests
-// that let memcheck distinguish the intentional out-of-bounds magic
-// probe in _tin_is_managed from a real invalid read.  Outside
-// valgrind the macros are zero-cost no-ops; outside the header the
-// probe is unconditional and the wrappers below fall back to a
-// plain read.
-#if defined(__has_include)
-#  if __has_include(<valgrind/memcheck.h>)
-#    include <valgrind/memcheck.h>
-#    define _TIN_VG_PRESENT 1
-#  endif
+// Valgrind client requests for marking the magic probe as intentional
+// out-of-bounds.  Compiled in ONLY when the user passes --valgrind to
+// `tin run`/`tin test`; the build driver injects -DTIN_VALGRIND=1 and
+// the binary's cache key includes the flag so the produced .o is
+// kept distinct from default builds.  Default builds get a clean fast
+// path with no inline rolq sequences, no RUNNING_ON_VALGRIND probes,
+// and zero runtime overhead from valgrind support.
+#ifdef TIN_VALGRIND
+#  include <valgrind/memcheck.h>
 #endif
 
 // _tin_probe_magic reads the 8-byte _pad slot in the would-be
-// TinRCHdr at `ptr - sizeof(TinRCHdr)`.  When running under valgrind
-// the surrounding bytes may be NOACCESS (allocator metadata) or even
-// in a freed region; the probe is intentional and known to land
-// outside the user's allocation for foreign pointers, so save the
-// vbits, mark the slot defined for the read, then restore the vbits
-// so memcheck still flags genuine use-after-frees of nearby memory
-// from elsewhere.
+// TinRCHdr at `ptr - sizeof(TinRCHdr)`.  Under TIN_VALGRIND the
+// surrounding bytes may be NOACCESS (allocator metadata) or in a
+// freed region; the probe is intentional and known to land outside
+// the user's allocation for foreign pointers, so save the vbits,
+// mark the slot defined for the read, then restore the vbits so
+// memcheck still flags genuine use-after-frees of nearby memory
+// from elsewhere.  Default builds emit a plain load.
 static inline uint64_t _tin_probe_magic(const TinRCHdr *hdr) {
-#ifdef _TIN_VG_PRESENT
+#ifdef TIN_VALGRIND
     unsigned char vbits[sizeof(hdr->_pad)];
     int saved = (VALGRIND_GET_VBITS(&hdr->_pad, vbits, sizeof(hdr->_pad)) == 0);
     (void)VALGRIND_MAKE_MEM_DEFINED(&hdr->_pad, sizeof(hdr->_pad));
@@ -172,7 +170,8 @@ int _tin_is_managed(void *ptr) {
         if (addr - base >= _tin_arena_size) return 0;
         if (addr - base < sizeof(TinRCHdr))  return 0;
     }
-    TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    TinRCHdr *hdr = (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
     return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 
@@ -245,7 +244,8 @@ __attribute__((constructor(101))) static void _tin_heap_arena_ctor(void) {
 // rc-tracking entirely in codegen, so they never reach this function.
 int _tin_is_managed(void *ptr) {
     if (!ptr) return 0;
-    TinRCHdr *hdr = (TinRCHdr *)((char *)ptr - sizeof(TinRCHdr));
+    void *laundered = _tin_pointer_launder(ptr);
+    TinRCHdr *hdr = (TinRCHdr *)((char *)laundered - sizeof(TinRCHdr));
     return _tin_probe_magic(hdr) == TIN_RC_HDR_MAGIC;
 }
 

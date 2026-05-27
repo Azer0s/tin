@@ -43,6 +43,9 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 	}
 
 	switch e := node.(type) {
+	case *ast.SuffixCallExpr:
+		return cg.genSuffixCall(block, e)
+
 	case *ast.IntLit:
 		if e.Big != nil {
 			// 128 bits = at most u128 range; values above that don't fit

@@ -1,0 +1,2 @@
+fn ok() i32 =
+  {#pure} return 1
