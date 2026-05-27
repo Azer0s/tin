@@ -435,3 +435,15 @@ test "macro: backtick body leaves {n} inside strings literal" =
   expect_substr("macro_backtick_no_substitute_in_string_98.tin",
     "undefined identifier: n")
 
+test "parser: string + SUFFIX_IDENT skips runtime interp" =
+  expect_substr("suffix_string_raw_99.tin",
+    "ok  hello \{bad\}")
+
+test "codegen: CTFE backtick preserves struct-lit braces" =
+  expect_substr("ctfe_backtick_struct_lit_100.tin",
+    "ok  1   7")
+
+test "parser: all-literal interp string consolidates to StringLit" =
+  expect_substr("string_interp_all_literal_consolidates_101.tin",
+    "ok  123")
+

@@ -1,0 +1,20 @@
+// Regression: a CTFE macro that returns `Struct{field: {value}}` must
+// preserve struct-literal braces while interpolating `{value}` at
+// runtime.  Pre-fix, BacktickLit codegen called parseStringInterp
+// (string-mode) on the content, which greedily matched the first `}`
+// after `Foo{a:` and tried to lex `a: {v` as an expression,
+// erroring `undefined identifier: a`.  The fix routes through a
+// brace-aware parseBacktickInterp that depth-tracks matching braces
+// and skips `{` preceded by an identifier character.
+
+struct Foo =
+  a i64
+  b i64
+
+macro mk_foo!() =
+  let v i64 = 7
+  return `Foo{a: 1, b: {v}}`
+
+fn main() =
+  let f Foo = mk_foo!()
+  echo("ok ", f.a, " ", f.b)

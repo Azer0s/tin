@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Azer0s/tin/ast"
 	"github.com/Azer0s/tin/lexer"
@@ -33,6 +34,20 @@ func (p *Parser) parsePrimary() (ast.Node, error) {
 
 	case lexer.STRING_LIT:
 		p.advance()
+		// A SUFFIX_IDENT immediately after a string literal hands the
+		// raw text to the suffix macro -- skip `{expr}` interp so the
+		// macro author can scan the unparsed template at compile time.
+		// `\{` / `\}` escapes are still de-escaped, so `"... \{x\}"_sql`
+		// can embed a literal brace.
+		if p.check(lexer.SUFFIX_IDENT) {
+			raw := tok.Literal
+			raw = strings.ReplaceAll(raw, "\\{", "{")
+			raw = strings.ReplaceAll(raw, "\\}", "}")
+			sl := &ast.StringLit{Value: raw}
+			sl.SetPos(pos)
+
+			return p.maybeWrapSuffix(sl, pos)
+		}
 
 		s, err := parseStringInterp(tok.Literal)
 		if err != nil {

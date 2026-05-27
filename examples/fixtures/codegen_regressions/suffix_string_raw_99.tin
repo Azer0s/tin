@@ -1,0 +1,11 @@
+// Regression: a string literal followed by SUFFIX_IDENT must skip
+// runtime `{expr}` interpolation so the macro author can scan the raw
+// template at compile time.  Pre-fix, `"hello {bad}"_tag` errored
+// with `undefined identifier: bad` because parseStringInterp ran
+// before the suffix wrap saw the SUFFIX_IDENT.
+
+macro{#suffix@string #no_excl #no_parens} tag(s) = `{s}`
+
+fn main() =
+  let q string = "hello {bad}"_tag
+  echo("ok ", q)

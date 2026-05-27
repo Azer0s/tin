@@ -1,0 +1,17 @@
+// Regression: parseStringInterp on a string with only `\{` / `\}`
+// escapes and no real interpolation slots used to return an
+// InterpolatedString with multiple literal-only parts.  Code that
+// branched on `*ast.StringLit` (isCodeFragmentArg, the CTFE macro
+// arg printer) treated the InterpolatedString as a code fragment
+// and double-quoted it through buildMacroSource.  Net effect:
+// `m!("\{hi\}")` reached the CTFE subprocess as `m("\"{hi}\"")`
+// and the macro saw a string with embedded quotes instead of {hi}.
+// Fix: consolidate adjacent literal-only parts into a single
+// StringLit before returning.
+
+macro first_char!(s) =
+  return s[0] as i64
+
+fn main() =
+  let n i64 = first_char!("\{hi\}")
+  echo("ok ", n)
