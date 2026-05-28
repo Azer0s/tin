@@ -352,6 +352,47 @@ struct Connection (io::Closeable, Conn) =
       case Err(e): return Err(e)
       case Ok(r):  return Ok(r as RowSet)
 
+  // CRUD primitives: build the SQL string from the structural pieces
+  // and dispatch through the existing exec / query paths.  KV drivers
+  // (libs/redis) implement these in their native vocabulary instead
+  // of through any SQL parser.
+
+  fn Conn::db_insert_row(this Connection, table string, cols [string], vals [Value]) i64 =
+    let col_list = join_cols(cols)
+    let placeholders = build_placeholders(len(cols))
+    let sql = "INSERT INTO " ++ table ++ " (" ++ col_list ++ ") VALUES (" ++ placeholders ++ ")"
+    return this.exec(sql, to_sql_values(vals))
+
+  fn Conn::db_find_row(this Connection, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err] =
+    let col_list = join_cols(want_cols)
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ? LIMIT 1"
+    match this.query(sql, to_sql_values([pk_val])):
+      case Err(e): return Err(e)
+      case Ok(r):  return Ok(r as RowSet)
+
+  fn Conn::db_all_rows(this Connection, table string, want_cols [string]) Result[RowSet, errors::Err] =
+    let col_list = join_cols(want_cols)
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ table
+    match this.query(sql, to_sql_values([])):
+      case Err(e): return Err(e)
+      case Ok(r):  return Ok(r as RowSet)
+
+  fn Conn::db_update_row(this Connection, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64 =
+    let sets = ""
+    let i i64 = 0
+    for i < len(cols):
+      if i > 0:
+        sets = sets ++ ", "
+      sets = sets ++ cols[i] ++ " = ?"
+      i = i + 1
+    let bind_vals [Value] = vals ++ [pk_val]
+    let sql = "UPDATE " ++ table ++ " SET " ++ sets ++ " WHERE " ++ pk_col ++ " = ?"
+    return this.exec(sql, to_sql_values(bind_vals))
+
+  fn Conn::db_delete_row(this Connection, table string, pk_col string, pk_val Value) i64 =
+    let sql = "DELETE FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ?"
+    return this.exec(sql, to_sql_values([pk_val]))
+
 // open opens (or creates) the database at path.
 fn open(path string) Result[Connection, errors::Err] =
   let p *void = c_sqlite_open(path)
@@ -363,6 +404,30 @@ fn if_zero_use_one(n i64) i64 =
   if n > 0:
     return n
   return 1
+
+// join_cols concatenates a list of column names with ", " separators
+// -- mirrors the inline build that used to live inside insert_into /
+// build_select_cols / update_in in stdlib/db.tin.
+fn join_cols(cols [string]) string =
+  let out = ""
+  let i i64 = 0
+  for i < len(cols):
+    if i > 0:
+      out = out ++ ", "
+    out = out ++ cols[i]
+    i = i + 1
+  return out
+
+// build_placeholders returns "?, ?, ?" for n placeholders.
+fn build_placeholders(n i64) string =
+  let out = ""
+  let i i64 = 0
+  for i < n:
+    if i > 0:
+      out = out ++ ", "
+    out = out ++ "?"
+    i = i + 1
+  return out
 
 // to_sql_values translates a [Value] argument array into the
 // driver-local [SqlValue].  Match arms use Value's prefixed

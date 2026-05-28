@@ -54,11 +54,26 @@ trait RowSet =
   fn get_string(this RowSet, row i64, col i64) string    = virtual
   fn is_null(this RowSet, row i64, col i64) bool         = virtual
 
-// Conn: driver connection.  exec returns sqlite-style changes() (or
-// -error); query returns a RowSet trait object on success.
+// Conn: driver connection.  Two layers:
+//
+//   * SQL escape hatch (exec / query) -- usable directly when the
+//     driver speaks SQL; KV drivers can implement these by panicking
+//     or returning Err.
+//   * Row-level CRUD primitives (db_insert_row / db_find_row / ...)
+//     -- the CRUD generics dispatch through these so drivers without
+//     SQL (Redis, future in-memory stores, ...) can implement the
+//     same `db::insert[T]` / `db::find_by_id[T]` surface natively
+//     (HSET / HGETALL / etc).  SQL drivers build the matching SQL
+//     internally; KV drivers translate to their command vocabulary.
 trait Conn =
   fn exec(this *Conn, sql string, params [Value]) i64                            = virtual
   fn query(this *Conn, sql string, params [Value]) Result[RowSet, errors::Err]   = virtual
+
+  fn db_insert_row(this *Conn, table string, cols [string], vals [Value]) i64                                                                   = virtual
+  fn db_find_row(this *Conn, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err]                         = virtual
+  fn db_all_rows(this *Conn, table string, want_cols [string]) Result[RowSet, errors::Err]                                                      = virtual
+  fn db_update_row(this *Conn, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64                                      = virtual
+  fn db_delete_row(this *Conn, table string, pk_col string, pk_val Value) i64                                                                   = virtual
 
 // db_column maps a struct field to its SQL column.  Tag grammar:
 //
@@ -111,6 +126,18 @@ fn db_is_pk(tag string) bool =
     return true
   return false
 
+// value_to_string stringifies a Value for drivers that store
+// records as flat strings (e.g. Redis hashes).  Mirrors `value_of`'s
+// width-classed variant choices: integers / floats / strings keep
+// their printable form; Null lands as an empty string (driver must
+// track null-ness separately, since "" is a valid stored value).
+fn value_to_string(v Value) string =
+  match v:
+    case IntVal(n):  return "{n}"
+    case RealVal(x): return "{x}"
+    case TextVal(s): return s
+    case NullVal:    return ""
+
 // value_of promotes a getfield-returned `any` to a Value.  Width-
 // classed integers all land in Int; floats in Real; strings in Text;
 // the unit/none type maps to SQL NULL.
@@ -149,30 +176,30 @@ fn row_into[T](rows RowSet, r i64, col_field_names [string], col_field_types [at
     c = c + 1
   return out
 
-// build_select_cols walks fieldnames once, returns:
-//   col_list      - "col1, col2, ..." for SELECT / INSERT
-//   field_names   - matching field-name list for row_into dispatch
-fn build_select_cols[T](v T) (string, [string], [atom]) =
+// build_select_cols walks fieldnames once, returns three parallel
+// arrays:
+//   sql_cols    - DB column names (after @"db:..." rename) -- the
+//                 driver uses these to SELECT / project records
+//   field_names - matching Tin field names for row_into setfield
+//                 dispatch; positionally aligned with sql_cols
+//   field_types - the field's atom-encoded type, also positional
+fn build_select_cols[T](v T) ([string], [string], [atom]) =
   let fields = fieldnames(v)
   let ftypes = fieldtypes(v)
   let nf = len(fields)
-  let col_list = ""
+  let sql_cols    [string] = []
   let field_names [string] = []
   let field_types [atom]   = []
-  let written i64 = 0
   let i i64 = 0
   for i < nf:
     let fname string = fields[i] as string
     let col = db_column(fname, fieldtag(v, fname))
     if len(col) > 0:
-      if written > 0:
-        col_list = col_list ++ ", "
-      col_list = col_list ++ col
+      sql_cols    ++= [col]
       field_names ++= [fname]
       field_types ++= [ftypes[i]]
-      written = written + 1
     i = i + 1
-  return (col_list, field_names, field_types)
+  return (sql_cols, field_names, field_types)
 
 // pk_col returns the SQL column name of the primary key.
 //
@@ -222,44 +249,62 @@ fn pk_field_name[T](v T) string =
     j = j + 1
   return "id"
 
-// insert_into runs INSERT against an explicit table.
-fn insert_into[T](c Conn, table string, v T) i64 =
+// build_insert_pairs gathers (column, value) for each non-skipped
+// field of v.  Returned as parallel arrays so the row-level CRUD
+// primitives stay free of struct-reflection details (each driver
+// just sees a list of columns and values).
+fn build_insert_pairs[T](v T) ([string], [Value]) =
   let fields = fieldnames(v)
   let nf = len(fields)
-  let cols = ""
-  let placeholders = ""
-  let params [Value] = []
-  let written i64 = 0
+  let cols [string] = []
+  let vals [Value]  = []
   let i i64 = 0
   for i < nf:
     let fname string = fields[i] as string
     let col = db_column(fname, fieldtag(v, fname))
     if len(col) > 0:
-      if written > 0:
-        cols = cols ++ ", "
-        placeholders = placeholders ++ ", "
-      cols = cols ++ col
-      placeholders = placeholders ++ "?"
-      params ++= [value_of(getfield(v, fname))]
-      written = written + 1
+      cols ++= [col]
+      vals ++= [value_of(getfield(v, fname))]
     i = i + 1
-  let sql = "INSERT INTO " ++ table ++ " (" ++ cols ++ ") VALUES (" ++ placeholders ++ ")"
-  return c.exec(sql, params)
+  return (cols, vals)
+
+// build_update_pairs is build_insert_pairs minus the PK column.
+fn build_update_pairs[T](v T, pk string) ([string], [Value]) =
+  let fields = fieldnames(v)
+  let nf = len(fields)
+  let cols [string] = []
+  let vals [Value]  = []
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i] as string
+    let col = db_column(fname, fieldtag(v, fname))
+    if len(col) > 0 && str::strcmp(col, pk) != 0:
+      cols ++= [col]
+      vals ++= [value_of(getfield(v, fname))]
+    i = i + 1
+  return (cols, vals)
+
+// insert_into delegates to the driver's db_insert_row primitive.
+// SQL drivers build INSERT statements internally; KV drivers map
+// the column list to a hash / equivalent record shape.
+fn insert_into[T](c Conn, table string, v T) i64 =
+  let cv = build_insert_pairs[T](v)
+  return c.db_insert_row(table, cv.a, cv.b)
 
 // insert uses table_for[T] (the struct name) as the table.
 fn insert[T](c Conn, v T) i64 = return insert_into[T](c, table_for[T](v), v)
 
-// find_by_id_in selects WHERE pk = id from an explicit table, parses
-// row 0 into a T.  Returns Err on driver error or "not found".
+// find_by_id_in fetches the row by PK via the driver's db_find_row
+// primitive, then materializes it into a T using the reflected field
+// order.  Returns Err on driver error or "not found".
 fn find_by_id_in[T](c Conn, table string, id i64) Result[T, errors::Err] =
   let probe T
   let cf = build_select_cols[T](probe)
-  let col_list    = cf.a
+  let sql_cols    = cf.a
   let field_names = cf.b
   let field_types = cf.c
   let pk = pk_col[T](probe)
-  let sql = "SELECT " ++ col_list ++ " FROM " ++ table ++ " WHERE " ++ pk ++ " = ? LIMIT 1"
-  match c.query(sql, [IntVal(id)]):
+  match c.db_find_row(table, pk, IntVal(id), sql_cols):
     case Err(e): return Err(e)
     case Ok(rows):
       if rows.count() == 0:
@@ -275,11 +320,10 @@ fn find_by_id[T](c Conn, id i64) Result[T, errors::Err] =
 fn all_in[T](c Conn, table string) Result[[T], errors::Err] =
   let probe T
   let cf = build_select_cols[T](probe)
-  let col_list    = cf.a
+  let sql_cols    = cf.a
   let field_names = cf.b
   let field_types = cf.c
-  let sql = "SELECT " ++ col_list ++ " FROM " ++ table
-  match c.query(sql, []):
+  match c.db_all_rows(table, sql_cols):
     case Err(e): return Err(e)
     case Ok(rows):
       let n = rows.count()
@@ -295,42 +339,24 @@ fn all[T](c Conn) Result[[T], errors::Err] =
   let probe T
   return all_in[T](c, table_for[T](probe))
 
-// update_in runs UPDATE table SET col=?,... WHERE pk = ? against an
-// explicit table.  The PK column is excluded from the SET list and
-// the PK value is the WHERE bind.
+// update_in delegates to the driver's db_update_row primitive.  The
+// PK column is excluded from the SET list and threaded separately
+// as the WHERE bind.
 fn update_in[T](c Conn, table string, v T) i64 =
-  let fields = fieldnames(v)
-  let nf = len(fields)
   let pk        string = pk_col[T](v)
   let pk_fname  string = pk_field_name[T](v)
-  let sets = ""
-  let params [Value] = []
-  let written i64 = 0
-  let i i64 = 0
-  for i < nf:
-    let fname string = fields[i] as string
-    let col = db_column(fname, fieldtag(v, fname))
-    if len(col) > 0 && str::strcmp(col, pk) != 0:
-      if written > 0:
-        sets = sets ++ ", "
-      sets = sets ++ col ++ " = ?"
-      params ++= [value_of(getfield(v, fname))]
-      written = written + 1
-    i = i + 1
-  params ++= [value_of(getfield(v, pk_fname))]
-  let sql = "UPDATE " ++ table ++ " SET " ++ sets ++ " WHERE " ++ pk ++ " = ?"
-  return c.exec(sql, params)
+  let pk_val Value     = value_of(getfield(v, pk_fname))
+  let cv = build_update_pairs[T](v, pk)
+  return c.db_update_row(table, pk, pk_val, cv.a, cv.b)
 
 // update uses table_for[T].
 fn update[T](c Conn, v T) i64 = return update_in[T](c, table_for[T](v), v)
 
-// delete_in runs DELETE FROM table WHERE pk = ? against an explicit
-// table.  Cheap PK-only delete; bulk delete is intentionally absent.
+// delete_in deletes by PK via the driver's db_delete_row primitive.
 fn delete_in[T](c Conn, table string, id i64) i64 =
   let probe T
   let pk = pk_col[T](probe)
-  let sql = "DELETE FROM " ++ table ++ " WHERE " ++ pk ++ " = ?"
-  return c.exec(sql, [IntVal(id)])
+  return c.db_delete_row(table, pk, IntVal(id))
 
 // delete uses table_for[T].
 fn delete[T](c Conn, id i64) i64 =
@@ -339,7 +365,7 @@ fn delete[T](c Conn, id i64) i64 =
 
 export {
   Value, RowSet, Conn,
-  db_column, db_is_pk, value_of, table_for,
+  db_column, db_is_pk, value_of, value_to_string, table_for,
   insert, insert_into,
   find_by_id, find_by_id_in,
   all, all_in,
