@@ -101,3 +101,63 @@ test "db column-rename tag drives the hash field name (redis)" =
     case Err(_): assert::ok(false)
   cleanup(c, "product")
   c.close()
+
+// PK declared at a non-first field position used to corrupt the key
+// (the redis driver took vals[0] regardless of which column carried
+// the @"db:colname,pk" tag).  Insert+find round-trip pins the fix.
+
+struct out_of_order =
+  name  string @"db:name"
+  pk    i64    @"db:pk,pk"
+  extra string @"db:extra"
+
+test "db round-trip with PK declared after other fields (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "ooo")
+  let _i i64 = db::insert_into[out_of_order](c, "ooo", out_of_order{name: "alice", pk: 99, extra: "x"})
+  match db::find_by_id_in[out_of_order](c, "ooo", 99):
+    case Ok(v):
+      assert::equals(99 as i64, v.pk)
+      assert::equals("alice", v.name)
+      assert::equals("x", v.extra)
+    case Err(_): assert::ok(false)
+  cleanup(c, "ooo")
+  c.close()
+
+// Inserting a record whose string field happens to be the empty string
+// should round-trip as "", not be confused with NULL.  Earlier draft
+// of redis::db_insert_row wrote NullVal as "" and erased the empty/
+// null distinction; the fix skips NullVal at HSET time so HGETALL
+// reports field-absent for true nulls.
+
+test "db round-trip preserves empty string vs null (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_n")
+  let _i i64 = db::insert_into[user](c, "user_n", user{id: 1, name: "", score: 0.0})
+  match db::find_by_id_in[user](c, "user_n", 1):
+    case Ok(u):
+      assert::equals(1 as i64, u.id)
+      assert::equals("", u.name)
+      assert::equals(0.0, u.score)
+    case Err(_): assert::ok(false)
+  cleanup(c, "user_n")
+  c.close()
+
+// f64 fields used to be serialized with "{x}" interpolation (%g, 6 sig
+// digits), so non-trivial doubles silently lost precision on the
+// round-trip through Redis hashes.  value_to_string now uses %.17g
+// for floats, which is the IEEE 754 binary64 round-trip width.
+test "db round-trips f64 losslessly (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_f")
+  let third f64 = 1.0 / 3.0
+  let _i i64 = db::insert_into[user](c, "user_f", user{id: 1, name: "alice", score: third})
+  match db::find_by_id_in[user](c, "user_f", 1):
+    case Ok(u):
+      // exact bitwise equality - %.17g + strtod is the round-trip
+      // guarantee, %g would round at the 6th significant digit and
+      // fail this assert.
+      assert::ok(u.score == third)
+    case Err(_): assert::ok(false)
+  cleanup(c, "user_f")
+  c.close()

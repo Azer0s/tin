@@ -104,17 +104,24 @@ static TinRedisReply *_translate_reply(redisReply *r) {
         out->sval = _tin_string_from_bytes("redis: no reply", 15);
         return out;
     }
+    // Defensive: some hiredis builds set r->str to NULL for zero-length
+    // string / status / error replies.  Clamp to a known-safe empty
+    // pointer + zero len so _tin_string_from_bytes never reads through
+    // NULL even if r->len is somehow positive.
+    const char *rstr = r->str ? r->str : "";
+    int64_t     rlen = r->str ? (int64_t)r->len : (int64_t)0;
+
     switch (r->type) {
     case REDIS_REPLY_NIL:
         out->kind = 0;
         break;
     case REDIS_REPLY_STATUS:
         out->kind = 1;
-        out->sval = _tin_string_from_bytes(r->str, (int64_t)r->len);
+        out->sval = _tin_string_from_bytes(rstr, rlen);
         break;
     case REDIS_REPLY_ERROR:
         out->kind = 2;
-        out->sval = _tin_string_from_bytes(r->str, (int64_t)r->len);
+        out->sval = _tin_string_from_bytes(rstr, rlen);
         break;
     case REDIS_REPLY_INTEGER:
         out->kind = 3;
@@ -125,8 +132,17 @@ static TinRedisReply *_translate_reply(redisReply *r) {
     case REDIS_REPLY_DOUBLE:
     case REDIS_REPLY_BIGNUM:
         out->kind = 4;
-        out->sval = _tin_string_from_bytes(r->str, (int64_t)r->len);
+        out->sval = _tin_string_from_bytes(rstr, rlen);
         break;
+#ifdef REDIS_REPLY_BOOL
+    case REDIS_REPLY_BOOL:
+        // RESP3 booleans land in r->integer (0 or 1).  Marshal as an
+        // Int reply so the Tin side's Reply::get[bool] path (which
+        // reads kind=3 / ival != 0) Just Works without a new variant.
+        out->kind = 3;
+        out->ival = r->integer ? 1 : 0;
+        break;
+#endif
     case REDIS_REPLY_ARRAY:
     case REDIS_REPLY_SET:
     case REDIS_REPLY_MAP:
@@ -155,6 +171,10 @@ TinRedisReply *_tin_redis_command(void *ctx, int32_t argc,
     redisContext *c = (redisContext *)ctx;
     *err_out = 0;
     if (!c) { *err_out = -EINVAL; return NULL; }
+    // Tin's caller passes argc via `len(args) as i32`.  Reject a
+    // negative value here -- without this guard `(size_t)argc` wraps
+    // to ~SIZE_MAX and the subsequent malloc returns NULL or aborts.
+    if (argc < 0) { *err_out = -EINVAL; return NULL; }
 
     redisReply *r = NULL;
     if (argc == 0) {
@@ -188,6 +208,11 @@ void _tin_redis_reply_free(void *p) {
             _tin_release(r->items[i]);
         }
         free(r->items);
+        // Defensive: null out the slot so an accidental double-free
+        // (e.g. an RC double-decrement bug elsewhere) doesn't free
+        // already-freed memory.
+        r->items  = NULL;
+        r->nitems = 0;
     }
 }
 

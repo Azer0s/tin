@@ -62,7 +62,11 @@ data Reply =
       default:     return 0
 
   fn get[T](this Reply) T where T is bool =
-    return this.get[i64]() == 1
+    // Truthy semantics: any non-zero integer reply is true.  Matches
+    // EXISTS / SISMEMBER / EXPIRE (0 or 1) and arbitrary-count replies
+    // like OBJECT FREQ -- the latter would silently collapse to false
+    // under a strict `== 1` check.
+    return this.get[i64]() != 0
 
   fn get[T](this Reply) T where T is string =
     match this:
@@ -246,17 +250,30 @@ struct Connection (io::Closeable, db::Conn) =
   fn db::Conn::query(this Connection, sql string, params [db::Value]) Result[RowSet, errors::Err] =
     return Err(IoError(0 as i32, "redis: SQL escape hatch (exec/query) is not supported; use Connection.command(args) for raw commands"))
 
-  fn db::Conn::db_insert_row(this Connection, table string, cols [string], vals [db::Value]) i64 =
-    let pk = pick_pk_value(cols, vals)
+  fn db::Conn::db_insert_row(this Connection, table string, pk_col string, cols [string], vals [db::Value]) i64 =
+    if len(cols) == 0:
+      return 0
+    let pk = pk_value_for_col(pk_col, cols, vals)
     if len(pk) == 0:
       return 0 - 1
     let key = table ++ ":" ++ pk
     let args [string] = ["HSET", key]
     let i i64 = 0
+    let written i64 = 0
     for i < len(cols):
-      args ++= [cols[i]]
-      args ++= [db_value_to_string(vals[i])]
+      // Skip NullVal entirely: HGETALL will then omit the field, and
+      // pairs_to_row's default `nulls[i]=true` flags it as null on
+      // read.  Storing "" would collide with the legitimate empty-
+      // string value and erase the null/empty distinction the rest of
+      // the db layer relies on (row_into checks is_null before
+      // setfield).
+      if !is_null_value(vals[i]):
+        args ++= [cols[i]]
+        args ++= [db_value_to_string(vals[i])]
+        written = written + 1
       i = i + 1
+    if written == 0:
+      return 0
     match this.command(args):
       case Ok(_):  return 1
       case Err(_): return 0 - 1
@@ -277,8 +294,8 @@ struct Connection (io::Closeable, db::Conn) =
     let row = pairs_to_row(pairs, want_cols)
     return Ok(RedisRowSet{rows: [row.a], null_flags: [row.b], ncols: len(want_cols), col_names: want_cols} as RowSet)
 
-  fn db::Conn::db_all_rows(this Connection, table string, want_cols [string]) Result[RowSet, errors::Err] =
-    let pat = table ++ ":*"
+  fn db::Conn::db_all_rows(this Connection, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err] =
+    let pat = glob_escape(table) ++ ":*"
     let keys_reply = try this.command(["KEYS", pat])
     let ks [string] = keys_reply.get()
     let rows       [[string]] = []
@@ -299,10 +316,21 @@ struct Connection (io::Closeable, db::Conn) =
       return 0
     let args [string] = ["HSET", key]
     let i i64 = 0
+    let written i64 = 0
+    // Skip NullVal columns from the SET so HGETALL keeps reporting
+    // them as absent (null) -- mirrors db_insert_row's null
+    // distinction.  A field that was previously set and is now Null
+    // would need an explicit HDEL to remove; this is a deliberate
+    // trade-off matching SQL UPDATE's "leave-unmentioned-columns-
+    // alone" semantics.
     for i < len(cols):
-      args ++= [cols[i]]
-      args ++= [db_value_to_string(vals[i])]
+      if !is_null_value(vals[i]):
+        args ++= [cols[i]]
+        args ++= [db_value_to_string(vals[i])]
+        written = written + 1
       i = i + 1
+    if written == 0:
+      return 0
     match this.command(args):
       case Ok(_):  return 1
       case Err(_): return 0 - 1
@@ -398,25 +426,43 @@ struct Connection (io::Closeable, db::Conn) =
   fn hlen(this Connection, key string) Result[i64, errors::Err] =
     return this.command(["HLEN", key]).map(Reply::get)
 
-// pick_pk_value pulls the first non-empty column value as the PK.
-// Heuristic: the first column in a struct's reflected field list is
-// the PK in 99% of cases (and the explicit @"db:colname,pk" tag puts
-// the renamed column there too).  Returns "" when the value list is
-// empty (caller treats as error).
-//
-// This is a temporary shortcut -- a richer design would let db::Conn
-// receive the PK column name from the generic so the lookup is exact.
-// Kept narrow on purpose; the current redis CRUD is keyed only off
-// the PK, so a richer multi-PK or composite-PK scheme is moot here.
-fn pick_pk_value(cols [string], vals [db::Value]) string =
+// pk_value_for_col scans cols for the entry matching pk_col_name and
+// returns the parallel value, stringified.  Falls back to vals[0] when
+// the named column is absent (e.g. legacy callers that pass an empty
+// pk_col name -- the trait now requires it but old call sites used
+// to skip).  Returns "" only when cols is empty.
+fn pk_value_for_col(pk_col_name string, cols [string], vals [db::Value]) string =
   if len(cols) == 0:
     return ""
+  let i i64 = 0
+  for i < len(cols):
+    if str::strcmp(cols[i], pk_col_name) == 0:
+      return db_value_to_string(vals[i])
+    i = i + 1
   return db_value_to_string(vals[0])
+
+// glob_escape backslash-escapes the four pattern metacharacters Redis
+// honours in KEYS/SCAN patterns (*, ?, [, \).  Without escaping, a
+// table name containing one of these would silently match additional
+// keys via glob expansion.
+fn glob_escape(s string) string =
+  let out = ""
+  let i i64 = 0
+  for i < len(s):
+    let c = s[i]
+    if c == @'*' || c == @'?' || c == @'[' || c == @'\\':
+      out = out ++ "\\"
+    out = out ++ c
+    i = i + 1
+  return out
 
 // db_value_to_string defers to db::value_to_string (the stringifier
 // lives in stdlib/db so the variant match resolves against db::Value
 // without colliding with redis::Reply's own variants here).
 fn db_value_to_string(v db::Value) string = return db::value_to_string(v)
+
+// is_null_value defers to db::is_null for the same scope reason.
+fn is_null_value(v db::Value) bool = return db::is_null(v)
 
 // pairs_to_row projects an [(field, value)] pair list (HGETALL's
 // shape) onto the (row_values, null_flags) layout positioned by
@@ -461,15 +507,14 @@ struct Message =
 struct Subscription (io::Closeable) =
   conn     Connection
   messages sync::Channel[Message]
-  stop     sync::Channel[i64]
 
   fn io::Closeable::close(this Subscription) =
-    // Signal the reader fiber to stop, then close the connection.
-    // Closing the socket from underneath the reader makes its next
-    // blocking read return ECONNRESET which the fiber treats as
-    // shutdown.  The stop channel is the polite path; the close is
-    // the always-works backstop.
-    this.stop.send(1)
+    // Reader is blocked in hiredis's synchronous redisGetReply; the
+    // only reliable way to wake it is to drop the socket out from
+    // under it -- the next read returns ECONNRESET / EPIPE which the
+    // reader translates into an Err, closes the messages channel, and
+    // exits.  No polite "stop" sideband is possible here without a
+    // non-blocking hiredis path.
     this.conn.close()
 
 // reader_loop is the per-Subscription fiber that drains incoming
@@ -477,7 +522,7 @@ struct Subscription (io::Closeable) =
 // ["message", channel, payload] for plain channels.  We forward
 // only message-type pushes to the Tin channel; subscribe/unsubscribe
 // acknowledgements are swallowed.
-fn{#async} reader_loop(conn Connection, out sync::Channel[Message], stop sync::Channel[i64]) =
+fn{#async} reader_loop(conn Connection, out sync::Channel[Message]) =
   for true:
     // Empty argv reads the next pending push reply on the
     // connection.  hiredis's redisGetReply works on subscribed
@@ -491,6 +536,11 @@ fn{#async} reader_loop(conn Connection, out sync::Channel[Message], stop sync::C
           case None:
             pass
       case Err(_):
+        // Connection died (close() racing us, or a transport error).
+        // Close the outbound channel so the consumer's `await
+        // sub.messages.recv()` unblocks with is_closed_empty == true
+        // instead of waiting forever for messages that won't arrive.
+        out.close()
         return
 
 // decode_push_message turns a raw SUBSCRIBE push reply
@@ -516,9 +566,8 @@ fn subscribe(host string, port i32, channels [string]) Result[Subscription, erro
   let argv [string] = ["SUBSCRIBE"] ++ channels
   let _    = try conn.command(argv)
   let msgs = sync::Channel[Message].make(64)
-  let stop = sync::Channel[i64].make(1)
-  spawn reader_loop(conn, msgs, stop)
-  return Ok(Subscription{conn: conn, messages: msgs, stop: stop})
+  spawn reader_loop(conn, msgs)
+  return Ok(Subscription{conn: conn, messages: msgs})
 
 // publish sends a message on the channel using the given Connection.
 // Returns the number of subscribers the server delivered to.
