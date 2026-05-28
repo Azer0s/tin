@@ -95,6 +95,37 @@ test "db column-rename tag (@\"db:product_code\") drives SQL column name" =
     case Err(_): assert::ok(false)
   c.close()
 
+// `@"db:colname,pk"` lets a struct name its PK field something other
+// than `id` and still drive find_by_id / update / delete via the
+// tag-derived PK column.
+struct account =
+  account_id i64    @"db:account_id,pk"
+  email      string @"db:email"
+  balance    i64    @"db:balance"
+
+test "db @\"db:colname,pk\" tag picks non-`id` PK field" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS account", [])
+  let _ct i64 = c.exec("CREATE TABLE account (account_id INTEGER, email TEXT, balance INTEGER)", [])
+  let _i  i64 = db::insert[account](c, account{account_id: 42, email: "a@b.c", balance: 100})
+  match db::find_by_id[account](c, 42):
+    case Ok(a):
+      assert::ok(a.account_id == 42)
+      assert::ok(a.email == "a@b.c")
+      assert::ok(a.balance == 100)
+    case Err(_): assert::ok(false)
+  let _u i64 = db::update[account](c, account{account_id: 42, email: "x@y.z", balance: 500})
+  match db::find_by_id[account](c, 42):
+    case Ok(a):
+      assert::ok(a.email == "x@y.z")
+      assert::ok(a.balance == 500)
+    case Err(_): assert::ok(false)
+  let _dl i64 = db::delete[account](c, 42)
+  match db::find_by_id[account](c, 42):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
 test "db::insert_into uses the explicit table name" =
   let c = open_test()
   let _d  i64 = c.exec("DROP TABLE IF EXISTS users_v2", [])

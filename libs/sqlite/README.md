@@ -132,6 +132,27 @@ The default table name is the struct name (`user` here).  Use the
 `*_in` variants (`insert_into`, `find_by_id_in`, `all_in`,
 `update_in`, `delete_in`) to override.
 
+### Field tag grammar
+
+| tag                     | column     | PK?     |
+|-------------------------|------------|---------|
+| (none)                  | field name | no      |
+| `@"db:-"`               | (skipped)  | no      |
+| `@"db:pk"`              | field name | **yes** |
+| `@"db:colname"`         | `colname`  | no      |
+| `@"db:colname,pk"`      | `colname`  | **yes** |
+
+`find_by_id` / `update` / `delete` WHERE on whichever field carries
+the PK marker.  If no field is tagged `pk`, a field literally named
+`id` is the fallback (so the common case keeps working with no tag):
+
+```tin
+struct account =
+  account_id i64    @"db:account_id,pk"   // PK is here, not `id`
+  email      string @"db:email"
+  balance    i64
+```
+
 ## Performance
 
 `bench/sqlite/run.sh` runs the same single-transaction INSERT

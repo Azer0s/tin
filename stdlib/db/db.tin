@@ -44,33 +44,15 @@ data Value (implicit[i64], implicit[f64], implicit[string]) =
   static fn ::implicit(v f64) Value    = return RealVal(v)
   static fn ::implicit(s string) Value = return TextVal(s)
 
-// RowSet: materialised SELECT result, indexed by (row, col).
-//
-// Conceptually a small trait, but implemented as a concrete struct
-// with function pointers.  The reason: Tin's trait fat pointer does
-// not currently survive being returned inside a generic data type
-// (i.e. Result[Trait, ...] discards the vtable in transit).  By
-// boxing the vtable into the struct itself we sidestep the issue
-// without losing the per-driver polymorphism.
-//
-// Drivers build a RowSet by populating `handle` with an rc-owned
-// opaque buffer and `count_fn` / `get_*_fn` with their per-type
-// accessors.  See sqlite::Rows::to_rowset for the canonical example.
-struct RowSet =
-  cell        *rc::Cell[*void]   // rc-owned driver buffer
-  count_fn    fn(*void) i64
-  cols_fn     fn(*void) i64
-  get_i64_fn  fn(*void, i64, i64) i64
-  get_f64_fn  fn(*void, i64, i64) f64
-  get_str_fn  fn(*void, i64, i64) string
-  is_null_fn  fn(*void, i64, i64) bool
-
-  fn count(this RowSet) i64                            = return this.count_fn(this.cell.payload())
-  fn cols(this RowSet) i64                             = return this.cols_fn(this.cell.payload())
-  fn get_i64(this RowSet, row i64, col i64) i64        = return this.get_i64_fn(this.cell.payload(), row, col)
-  fn get_f64(this RowSet, row i64, col i64) f64        = return this.get_f64_fn(this.cell.payload(), row, col)
-  fn get_string(this RowSet, row i64, col i64) string  = return this.get_str_fn(this.cell.payload(), row, col)
-  fn is_null(this RowSet, row i64, col i64) bool       = return this.is_null_fn(this.cell.payload(), row, col)
+// RowSet: materialised SELECT result, indexed by (row, col).  Drivers
+// pick the layout; the trait only mandates random access.
+trait RowSet =
+  fn count(this RowSet) i64                              = virtual
+  fn cols(this RowSet) i64                               = virtual
+  fn get_i64(this RowSet, row i64, col i64) i64          = virtual
+  fn get_f64(this RowSet, row i64, col i64) f64          = virtual
+  fn get_string(this RowSet, row i64, col i64) string    = virtual
+  fn is_null(this RowSet, row i64, col i64) bool         = virtual
 
 // Conn: driver connection.  exec returns sqlite-style changes() (or
 // -error); query returns a RowSet trait object on success.
@@ -78,8 +60,16 @@ trait Conn =
   fn exec(this *Conn, sql string, params [Value]) i64                            = virtual
   fn query(this *Conn, sql string, params [Value]) Result[RowSet, errors::Err]   = virtual
 
-// db_column maps a struct field to its SQL column.  An untagged field
-// uses its own name; an @"db:..." tag overrides it; @"db:-" skips.
+// db_column maps a struct field to its SQL column.  Tag grammar:
+//
+//   (no tag)              - column = field name, not PK
+//   @"db:-"               - skip the field entirely
+//   @"db:pk"              - column = field name, PK
+//   @"db:colname"         - column = colname, not PK
+//   @"db:colname,pk"      - column = colname, PK
+//
+// Returns the SQL column name, or "" when the field should be skipped.
+// `db_is_pk` parses the same tag for the ,pk marker.
 fn db_column(field_name string, tag string) string =
   if len(tag) == 0:
     return field_name
@@ -87,12 +77,39 @@ fn db_column(field_name string, tag string) string =
     return field_name
   if len(tag) == 4 && tag[3] == @'-':
     return ""
+  // Body starts at index 3.  A bare "pk" body means "column is the
+  // field name, this is the PK" - extract no column, fall back to the
+  // field's own name.  A "name,pk" body means "column is `name`, PK"
+  // - extract everything up to (but not including) the comma.
+  let body_start i64 = 3
+  let body_len   i64 = len(tag) - body_start
+  if body_len == 2 && tag[body_start] == @'p' && tag[body_start + 1] == @'k':
+    return field_name
   let key = ""
-  let i i64 = 3
+  let i i64 = body_start
   for i < len(tag):
+    if tag[i] == @',':
+      break
     key = key ++ tag[i]
     i = i + 1
+  if len(key) == 0:
+    return field_name
   return key
+
+// db_is_pk returns true when the tag body ends with the `,pk` marker
+// (or is exactly `pk`).  Used by `pk_col[T]` to find the PK field.
+fn db_is_pk(tag string) bool =
+  if len(tag) <= 3 || str::strncmp(tag, "db:", 3) != 0:
+    return false
+  let body_start i64 = 3
+  let n          i64 = len(tag)
+  // bare "pk" body.
+  if n - body_start == 2 && tag[body_start] == @'p' && tag[body_start + 1] == @'k':
+    return true
+  // "...,pk" suffix.
+  if n >= 6 && tag[n - 3] == @',' && tag[n - 2] == @'p' && tag[n - 1] == @'k':
+    return true
+  return false
 
 // value_of promotes a getfield-returned `any` to a Value.  Width-
 // classed integers all land in Int; floats in Real; strings in Text;
@@ -157,19 +174,52 @@ fn build_select_cols[T](v T) (string, [string], [atom]) =
     i = i + 1
   return (col_list, field_names, field_types)
 
-// pk_col returns the SQL column name of the PK (field named "id").
-// Honors @"db:..." renames; returns "id" if there is no id field.
+// pk_col returns the SQL column name of the primary key.
+//
+// Resolution order:
+//   1. First field tagged `@"db:pk"` or `@"db:colname,pk"` wins.
+//   2. If no field is tagged, fall back to the field literally named
+//      `id` (honouring its `@"db:..."` column rename, if any).
+//   3. If no candidate is found, return "id" - the caller's UPDATE /
+//      DELETE / find_by_id will then fail at the SQL level with a
+//      clear "no such column: id" rather than silently match nothing.
 fn pk_col[T](v T) string =
   let fields = fieldnames(v)
   let i i64 = 0
   for i < len(fields):
-    let fname_pk string = fields[i] as string
+    let fname string = fields[i] as string
+    let tag   string = fieldtag(v, fname)
+    if db_is_pk(tag):
+      return db_column(fname, tag)
+    i = i + 1
+  // Fallback: literal `id` field.
+  let j i64 = 0
+  for j < len(fields):
+    let fname_pk string = fields[j] as string
     if str::strcmp(fname_pk, "id") == 0:
       let col = db_column("id", fieldtag(v, "id"))
       if len(col) > 0:
         return col
       return "id"
+    j = j + 1
+  return "id"
+
+// pk_field_name is the Tin field name of the PK (needed by update_in
+// to read the WHERE value via getfield).  Same resolution as pk_col.
+fn pk_field_name[T](v T) string =
+  let fields = fieldnames(v)
+  let i i64 = 0
+  for i < len(fields):
+    let fname string = fields[i] as string
+    if db_is_pk(fieldtag(v, fname)):
+      return fname
     i = i + 1
+  let j i64 = 0
+  for j < len(fields):
+    let fname_pk string = fields[j] as string
+    if str::strcmp(fname_pk, "id") == 0:
+      return "id"
+    j = j + 1
   return "id"
 
 // insert_into runs INSERT against an explicit table.
@@ -246,11 +296,13 @@ fn all[T](c Conn) Result[[T], errors::Err] =
   return all_in[T](c, table_for[T](probe))
 
 // update_in runs UPDATE table SET col=?,... WHERE pk = ? against an
-// explicit table.  The PK column is excluded from the SET list.
+// explicit table.  The PK column is excluded from the SET list and
+// the PK value is the WHERE bind.
 fn update_in[T](c Conn, table string, v T) i64 =
   let fields = fieldnames(v)
   let nf = len(fields)
-  let pk = pk_col[T](v)
+  let pk        string = pk_col[T](v)
+  let pk_fname  string = pk_field_name[T](v)
   let sets = ""
   let params [Value] = []
   let written i64 = 0
@@ -265,7 +317,7 @@ fn update_in[T](c Conn, table string, v T) i64 =
       params ++= [value_of(getfield(v, fname))]
       written = written + 1
     i = i + 1
-  params ++= [value_of(getfield(v, "id"))]
+  params ++= [value_of(getfield(v, pk_fname))]
   let sql = "UPDATE " ++ table ++ " SET " ++ sets ++ " WHERE " ++ pk ++ " = ?"
   return c.exec(sql, params)
 
@@ -287,7 +339,7 @@ fn delete[T](c Conn, id i64) i64 =
 
 export {
   Value, RowSet, Conn,
-  db_column, value_of, table_for,
+  db_column, db_is_pk, value_of, table_for,
   insert, insert_into,
   find_by_id, find_by_id_in,
   all, all_in,
