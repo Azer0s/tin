@@ -1,0 +1,103 @@
+// libs/redis/db_orm_test - integration tests for stdlib/db's
+// trait-driven CRUD against the redis driver.  Records map onto
+// hashes (`<table>:<pk>` is the hash key; one hash field per struct
+// field).  Each test uses a unique table-name prefix so reruns and
+// shared instances stay isolated; the suite also DEL-cleans each
+// key it touched at the end.
+
+use redis
+use db
+use assert
+
+const HOST = "127.0.0.1"
+const PORT = 6379 as i32
+
+struct user =
+  id    i64    @"db:id,pk"
+  name  string @"db:name"
+  score f64    @"db:score"
+
+struct product =
+  id   i64    @"db:id,pk"
+  sku  string @"db:product_code"   // tag renames hash field
+  pwd  string @"db:-"              // tag skips field
+
+fn fresh_conn() redis::Connection =
+  return redis::open(HOST, PORT).unwrap()
+
+fn cleanup(c redis::Connection, table string) =
+  // KEYS-then-DEL by prefix, mirroring how db_all walks the table.
+  let ks [string] = c.keys(table ++ ":*").unwrap()
+  if len(ks) > 0:
+    let _ = c.del(ks).unwrap()
+
+test "db::insert + db::find_by_id round-trip (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_a")
+  let _i  i64 = db::insert_into[user](c, "user_a", user{id: 1, name: "alice", score: 4.5})
+  match db::find_by_id_in[user](c, "user_a", 1):
+    case Ok(u):
+      assert::equals(1 as i64, u.id)
+      assert::equals("alice", u.name)
+      assert::equals(4.5, u.score)
+    case Err(_): assert::ok(false)
+  cleanup(c, "user_a")
+  c.close()
+
+test "db::find_by_id Err on missing row (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_b")
+  match db::find_by_id_in[user](c, "user_b", 999):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  cleanup(c, "user_b")
+  c.close()
+
+test "db::all returns every inserted record (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_c")
+  let _1 i64 = db::insert_into[user](c, "user_c", user{id: 1, name: "alice", score: 1.0})
+  let _2 i64 = db::insert_into[user](c, "user_c", user{id: 2, name: "bob",   score: 2.0})
+  let _3 i64 = db::insert_into[user](c, "user_c", user{id: 3, name: "carol", score: 3.0})
+  match db::all_in[user](c, "user_c"):
+    case Ok(rows):
+      assert::equals(3, len(rows))
+    case Err(_): assert::ok(false)
+  cleanup(c, "user_c")
+  c.close()
+
+test "db::update changes a record by PK (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_d")
+  let _i  i64 = db::insert_into[user](c, "user_d", user{id: 7, name: "old", score: 0.0})
+  let _u  i64 = db::update_in[user](c, "user_d", user{id: 7, name: "new", score: 9.0})
+  match db::find_by_id_in[user](c, "user_d", 7):
+    case Ok(u):
+      assert::equals("new", u.name)
+      assert::equals(9.0, u.score)
+    case Err(_): assert::ok(false)
+  cleanup(c, "user_d")
+  c.close()
+
+test "db::delete removes the record (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "user_e")
+  let _i  i64 = db::insert_into[user](c, "user_e", user{id: 5, name: "doomed", score: 0.0})
+  let _dl i64 = db::delete_in[user](c, "user_e", 5)
+  match db::find_by_id_in[user](c, "user_e", 5):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  cleanup(c, "user_e")
+  c.close()
+
+test "db column-rename tag drives the hash field name (redis)" =
+  let c = fresh_conn()
+  cleanup(c, "product")
+  let _i  i64 = db::insert_into[product](c, "product", product{id: 1, sku: "ABC-123", pwd: "secret"})
+  match db::find_by_id_in[product](c, "product", 1):
+    case Ok(p):
+      assert::equals("ABC-123", p.sku)
+      assert::equals("", p.pwd)
+    case Err(_): assert::ok(false)
+  cleanup(c, "product")
+  c.close()
