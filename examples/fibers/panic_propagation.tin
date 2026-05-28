@@ -119,8 +119,8 @@ test "recovered direct panic in async fn yields zero to outer awaiter" =
   assert::equals(result, 0)
 
 // Loop-edge panic re-raise: an async function that loops after spawning
-// (but not awaiting) a panicking fiber should receive the panic at the next
-// loop back-edge auto-yield, catchable via defer + recover().
+// (but not awaiting) a panicking fiber should receive the panic at the
+// next loop back-edge auto-yield, catchable via defer + recover().
 
 fn{#async} fire_and_forget_panicker() =
   panic("ff panic")
@@ -129,13 +129,25 @@ fn{#async} loop_catches_ff_panic() i64 =
   defer do:
     let _ = recover()
   spawn fire_and_forget_panicker()
+  // Explicit yield gives the just-spawned ff fiber an opportunity
+  // to run before we enter the tight spin loop.  Without it, on
+  // contended runners (CI valgrind on a small VM) the ff fiber can
+  // sit in another worker's LQ unscheduled while this fiber's
+  // autoyield-driven loop completes the safety counter -- never
+  // observing the panic because the panic was never raised in the
+  // first place.  After the yield, the post-resume back-edge check
+  // sees any mailbox-routed panic the same way every loop iteration
+  // does.
+  yield
   let i i64 = 0
 
   for true:
     i = i + 1
 
     if i >= 1000000:
-      return -1  // safety: should never reach this
+      return -1  // safety: should never reach this on a healthy
+                 // runtime; the back-edge autoyield re-raises the
+                 // routed panic in microseconds once it lands.
 
   return 0  // unreachable normally; panic from ff fiber exits the loop via auto-yield check
 

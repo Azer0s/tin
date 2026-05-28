@@ -439,54 +439,39 @@ func (cg *CodeGen) emitInlineChanSuspend(prefix string, yieldBlk, retryBlk, done
 	cg.curBlock = doneBlk
 }
 
-// ensureFiberCheckPanicFn lazily declares _tin_fiber_check_panic() -> i8*.
-// Returns the first retained panic message from a non-awaited fiber, or NULL.
-func (cg *CodeGen) ensureFiberCheckPanicFn() *ir.Func {
+// ensureFiberTakePendingPanicFn lazily declares
+// _tin_fiber_take_pending_panic() -> i8*.  Returns the current
+// fiber's routed-by-ancestor panic mailbox (atomically taken), or
+// NULL when empty.  Replaces the old global-flag + table-walk pair
+// (_has_unhandled_panics / _tin_fiber_check_panic) with a per-fiber
+// load that can't race with sibling observers.
+func (cg *CodeGen) ensureFiberTakePendingPanicFn() *ir.Func {
 	if cg.fiberCheckPanicFn != nil {
 		return cg.fiberCheckPanicFn
 	}
 
-	cg.fiberCheckPanicFn = cg.ensureExternDecl("_tin_fiber_check_panic", irtypes.I8Ptr, nil, false)
+	cg.fiberCheckPanicFn = cg.ensureExternDecl("_tin_fiber_take_pending_panic", irtypes.I8Ptr, nil, false)
 
 	return cg.fiberCheckPanicFn
 }
 
-// ensurePanicFlagGlobal lazily declares _has_unhandled_panics as an external i32 global.
-// Used by emitPanicCheck to avoid a function call on the hot path (flag == 0 case).
-func (cg *CodeGen) ensurePanicFlagGlobal() *ir.Global {
-	if cg.panicFlagGlobal != nil {
-		return cg.panicFlagGlobal
-	}
-
-	g := cg.mod.NewGlobal("_has_unhandled_panics", irtypes.I32)
-	g.Linkage = enum.LinkageExternal
-	cg.panicFlagGlobal = g
-
-	return g
-}
-
-// emitPanicCheck emits a two-level unhandled-panic check after a coro resume point.
+// emitPanicCheck emits a back-edge / call-site re-raise of any panic
+// routed into the current fiber's pending_child_panic mailbox by a
+// child fiber's panic finalize path.  The mailbox is per-fiber, so
+// this is a single call to _tin_fiber_take_pending_panic and a null
+// test - no shared atomic, no table walk, no inter-fiber race.
 //
-// Fast path (common): atomic load of _has_unhandled_panics; if zero, jump to doneBlk.
-// Slow path (rare):   call _tin_fiber_check_panic(); if null, jump to doneBlk; else panic.
-//
-// resumeBlk is terminated here. doneBlk must have no terminator yet.
+// resumeBlk is terminated here.  doneBlk must have no terminator yet.
 func (cg *CodeGen) emitPanicCheck(resumeBlk *ir.Block, doneBlk *ir.Block, suffix string) {
-	flagLoad := resumeBlk.NewLoad(irtypes.I32, cg.ensurePanicFlagGlobal())
-	flagLoad.Atomic = true
-	flagLoad.Ordering = enum.AtomicOrderingMonotonic
-	flagLoad.Align = 4
-	hasFlag := resumeBlk.NewICmp(enum.IPredNE, flagLoad, constant.NewInt(irtypes.I32, 0))
-	slowBlk := cg.newBlock(suffix + ".slow")
-	resumeBlk.NewCondBr(hasFlag, slowBlk, doneBlk)
-
-	msg := slowBlk.NewCall(cg.ensureFiberCheckPanicFn())
-	isNotNull := slowBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	msg := resumeBlk.NewCall(cg.ensureFiberTakePendingPanicFn())
+	isNotNull := resumeBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
 	panicBlk := cg.newBlock(suffix + ".panic")
-	slowBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
+	resumeBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
 
-	// Do NOT release msg - the defer thunk already balances the retain added by
-	// _tin_fiber_check_panic (same as the await.panic path; see genAwaitExpr).
+	// Do NOT release msg - the defer thunk already balances the
+	// retain that _route_pending_panic_to_ancestor added before the
+	// CAS into the mailbox (same as the await.panic path; see
+	// genAwaitExpr).
 	panicBlk.NewCall(cg.ensurePanicFn(), msg)
 	cg.emitCoroComplete(panicBlk, cg.recoverRetVal(panicBlk))
 	cg.emitFinalSuspend(panicBlk, cg.curCoroFrame)
@@ -553,18 +538,10 @@ func (cg *CodeGen) emitColoredRuntimeYield(block *ir.Block) {
 // plain `_tin_panic` + `ret` instead of the coro-completion sequence
 // (no frame to complete).
 func (cg *CodeGen) emitColoredPanicCheck(from *ir.Block, doneBlk *ir.Block, suffix string) {
-	flagLoad := from.NewLoad(irtypes.I32, cg.ensurePanicFlagGlobal())
-	flagLoad.Atomic = true
-	flagLoad.Ordering = enum.AtomicOrderingMonotonic
-	flagLoad.Align = 4
-	hasFlag := from.NewICmp(enum.IPredNE, flagLoad, constant.NewInt(irtypes.I32, 0))
-	slowBlk := cg.newBlock(suffix + ".slow")
-	from.NewCondBr(hasFlag, slowBlk, doneBlk)
-
-	msg := slowBlk.NewCall(cg.ensureFiberCheckPanicFn())
-	isNotNull := slowBlk.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
+	msg := from.NewCall(cg.ensureFiberTakePendingPanicFn())
+	isNotNull := from.NewICmp(enum.IPredNE, msg, constant.NewNull(irtypes.I8Ptr))
 	panicBlk := cg.newBlock(suffix + ".panic")
-	slowBlk.NewCondBr(isNotNull, panicBlk, doneBlk)
+	from.NewCondBr(isNotNull, panicBlk, doneBlk)
 
 	panicBlk.NewCall(cg.ensurePanicFn(), msg)
 	panicBlk.NewUnreachable()
