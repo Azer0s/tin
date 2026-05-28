@@ -91,6 +91,16 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 // renders `Result__[]string__...` -- two distinct named structs with the
 // same shape that no longer compare Equal in LLVM.
 func parseConcreteSubstName(name string) ast.TypeExpr {
+	// Reject obviously-garbage inputs early.  Empty / star-only /
+	// bracket-only canon strings would otherwise materialise as a
+	// SimpleType with an empty name (or wrapped in pointers / arrays),
+	// silently flowing into downstream type lookup and resolving to
+	// "undefined type" diagnostics in unrelated locations.  Force the
+	// failure here with a SimpleType whose name advertises the cause.
+	if name == "" {
+		return &ast.SimpleType{Name: "_empty_subst"}
+	}
+
 	stars := 0
 
 	for stars < len(name) && name[stars] == '*' {
@@ -98,6 +108,10 @@ func parseConcreteSubstName(name string) ast.TypeExpr {
 	}
 
 	rest := name[stars:]
+
+	if rest == "" || rest == "[]" {
+		return &ast.SimpleType{Name: "_empty_subst"}
+	}
 
 	var t ast.TypeExpr
 

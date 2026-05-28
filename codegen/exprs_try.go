@@ -220,6 +220,17 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if monoOK {
 		thisArg := errBlock.NewLoad(srcType, tempStorage)
 		rewrapped := errBlock.NewCall(monoFn, thisArg)
+		// Same deep-retain dance as the Ok branch below: the temp's
+		// emitTempRelease inside emitPropagatingReturn walks the
+		// container's variant and releases the err-side payload's
+		// interior (string, fat array, ...).  Without a retain here
+		// the propagated value's payload is freed before the caller
+		// sees it.  Wildcard-mono returns a fresh re-wrapped value,
+		// so the retain operates on rewrapped's contents.
+		if cg.payloadNeedsRetainOnExtract(rewrapped.Type()) {
+			cg.emitRetain(errBlock, rewrapped)
+		}
+
 		emitPropagatingReturn(errBlock, rewrapped)
 	} else {
 		_, errVal, err := callMethod(errBlock, "err_value")
@@ -239,6 +250,14 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 			return nil, cg.nodeErr(e,
 				"`try`: cannot propagate %s through a function returning %s. The impl of tryable on %s did not declare a wildcard slot in its trait bound, so the success type cannot be re-bound at this call site. Add the wildcard (e.g. change the trait bound to `tryable[V, %s[_, ...]]`) or convert the value explicitly with .map / .map_err.",
 				cg.fmtArgType(errVal.Type()), cg.fmtArgType(monoTarget), pretty, pretty)
+		}
+		// Mirror the Ok branch's retain: err_value typically loads the
+		// Err variant payload without retaining its interior, so the
+		// subsequent emitTempRelease would free the strings / fat
+		// arrays / iface data inside the error value before the caller
+		// propagates it.
+		if errVal != nil && cg.payloadNeedsRetainOnExtract(errVal.Type()) {
+			cg.emitRetain(errBlock, errVal)
 		}
 
 		emitPropagatingReturn(errBlock, errVal)

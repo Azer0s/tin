@@ -750,10 +750,11 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 	return nil, cg.nodeErr(e, "undefined method: %s.%s", cg.diagStructName(structName), fn.Field)
 }
 
-// pickGenericMethodOverload picks the first generic-method template whose
-// where-clauses are satisfied by `subst`.  When no template has any
-// constraints, the first one wins (preserves the single-overload path).
-// Returns nil only when every overload's constraints fail to match.
+// pickGenericMethodOverload picks the generic-method template whose
+// where-clauses match `subst`.  Constrained overloads are tried first;
+// an unconstrained overload only wins as the fallback when no constrained
+// match exists.  Returns nil only when every overload's constraints fail
+// AND no unconstrained fallback exists.
 func (cg *CodeGen) pickGenericMethodOverload(tmpls []*ast.FuncDecl, subst map[string]TypeName) *ast.FuncDecl {
 	if len(tmpls) == 0 {
 		return nil
@@ -763,9 +764,15 @@ func (cg *CodeGen) pickGenericMethodOverload(tmpls []*ast.FuncDecl, subst map[st
 		return tmpls[0]
 	}
 
+	var fallback *ast.FuncDecl
+
 	for _, t := range tmpls {
 		if len(t.Constraints) == 0 {
-			return t
+			if fallback == nil {
+				fallback = t
+			}
+
+			continue
 		}
 
 		ok := true
@@ -791,7 +798,7 @@ func (cg *CodeGen) pickGenericMethodOverload(tmpls []*ast.FuncDecl, subst map[st
 		}
 	}
 
-	return nil
+	return fallback
 }
 
 // materializeGenericMethodRef monomorphizes a generic method template for the

@@ -264,9 +264,15 @@ func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value,
 			}
 
 			fn, err := cg.materializeGenericMethodRef(tmpl, templateKey, e.Index)
-			if err == nil {
-				return fn, nil
+			if err != nil {
+				// Surface the real monomorphization failure instead of
+				// falling through to the array-index path, which would
+				// produce an unrelated "cannot index <ScopeAccess>"
+				// diagnostic and lose the underlying cause.
+				return nil, cg.nodeErr(e, "%v", err)
 			}
+
+			return fn, nil
 		}
 	}
 

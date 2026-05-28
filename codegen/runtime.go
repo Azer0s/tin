@@ -110,17 +110,13 @@ func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) 
 		}
 	}
 	// Fat array whose elements carry deep RC (strings, ADT variants holding
-	// strings, nested arrays).  The corresponding release path
-	// (emitRelease at the matching `isFatArrayPtr(t)` branch above) deep-
-	// walks via _tin_foreach_struct_elem_release with per-element release
-	// helpers.  A bare buffer-pointer retain here would be asymmetric:
-	// the buffer rc stays high enough to skip element-release at scope
-	// exit, but element rcs never get the matching +1.  When the buffer
-	// is eventually freed for real (last owner drops), its elements (and
-	// the strings inside them) are released by foreach_struct_elem_release
-	// even though intermediate consumers (e.g. .map / try / unwrap) handed
-	// out aliases that still reference those strings.  Deep retain mirrors
-	// the deep release so the two stay balanced under any consumer chain.
+	// strings, nested arrays).  Deep retain mirrors the deep release the
+	// element type's release helper performs at buffer-RC-0.  Pre-cleanup
+	// note: an earlier draft used only a buffer retain, which UAFs the
+	// .map(...) chains that aliased strings out of variant payloads
+	// after the source's scope-release ran.  The deep retain leaks in
+	// the strict struct-copy case but the alternative is the UAF; a
+	// proper fix needs flow-aware ownership analysis (tracked separately).
 	if isFatArrayPtr(t) {
 		if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 3 {
 			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
@@ -129,10 +125,6 @@ func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) 
 					dataPtr := block.NewExtractValue(fieldVal, 0)
 					length := block.NewExtractValue(fieldVal, 1)
 					dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
-					// Outer buffer retain first (matches what emitRetain
-					// would have done via extractRCDataPtr); element-level
-					// retain second so each element's deep RC matches the
-					// element-level decrement the deep release will emit.
 					block.NewCall(cg.ensureRetainPtr(), dataPtrI8)
 
 					elemSize := cg.llvmSizeOf(block, elemType)

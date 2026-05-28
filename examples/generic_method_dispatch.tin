@@ -121,3 +121,27 @@ test "where-clause overload picks the right body by inferred T" =
   let s string = (Bag::S("hi")).get()
   assert::equals(42 as i64, n)
   assert::equals("hi", s)
+
+// The picker used to short-circuit on the first unconstrained overload
+// it saw, so adding a no-clause fallback would steal every T from the
+// constrained bodies.  Constrained overloads now take priority; the
+// unconstrained body only wins as the fallback when nothing matched.
+data MixedBag =
+  Number(n i64)
+  Other
+
+  fn get[T](this MixedBag) T where T is i64 =
+    match this:
+      case Number(v): return v
+      case Other:     return 0
+
+  fn get[T](this MixedBag) T =
+    // Unconstrained "default": should only fire when the inferred T
+    // doesn't match any constrained body.
+    let out T
+    return out
+
+test "constrained overload beats unconstrained fallback" =
+  let b = MixedBag::Number(99)
+  let n i64 = b.get()
+  assert::equals(99 as i64, n)
