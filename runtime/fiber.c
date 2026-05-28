@@ -1939,14 +1939,24 @@ const char *_tin_fiber_take_pending_panic(void) {
     if (!_current_fib) {
         return NULL;
     }
-    // Acquire pairs with the release CAS in _route_pending_panic_to_
-    // ancestor so the pmsg bytes constructed before routing are fully
-    // visible here.  Take = swap to NULL: a second observer (in case
-    // the same fiber is concurrently polled, which the back-edge
-    // emission never does, but the API stays safe) sees NULL.
-    char *msg = atomic_exchange_explicit(
+    // Two-step take: cheap acquire-load first so the (vastly more
+    // common) empty-mailbox case doesn't pay for a locked xchg.  On
+    // x86 the load is a plain mov; only when there's actually a
+    // panic to take do we issue the locked exchange that hands
+    // ownership over.  Without this gating, tight autoyielding loops
+    // (jitter, mpmc) saw a ~7-8% regression vs the old global-flag
+    // load on x86 because every loop back-edge paid for a `lock
+    // xchg` against a contended cache line.
+    if (!atomic_load_explicit(&_current_fib->pending_child_panic,
+                              memory_order_acquire)) {
+        return NULL;
+    }
+    // Mailbox non-empty: take ownership via exchange.  Acquire
+    // pairs with the release CAS in _route_pending_panic_to_ancestor
+    // so the pmsg bytes constructed before routing are fully visible
+    // to whoever consumes msg next.
+    return atomic_exchange_explicit(
         &_current_fib->pending_child_panic, NULL, memory_order_acquire);
-    return msg;
 }
 
 // Returns the panic message of a completed fiber, or NULL if it completed normally.
