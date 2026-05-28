@@ -476,6 +476,18 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 		typedPtr := block.NewBitCast(heapPtr, irtypes.NewPointer(structType))
 		block.NewStore(structVal, typedPtr)
 
+		// The bit-copy aliases every RC-managed field of `structVal` into
+		// the heap snapshot without bumping their refs.  Once the source
+		// scope releases its copy, those fields would become dangling
+		// pointers inside the iface (manifest: rows.count() returns
+		// garbage or SIGSEGVs when an iface is destructured out of a
+		// Result.Ok or any other generic data container).  Retain each
+		// owned field so the snapshot is independently owning; the
+		// matching field-walk release fires from the scope-exit
+		// `releaseAsStructPtr` registration below via
+		// `ensureStructPtrReleaseFn`.
+		cg.emitRetain(block, structVal)
+
 		dataPtr = heapPtr
 		concreteType = structType
 	}
@@ -535,9 +547,24 @@ func (cg *CodeGen) coerceToTrait(block *ir.Block, structVal value.Value, instKey
 
 		name := fmt.Sprintf(".iface_data_%d", cg.strCount)
 		cg.strCount++
-		cg.curScope.set(name, &scopeEntry{
+
+		entry := &scopeEntry{
 			val: ptrSlot, isAlloc: true, releaseRawPtr: true,
-		})
+		}
+
+		// Value-source path: ask the scope-release to dispatch through
+		// the per-struct release helper so RC-managed fields of the
+		// snapshot are walked before the heap block is freed.  The
+		// pointer-source path keeps the raw release - the source's
+		// fields already belong to the *T owner, not the iface.
+		if concreteSt, ok := concreteType.(*irtypes.StructType); ok && concreteSt.Name() != "" {
+			if _, structSource := structType.(*irtypes.PointerType); !structSource {
+				entry.releaseAsStructPtr = concreteSt.Name()
+				entry.releaseAsStructPtrType = concreteSt
+			}
+		}
+
+		cg.curScope.set(name, entry)
 	}
 
 	return block.NewLoad(fatPtrType, ifaceAlloca), nil
