@@ -123,7 +123,7 @@ func New(filename string) *CodeGen {
 		genericFuncOverloads:          make(map[string][]*ast.FuncDecl),
 		genericFuncHomeScopes:         make(map[string]*scope),
 		constrainedFuncInstances:      make(map[string]*ir.Func),
-		genericMethodTemplates:        make(map[string]*ast.FuncDecl),
+		genericMethodTemplates:        make(map[string][]*ast.FuncDecl),
 		macros:                        make(map[string]*ast.MacroDecl),
 		funcDecls:                     make(map[string]*ast.FuncDecl),
 		fnParamConventions:            make(map[string]map[string]ParamConvention),
@@ -204,6 +204,7 @@ func New(filename string) *CodeGen {
 		structDeepCopyFns:             make(map[string]*ir.Func),
 		elemDeepCopyHelpers:           make(map[string]*ir.Func),
 		chainReleaseFns:               make(map[string]*ir.Func),
+		dataCtorAdapters:              make(map[string]*ir.Func),
 		diFiles:                       make(map[string]*metadata.DIFile),
 		diTypeCache:                   make(map[string]metadata.Field),
 	}

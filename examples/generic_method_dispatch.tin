@@ -1,0 +1,123 @@
+// examples/generic_method_dispatch.tin -- pin the four dispatch shapes
+// for a generic method on a data ADT:
+//
+//   1. v.get[T]()                      explicit type-arg, method-call form
+//   2. let n: T = v.get()              return-type-driven inference
+//   3. V::get[T] used as a fn-value     explicit type-arg, method-ref form
+//   4. r.map(V::get)                    cross-call inference: T inferred
+//                                       from the surrounding .map's u
+//
+// where-clause matching is also tested for the non-primitive bound
+// shapes (`[T]`, `Option[T]`, `[(T, U)]`) that the constraint walker
+// previously couldn't reconstruct from the LLVM canonical name.
+
+use assert
+use { Option } from option
+use { Result } from result
+use errors
+
+data V =
+  Int(v i64)
+  Str(s string)
+
+  // Single generic method with a body that branches on typeof; the
+  // primitive Ts (i64, string) coerce cleanly inside their guard.
+  fn get[T](this V) T =
+    let out T
+
+    if typeof(out) == 'i64:
+      match this:
+        case Int(n):    out = n as T
+        case Str(_):    let _ = 0
+      return out
+
+    if typeof(out) == 'string:
+      match this:
+        case Str(s):    out = s as T
+        case Int(_):    let _ = 0
+      return out
+
+    return out
+
+test "explicit type arg, method-call form: v.get[T]()" =
+  let v = V::Int(42)
+  assert::equals(42 as i64, v.get[i64]())
+
+test "return-type-driven inference: let n: T = v.get()" =
+  let v = V::Int(7)
+  let n i64 = v.get()
+  assert::equals(7 as i64, n)
+  let s string = (V::Str("hi")).get()
+  assert::equals("hi", s)
+
+test "explicit type arg as a fn-value: V::get[T]" =
+  let r Result[V, errors::Err] = Ok(V::Int(99))
+  let r2 = r.map(V::get[i64])
+  match r2:
+    case Ok(n): assert::equals(99 as i64, n)
+    case Err(_): assert::ok(false)
+
+test "cross-call inference: r.map(V::get)" =
+  let r Result[V, errors::Err] = Ok(V::Int(123))
+  let r2 Result[i64, errors::Err] = r.map(V::get)
+  match r2:
+    case Ok(n): assert::equals(123 as i64, n)
+    case Err(_): assert::ok(false)
+
+// Composite where-clause shapes that previously failed because the
+// constraint walker only mangled the outer `__` separator and left the
+// inner type as a SimpleType named e.g. "Tuple__string__string".  The
+// recursive canonToBracketed walks pointers / arrays / generic heads
+// uniformly now so the bound can match.
+
+fn opt_string_t[T](v V) T where T is Option[string] =
+  let out T
+  return out
+
+fn string_list_t[T](v V) T where T is [string] =
+  let out T
+  return out
+
+fn string_pairs_t[T](v V) T where T is [(string, string)] =
+  let out T
+  return out
+
+test "where T is Option[string] satisfies for matching concrete" =
+  // Call through the inference path -- return-type annotation pins T.
+  let o Option[string] = opt_string_t(V::Int(0))
+  match o:
+    case Some(_): assert::ok(false)
+    case None:    assert::ok(true)
+
+test "where T is [string] satisfies for matching concrete" =
+  let xs [string] = string_list_t(V::Int(0))
+  assert::equals(0, len(xs))
+
+test "where T is [(string, string)] satisfies for matching concrete" =
+  let ps [(string, string)] = string_pairs_t(V::Int(0))
+  assert::equals(0, len(ps))
+
+// Method-level generic overload-by-where-clause: multiple `fn get[T]`
+// overloads with disjoint `where T is X` clauses on the same data ADT;
+// the dispatcher picks the body whose constraint matches the inferred T.
+
+data Bag =
+  N(v i64)
+  S(v string)
+
+  fn get[T](this Bag) T where T is i64 =
+    match this:
+      case N(n): return n
+      case S(_): return 0
+
+  fn get[T](this Bag) T where T is string =
+    match this:
+      case S(s): return s
+      case N(_): return ""
+
+test "where-clause overload picks the right body by inferred T" =
+  let b = Bag::N(42)
+  let n i64 = b.get()
+  let s string = (Bag::S("hi")).get()
+  assert::equals(42 as i64, n)
+  assert::equals("hi", s)

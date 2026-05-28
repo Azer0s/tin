@@ -103,7 +103,7 @@ func (cg *CodeGen) genDataMethods(adtName string, n *ast.DataDecl) error {
 	for _, m := range n.Methods {
 		if len(m.TypeParams) > 0 {
 			templateKey := adtName + "_" + m.Name
-			cg.genericMethodTemplates[templateKey] = m
+			cg.genericMethodTemplates[templateKey] = append(cg.genericMethodTemplates[templateKey], m)
 
 			continue
 		}
@@ -338,6 +338,28 @@ func (cg *CodeGen) emitConcreteData(name string, n *ast.DataDecl) error {
 					if err := cg.genStructLayout(sd); err != nil {
 						return fmt.Errorf("data %s: variant %s: forcing layout of %s: %w",
 							name, v.Name, structKey, err)
+					}
+				}
+			}
+			// Same hazard for nested data ADTs: a field whose type is
+			// another data ADT (e.g. `Result[Val, Err]` where Val itself
+			// has a payload-carrying variant) gets emitConcreteData'd in
+			// AST order.  If Result is monomorphized before Val emits
+			// its concrete layout, Val's outer struct shows up here with
+			// just the tag-only stub fields (i32 type_id + i64 tag, 16
+			// bytes) and no `[N x i8]` payload yet -- llvmTypeSize
+			// returns 16, the Ok variant's true size (16 + 8 payload =
+			// 24) gets clipped to 16, and the i64 / string at the tail
+			// of Val gets silently truncated on return.  Force the
+			// referenced ADT's emitConcreteData before sizing.
+			if structFt, ok := ft.(*irtypes.StructType); ok {
+				adtKey := structFt.Name()
+				if _, alreadyDone := cg.dataVariants[adtKey]; !alreadyDone {
+					if dd := cg.dataDeclFor(CanonKey(adtKey)); dd != nil {
+						if err := cg.emitConcreteData(adtKey, dd); err != nil {
+							return fmt.Errorf("data %s: variant %s: forcing layout of nested ADT %s: %w",
+								name, v.Name, adtKey, err)
+						}
 					}
 				}
 			}

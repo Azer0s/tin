@@ -147,7 +147,19 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		// For value-returning functions, unwrap and treat as an expression.
 		inner := b.Expr
 		if !irtypes.IsVoid(retType) {
+			// Propagate the declared return type as a hint so a generic
+			// method/call inside the body (e.g. `fn(v) T = v.get()` with
+			// `get[T]`) can pick its instantiation from this context the
+			// same way `let n: T = v.get()` and `return v.get()` do.
+			// genReturn sets the same hint at its entry; expression-body
+			// fns never hit genReturn, so the hint needs setting here.
+			prevHint := cg.returnTypeHint
+			cg.returnTypeHint = retType
+
 			val, err := cg.genExpr(block, inner)
+
+			cg.returnTypeHint = prevHint
+
 			if err != nil {
 				return false, err
 			}

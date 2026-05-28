@@ -233,6 +233,43 @@ func (cg *CodeGen) genFieldAccess(block *ir.Block, e *ast.FieldAccess) (value.Va
 }
 
 func (cg *CodeGen) genIndexExpr(block *ir.Block, e *ast.IndexExpr) (value.Value, error) {
+	// `Type::generic_method[T]` used as a value -- the caller wants the
+	// fn-ptr of the T-monomorphized method, e.g. as a `.map(...)` arg.
+	// Parser shape: IndexExpr{Expr: ScopeAccess{[Type, method]}, Index: T}.
+	// Without this hook the inner ScopeAccess errors with "undefined" --
+	// generic methods only live as templates in genericMethodTemplates and
+	// have no scope entry to load directly.
+	if sa, ok := e.Expr.(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
+		methodName := sa.Path[len(sa.Path)-1]
+		typeNameStr := sa.Path[0]
+
+		if len(sa.Path) > 2 {
+			typeNameStr = sa.Path[len(sa.Path)-2]
+		}
+
+		templateKey := typeNameStr + "_" + methodName
+		if tmpls, isMethod := cg.genericMethodTemplates[templateKey]; isMethod && len(tmpls) > 0 {
+			tmpl := tmpls[0]
+
+			if len(tmpls) > 1 && len(tmpl.TypeParams) >= 1 {
+				if key := cg.exprToTypeParamKey(e.Index); key != "" {
+					mSubst := map[string]TypeName{
+						tmpl.TypeParams[0]: cg.typeNameFromCanon(key),
+					}
+
+					if picked := cg.pickGenericMethodOverload(tmpls, mSubst); picked != nil {
+						tmpl = picked
+					}
+				}
+			}
+
+			fn, err := cg.materializeGenericMethodRef(tmpl, templateKey, e.Index)
+			if err == nil {
+				return fn, nil
+			}
+		}
+	}
+
 	// `(p + n)[i]` is a permitted transient consumption -- the
 	// arithmetic view is indexed in-place without escaping.
 	prevTransient := cg.transientPtrAllowed

@@ -249,12 +249,49 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if err != nil {
 		return nil, err
 	}
+	// The default ok_value impl loads the variant payload out of the
+	// container without bumping deep RC.  The matching emitTempRelease
+	// below runs data_release_val on the temp container, which walks the
+	// Ok variant and releases its payload's RC fields -- the same string
+	// / fat-array pointers we just handed to okVal.  Without a deep
+	// retain here, the temp's release frees those buffers and the caller
+	// reads dangling memory (Result[Data, Err] with a string-bearing
+	// variant: the string body comes back empty / freed).
+	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
+		cg.emitRetain(okBlock, okVal)
+	}
 
 	emitTempRelease(okBlock)
 
 	cg.curBlock = okBlock
 
 	return okVal, nil
+}
+
+// payloadNeedsRetainOnExtract reports whether values of type t have
+// internal RC-tracked content (strings, fat arrays, ADT variants holding
+// such) that would be co-released by a sibling release of the source
+// container.  Used by `try` to decide whether to retain the extracted Ok
+// value before the temp container's release fires.  Conservative: returns
+// true for ADT types and for the obvious fat shapes; primitives skip.
+func (cg *CodeGen) payloadNeedsRetainOnExtract(t irtypes.Type) bool {
+	if t == nil {
+		return false
+	}
+
+	if cg.isDataType(t) {
+		return true
+	}
+
+	if isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t) {
+		return true
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok && isTraitFatPtrShape(st) {
+		return true
+	}
+
+	return false
 }
 
 // blockOwner returns the function a block belongs to.

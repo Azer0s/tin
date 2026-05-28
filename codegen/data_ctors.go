@@ -185,7 +185,31 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 
 	vi := cg.dataVariantInfoFor(adtName, variantName)
 	if vi == nil {
-		return nil, true, fmt.Errorf("data %s: unknown variant %q", adtName, variantName)
+		// `name` is not a variant.  Defer to the caller -- the
+		// generic genScopeAccess fallback below this site looks up
+		// `AdtName_method` in scope, which lets `Option::Some` keep
+		// resolving as a constructor (handled above) AND
+		// `Value::as_int` resolve as a first-class method reference
+		// usable with .map / .and_then / pass-as-fn-arg etc.  If
+		// nothing matches there either, the caller's
+		// "undefined: ..." error fires with the full original path.
+		return nil, false, nil
+	}
+
+	// Bare scope reference (`Option::Some`, `Result::Ok`, ...) with a
+	// non-nullary variant: synthesise an adapter function so the ctor
+	// can be passed as a first-class fn value (`.map(Option::Some)`,
+	// channel.send(Result::Err), spawn-as-fn, etc.).  `args == nil`
+	// flags the ScopeAccess-as-value path (see genScopeAccess); the
+	// call-expr path passes a non-nil slice and falls through to the
+	// strict arity check below.
+	if args == nil && len(vi.Fields) > 0 {
+		adapter, err := cg.ensureVariantCtorAdapter(adtName, variantName)
+		if err != nil {
+			return nil, true, err
+		}
+
+		return adapter, true, nil
 	}
 
 	if len(args) != len(vi.Fields) {
@@ -469,3 +493,64 @@ func (cg *CodeGen) isDataType(t irtypes.Type) bool {
 //     layout and emits emitRelease on every RC-tracked or owning-pointer
 //     field (the standard struct-field release machinery takes it from
 //     there).
+
+// ensureVariantCtorAdapter synthesises (and caches) a top-level
+// function that constructs the named variant from its payload args,
+// so the constructor can be passed as a first-class function value
+// (e.g. `.map(Option::Some)`).  Nullary variants don't need an
+// adapter -- they're already plain values -- so callers should only
+// invoke this when the variant has >= 1 field.
+//
+// The adapter's signature mirrors the variant's payload field types
+// in order, returning the outer ADT type.  Lazy: the first reference
+// in a compilation unit generates the body and caches the *ir.Func;
+// later references reuse the cached function.
+func (cg *CodeGen) ensureVariantCtorAdapter(adtName, variantName string) (*ir.Func, error) {
+	key := adtName + "__" + variantName + "__ctor"
+	if fn, ok := cg.dataCtorAdapters[key]; ok {
+		return fn, nil
+	}
+
+	vi := cg.dataVariantInfoFor(adtName, variantName)
+	if vi == nil {
+		return nil, fmt.Errorf("data %s: unknown variant %q", adtName, variantName)
+	}
+
+	outerSt := cg.structTypeFor(CanonKey(adtName))
+	if outerSt == nil {
+		return nil, fmt.Errorf("data %s: outer LLVM struct missing", adtName)
+	}
+
+	params := make([]*ir.Param, len(vi.PayloadType.Fields))
+	for i, ft := range vi.PayloadType.Fields {
+		params[i] = ir.NewParam(fmt.Sprintf("a%d", i), ft)
+	}
+
+	fn := cg.mod.NewFunc(key, outerSt, params...)
+	cg.dataCtorAdapters[key] = fn
+
+	entry := fn.NewBlock("entry")
+
+	// Build a value list from the IR params + a uniform retainMask.
+	// Adapter args arrive from the caller's evaluation context, so
+	// every RC-managed field has already been retained at the call
+	// site (the .map closure / fn-arg path does the standard +1).
+	// A second retain inside wrapDataVariant would unbalance the
+	// payload.
+	argVals := make([]value.Value, len(params))
+	retainMask := make([]bool, len(params))
+	for i, p := range params {
+		argVals[i] = p
+	}
+
+	v, err := cg.wrapDataVariant(entry, adtName, variantName, argVals, retainMask)
+	if err != nil {
+		return nil, err
+	}
+
+	if entry.Term == nil {
+		entry.NewRet(v)
+	}
+
+	return fn, nil
+}

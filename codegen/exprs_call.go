@@ -755,6 +755,46 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 		callee = v
 
 	case *ast.IndexExpr:
+		// Method form: obj.method[T, ...](args).  The parser builds this as
+		//   CallExpr{Func: IndexExpr{Expr: FieldAccess{Expr: obj, Field: method}, Index: T}, Args: args}
+		// Route through genCallFieldAccessGeneric so the dispatch path picks
+		// up the explicit type-arg substitution at the same call site that
+		// already knows how to thread receivers + overload resolution.
+		if fa, ok := fn.Expr.(*ast.FieldAccess); ok {
+			return cg.genCallFieldAccessGeneric(block, e, fa, fn.Index)
+		}
+		// Static-method generic call:  TypeName::method[T, ...](receiver, args...)
+		// The parser builds this as IndexExpr{Expr: ScopeAccess{[Type, method]},
+		// Index: T}.  When `Type_method` matches a generic method template, the
+		// first call arg is the receiver and the rest are method args -- the
+		// same dispatch shape the field-access form uses, just expressed via
+		// the static-method syntax.  Without this branch the lookup falls
+		// through to the free-function path below, finds nothing, and errors
+		// with "undefined identifier: <method>".
+		if sa, ok := fn.Expr.(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
+			methodName := sa.Path[len(sa.Path)-1]
+			typeNameStr := sa.Path[0]
+
+			if len(sa.Path) > 2 {
+				typeNameStr = sa.Path[len(sa.Path)-2]
+			}
+
+			templateKey := typeNameStr + "_" + methodName
+			if tmpls, isMethod := cg.genericMethodTemplates[templateKey]; isMethod && len(tmpls) > 0 {
+				_ = tmpls
+				if len(e.Args) == 0 {
+					return nil, cg.nodeErr(e, "%s::%s[...]: generic method called as static needs at least one arg (the receiver)", typeNameStr, methodName)
+				}
+
+				fakeFA := &ast.FieldAccess{Expr: e.Args[0], Field: methodName}
+				fakeFA.SetPos(sa.Pos())
+
+				rebuiltCall := &ast.CallExpr{Func: fakeFA, Args: e.Args[1:]}
+				rebuiltCall.SetPos(e.Pos())
+
+				return cg.genCallFieldAccessGeneric(block, rebuiltCall, fakeFA, fn.Index)
+			}
+		}
 		// Explicit generic instantiation: fn[TypeArg](args) or pkg::fn[TypeArg](args)
 		// The parser represents decode[person](src) as
 		//   CallExpr{Func: IndexExpr{Expr: decode_or_scope, Index: type_ident}, Args: [src]}

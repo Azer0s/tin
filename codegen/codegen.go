@@ -356,6 +356,13 @@ type CodeGen struct {
 	// Key: "structName__chain_N" (depth N). Recursively releases inner chain then frees block.
 	chainReleaseFns map[string]*ir.Func
 
+	// Synthesized adapter functions for non-nullary ADT variant
+	// constructors used as first-class values (`.map(Option::Some)`).
+	// Key: `<concreteAdtName>__<variantName>__ctor`. Lazily generated
+	// the first time the constructor name is referenced without a
+	// CallExpr in `genDataScopeCtorCall`.
+	dataCtorAdapters map[string]*ir.Func
+
 	// Element retain helpers (for ++ concat when source is non-temporary).
 	retainPtrElemsFn          *ir.Func // _tin_retain_ptr_elems(data i8*, count i64)
 	retainFatElemsFn          *ir.Func // _tin_retain_fat_elems(data i8*, count i64)
@@ -409,7 +416,11 @@ type CodeGen struct {
 	// genericMethodTemplates: "structName_methodName" -> generic method FuncDecl template.
 	// Methods with their own TypeParams (e.g. map_opt[r]) are stored here instead of
 	// being compiled eagerly; they are monomorphized on-demand at each call site.
-	genericMethodTemplates map[string]*ast.FuncDecl
+	// Single-overload methods read the head of the list; multi-overload
+	// dispatch (`fn get[T] where T is X` / `where T is Y` / ...) walks the
+	// list and picks the first entry whose where-clauses are satisfied by
+	// the inferred type substitution.
+	genericMethodTemplates map[string][]*ast.FuncDecl
 
 	// Universal runtime type ID registry.
 	// Primitives use anyTag* constants (0-5).  Every named struct and

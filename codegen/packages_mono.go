@@ -214,6 +214,14 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 			if i >= len(argVals) {
 				break
 			}
+			// Lazy method-ref args (genCallFieldAccess's deferred
+			// `.map(V::get)` shape) leave nil slots in argVals so
+			// inference can still seed type-params from the return-type
+			// hint and the other concrete args.  Skip the nil entry; the
+			// caller materializes it after typeSubst is resolved.
+			if argVals[i] == nil {
+				continue
+			}
 
 			_, isConst := argVals[i].(constant.Constant)
 
@@ -237,6 +245,29 @@ func (cg *CodeGen) inferTypeArgs(tmpl *ast.FuncDecl, argVals []value.Value) map[
 	if cg.pipeCurriedRetHint != nil && tmpl.RetType != nil {
 		if ft, ok := tmpl.RetType.(*ast.FuncType); ok && len(ft.Params) > 0 {
 			cg.inferTypeArgsFromParamPrio(ft.Params[0], cg.pipeCurriedRetHint, tmpl.TypeParams, subst, fromConst, false)
+		}
+	}
+	// Let-binding return-type inference: when the call site is the RHS
+	// of `let x: T = ...` (or any other position that propagates a
+	// returnTypeHint), unify the template's return type against the hint
+	// so a generic whose only constraining occurrence of `T` lives in
+	// the return position (`fn get[T](this V) T`) gets `T` bound from
+	// the caller's expected type instead of erroring out at body codegen.
+	// Skip FuncType returns -- those go through the pipe path above, which
+	// has a more specialized "first param of the curried fn" rule.
+	if cg.returnTypeHint != nil && tmpl.RetType != nil {
+		if _, isFn := tmpl.RetType.(*ast.FuncType); !isFn {
+			// Only fill type params that args couldn't bind.  Pre-marking
+			// every existing entry as non-const blocks the priority rule
+			// from upgrading an arg-inferred binding to the hint shape,
+			// so the hint can only seed gaps -- never overwrite what the
+			// arg-shape already pinned (the arg-form `[T]` is the source
+			// of truth; the hint's `[]T` LLVM form would silently diverge).
+			for tp := range subst {
+				fromConst[tp] = false
+			}
+
+			cg.inferTypeArgsFromParamPrio(tmpl.RetType, cg.returnTypeHint, tmpl.TypeParams, subst, fromConst, false)
 		}
 	}
 

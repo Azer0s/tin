@@ -343,7 +343,7 @@ func (cg *CodeGen) genStructMethods(n *ast.StructDecl) error {
 	for _, m := range n.Methods {
 		if len(m.TypeParams) > 0 {
 			templateKey := structKey + "_" + m.Name
-			cg.genericMethodTemplates[templateKey] = m
+			cg.genericMethodTemplates[templateKey] = append(cg.genericMethodTemplates[templateKey], m)
 
 			continue
 		}

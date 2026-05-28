@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/llir/llvm/ir"
@@ -337,26 +338,153 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 	entry, ok := cg.curScope.lookup(methodName)
 	if !ok {
 		// Check for a generic method template (e.g. map_opt[r] on option__i64).
-		if tmpl, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod {
-			// Evaluate call arguments.
-			callArgs := make([]value.Value, 0, len(e.Args))
-			for _, arg := range e.Args {
+		if tmpls, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod && len(tmpls) > 0 {
+			tmpl := tmpls[0]
+			_ = tmpls
+			// Pre-scan args for bare generic-method-refs (no explicit T),
+			// e.g. `r.map(V::get)`.  These can't be eagerly evaluated --
+			// V::get has no scope binding -- so defer them until typeSubst
+			// is computed, then materialize each with the T inferred from
+			// the corresponding param's FuncType return slot.  Without
+			// this dance, ToString-style polymorphic helpers used as
+			// .map / .filter args force the user to type each call site's
+			// T explicitly even when the surrounding context could supply
+			// it via returnTypeHint.
+			callArgs := make([]value.Value, len(e.Args))
+			lazyMethodRefs := make(map[int][]*ast.FuncDecl)
+
+			for i, arg := range e.Args {
+				if sa, ok := arg.(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
+					mn := sa.Path[len(sa.Path)-1]
+					tn := sa.Path[0]
+
+					if len(sa.Path) > 2 {
+						tn = sa.Path[len(sa.Path)-2]
+					}
+
+					if mtmpls, isM := cg.genericMethodTemplates[tn+"_"+mn]; isM && len(mtmpls) > 0 {
+						lazyMethodRefs[i] = mtmpls
+
+						continue
+					}
+				}
+
 				av, err2 := cg.genExpr(block, arg)
 				if err2 != nil {
 					return nil, err2
 				}
 
-				callArgs = append(callArgs, av)
+				callArgs[i] = av
 
 				if cg.curBlock != nil && cg.curBlock != block {
 					block = cg.curBlock
 				}
 			}
-			// Build arg list for type inference: this + call args.
+			// Build arg list for type inference: this + call args.  Lazy
+			// args are skipped via nil slots; inferTypeArgs's nil guard
+			// keeps them from participating in argument-shape inference
+			// but the return-type-hint pass still binds the corresponding
+			// type-param when the caller supplied one.
 			inferArgs := make([]value.Value, 0, len(callArgs)+1)
 			inferArgs = append(inferArgs, objVal)
 			inferArgs = append(inferArgs, callArgs...)
 			typeSubst := cg.inferTypeArgs(tmpl, inferArgs)
+			// Method-level overload-by-where-clause: when the same
+			// `Type_method` has multiple generic templates differing only
+			// in their `where T is X` constraint shape, pick the entry
+			// whose constraints are satisfied by the inferred subst.
+			// This lets a `data Value` expose:
+			//   fn get[T] where T is i64           = ...
+			//   fn get[T] where T is Option[string] = ...
+			//   ...
+			// and `let n i64 = v.get()` /  `.map(Value::get)` route to
+			// the matching body.  The first overload's `tmpl` is used to
+			// infer the subst (their type-param names + signatures are
+			// uniform across overloads for the user-intended pattern); we
+			// then re-pick the body to compile.
+			if len(tmpls) > 1 {
+				if picked := cg.pickGenericMethodOverload(tmpls, typeSubst); picked != nil {
+					tmpl = picked
+				}
+			}
+			// Now that typeSubst is known, materialize each lazy
+			// method-ref using the param's substituted FuncType: the
+			// fn's return type after substitution is the inferred T for
+			// the method-ref.  E.g. `r.map(V::get)` -- .map's f param is
+			// `fn(t) u`; after t=V and u=i64 are bound (the latter via
+			// the outer let-binding's return-type hint), the inferred T
+			// for V::get is `u`'s substitution, i64.
+			for i, mtmpls := range lazyMethodRefs {
+				paramIdx := i + 1 // +1 for `this`
+				if paramIdx >= len(tmpl.Params) {
+					return nil, cg.nodeErr(e, "generic method-ref arg #%d has no matching parameter", i)
+				}
+
+				paramFnType, ok := tmpl.Params[paramIdx].Type.(*ast.FuncType)
+				if !ok {
+					return nil, cg.nodeErr(e, "generic method-ref arg #%d: expected fn-type parameter", i)
+				}
+				// The fn's return type may itself reference a type param of
+				// the outer call (e.g. .map[u]'s `fn(t) u` -- the return is
+				// `u`).  Resolve through typeSubst so we get the concrete
+				// type the outer caller wants.
+				retTE := paramFnType.RetType
+
+				var retCanon string
+
+				if simple, ok := retTE.(*ast.SimpleType); ok {
+					if name, found := typeSubst[simple.Name]; found {
+						retCanon = name.Canon
+					} else {
+						retCanon = simple.Name
+					}
+				} else {
+					retCanon = cg.typeExprCanonicalKey(retTE)
+				}
+
+				if retCanon == "" {
+					return nil, cg.nodeErr(e, "generic method-ref arg #%d: cannot determine T from .%s's signature", i, methodName)
+				}
+
+				fakeIndex := &ast.Identifier{Name: retCanon}
+				mtmplKey := ""
+
+				if sa, ok := e.Args[i].(*ast.ScopeAccess); ok && len(sa.Path) >= 2 {
+					mn := sa.Path[len(sa.Path)-1]
+					tn := sa.Path[0]
+
+					if len(sa.Path) > 2 {
+						tn = sa.Path[len(sa.Path)-2]
+					}
+
+					mtmplKey = tn + "_" + mn
+				}
+
+				if mtmplKey == "" {
+					return nil, cg.nodeErr(e, "generic method-ref arg #%d: missing template key", i)
+				}
+				// Pick the overload whose where-clauses match the
+				// resolved T -- build a transient subst with the lazy
+				// method's lone type param bound to the inferred ret.
+				mtmpl := mtmpls[0]
+
+				if len(mtmpls) > 1 && len(mtmpl.TypeParams) >= 1 {
+					mSubst := map[string]TypeName{
+						mtmpl.TypeParams[0]: cg.typeNameFromCanon(retCanon),
+					}
+
+					if picked := cg.pickGenericMethodOverload(mtmpls, mSubst); picked != nil {
+						mtmpl = picked
+					}
+				}
+
+				fn, err2 := cg.materializeGenericMethodRef(mtmpl, mtmplKey, fakeIndex)
+				if err2 != nil {
+					return nil, cg.nodeErr(e, "generic method-ref arg #%d: %v", i, err2)
+				}
+
+				callArgs[i] = fn
+			}
 			instKey := ""
 
 			for i, tp := range tmpl.TypeParams {
@@ -620,4 +748,242 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 	}
 
 	return nil, cg.nodeErr(e, "undefined method: %s.%s", cg.diagStructName(structName), fn.Field)
+}
+
+// pickGenericMethodOverload picks the first generic-method template whose
+// where-clauses are satisfied by `subst`.  When no template has any
+// constraints, the first one wins (preserves the single-overload path).
+// Returns nil only when every overload's constraints fail to match.
+func (cg *CodeGen) pickGenericMethodOverload(tmpls []*ast.FuncDecl, subst map[string]TypeName) *ast.FuncDecl {
+	if len(tmpls) == 0 {
+		return nil
+	}
+
+	if len(tmpls) == 1 {
+		return tmpls[0]
+	}
+
+	for _, t := range tmpls {
+		if len(t.Constraints) == 0 {
+			return t
+		}
+
+		ok := true
+
+		for _, c := range t.Constraints {
+			tn, found := subst[c.TypeParam]
+			if !found {
+				ok = false
+
+				break
+			}
+
+			satisfied, _ := cg.typeBoundSatisfied(tn.Canon, c.Bound)
+			if !satisfied {
+				ok = false
+
+				break
+			}
+		}
+
+		if ok {
+			return t
+		}
+	}
+
+	return nil
+}
+
+// materializeGenericMethodRef monomorphizes a generic method template for the
+// given explicit type-arg index (a single Identifier or a comma-encoded
+// Identifier name).  Returns the resulting concrete *ir.Func as a value,
+// so callers using `Type::method[T]` as a value (e.g. `.map(V::get[i64])`)
+// get a usable fn-ptr.  Mirrors the type-arg parsing in
+// genCallFieldAccessGeneric.
+func (cg *CodeGen) materializeGenericMethodRef(tmpl *ast.FuncDecl, templateKey string, index ast.Node) (value.Value, error) {
+	var rawParts []string
+
+	switch ix := index.(type) {
+	case *ast.Identifier:
+		rawParts = strings.Split(ix.Name, ",")
+	default:
+		key := cg.exprToTypeParamKey(index)
+		if key == "" {
+			return nil, fmt.Errorf("%s[...]: cannot parse type arguments", templateKey)
+		}
+
+		rawParts = []string{key}
+	}
+
+	if len(rawParts) != len(tmpl.TypeParams) {
+		return nil, fmt.Errorf("%s[%s]: expected %d type arg(s), got %d",
+			templateKey, strings.Join(rawParts, ","), len(tmpl.TypeParams), len(rawParts))
+	}
+
+	typeSubst := make(map[string]TypeName, len(rawParts))
+	for i, part := range rawParts {
+		part = strings.TrimSpace(part)
+		typeSubst[tmpl.TypeParams[i]] = cg.typeNameFromCanon(part)
+	}
+
+	instKey := ""
+
+	for i, tp := range tmpl.TypeParams {
+		if i > 0 {
+			instKey += "__"
+		}
+
+		instKey += typeSubst[tp].Canon
+	}
+
+	tmplCopy := *tmpl
+	tmplCopy.Name = templateKey
+
+	concreteFunc, err := cg.monomorphizeFunc(&tmplCopy, instKey, typeSubst)
+	if err != nil {
+		return nil, err
+	}
+
+	return concreteFunc, nil
+}
+
+// genCallFieldAccessGeneric handles the `obj.method[T, ...](args)` form: the
+// parser builds CallExpr{IndexExpr{FieldAccess{obj, method}, T}, args}; we
+// take the FieldAccess and the explicit type-arg index here and route to a
+// monomorphization of the receiver type's generic-method template with the
+// caller-supplied type substitution.  This is the "explicit form" path; the
+// argument- and return-type inference paths live in genCallFieldAccess.
+func (cg *CodeGen) genCallFieldAccessGeneric(block *ir.Block, e *ast.CallExpr, fa *ast.FieldAccess, index ast.Node) (value.Value, error) {
+	objVal, err := cg.genExpr(block, fa.Expr)
+	if err != nil {
+		return nil, err
+	}
+
+	if cg.curBlock != nil && cg.curBlock != block {
+		block = cg.curBlock
+	}
+
+	if fa.IsPtr {
+		if pt, ok := objVal.Type().(*irtypes.PointerType); ok {
+			objVal = block.NewLoad(pt.ElemType, objVal)
+		}
+	}
+
+	objLookupType := objVal.Type()
+	if pt, ok := objLookupType.(*irtypes.PointerType); ok {
+		if cg.typeNameOf(pt.ElemType) != "" {
+			objLookupType = pt.ElemType
+		}
+	}
+
+	structName := cg.typeNameOf(objLookupType)
+	if structName == "" {
+		return nil, cg.nodeErr(e, "obj.method[T](...): cannot resolve receiver type")
+	}
+
+	templateKey := structName + "_" + fa.Field
+
+	tmpls, ok := cg.genericMethodTemplates[templateKey]
+	if !ok || len(tmpls) == 0 {
+		return nil, cg.nodeErr(e, "undefined generic method: %s.%s", cg.diagStructName(structName), fa.Field)
+	}
+
+	tmpl := tmpls[0]
+	// IndexExpr.Index encodes the explicit type args: a single arg arrives as
+	// a bare Identifier, multiple args as a comma-joined Identifier name
+	// (the parser stitches `T, U` into `"T,U"` so the postfix code can hand
+	// it back through the same DCOLON/DOT paths).  Parse each piece as a
+	// type-key string so nested generics and aliases land on the same
+	// canonicalization path used by every other monomorphization site.
+	var rawParts []string
+
+	switch ix := index.(type) {
+	case *ast.Identifier:
+		rawParts = strings.Split(ix.Name, ",")
+	default:
+		key := cg.exprToTypeParamKey(index)
+		if key == "" {
+			return nil, cg.nodeErr(e, "%s.%s[...]: cannot parse type arguments", cg.diagStructName(structName), fa.Field)
+		}
+
+		rawParts = []string{key}
+	}
+
+	if len(rawParts) != len(tmpl.TypeParams) {
+		return nil, cg.nodeErr(e, "%s.%s[%s]: expected %d type arg(s), got %d",
+			cg.diagStructName(structName), fa.Field, strings.Join(rawParts, ","),
+			len(tmpl.TypeParams), len(rawParts))
+	}
+
+	typeSubst := make(map[string]TypeName, len(rawParts))
+	for i, part := range rawParts {
+		part = strings.TrimSpace(part)
+		typeSubst[tmpl.TypeParams[i]] = cg.typeNameFromCanon(part)
+	}
+	// Where-clause overload pick: with explicit T, the right overload is
+	// the one whose where-clause matches the user-supplied type.
+	if len(tmpls) > 1 {
+		if picked := cg.pickGenericMethodOverload(tmpls, typeSubst); picked != nil {
+			tmpl = picked
+		}
+	}
+
+	callArgs := make([]value.Value, 0, len(e.Args))
+	for _, arg := range e.Args {
+		av, err2 := cg.genExpr(block, arg)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		callArgs = append(callArgs, av)
+
+		if cg.curBlock != nil && cg.curBlock != block {
+			block = cg.curBlock
+		}
+	}
+
+	instKey := ""
+
+	for i, tp := range tmpl.TypeParams {
+		if i > 0 {
+			instKey += "__"
+		}
+
+		instKey += typeSubst[tp].Canon
+	}
+
+	tmplCopy := *tmpl
+	tmplCopy.Name = templateKey
+
+	concreteFunc, err := cg.monomorphizeFunc(&tmplCopy, instKey, typeSubst)
+	if err != nil {
+		return nil, err
+	}
+
+	thisArg := objVal
+	if len(concreteFunc.Sig.Params) > 0 {
+		if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr {
+			if pt.ElemType.Equal(objVal.Type()) {
+				if lv, err2 := cg.genLValue(block, fa.Expr); err2 == nil {
+					thisArg = lv
+				} else {
+					tmp := block.NewAlloca(objVal.Type())
+					block.NewStore(objVal, tmp)
+					thisArg = tmp
+				}
+			}
+		}
+	}
+
+	llArgs := make([]value.Value, 0, len(callArgs)+1)
+	llArgs = append(llArgs, thisArg)
+	llArgs = append(llArgs, callArgs...)
+	llArgs = cg.adaptArgs(block, llArgs, concreteFunc.Sig)
+	result := block.NewCall(cg.resolveColoredFn(concreteFunc), llArgs...)
+
+	if irtypes.IsVoid(result.Type()) {
+		return nil, nil
+	}
+
+	return result, nil
 }

@@ -188,7 +188,35 @@ func (cg *CodeGen) exprToTypeParamKey(node ast.Node) string {
 			return "*" + inner
 		}
 	case *ast.ArrayLit:
-		// []T represented as an empty array literal of one element - best-effort.
+		// Inside a generic-arg position, `[T]` parses as an empty array
+		// literal whose lone "element" is the type name itself (no actual
+		// values).  Recurse to recover the canonical-key form for the
+		// element so `.get[[string]]()` etc. round-trip through
+		// parseConcreteSubstName's `[T]` lift.
+		if len(n.Elems) == 1 {
+			inner := cg.exprToTypeParamKey(n.Elems[0])
+			if inner != "" {
+				return "[" + inner + "]"
+			}
+		}
+	case *ast.TupleLit:
+		// `(T1, T2, ...)` in a generic-arg position parses as a tuple
+		// literal whose elements are the type names.  Recurse over the
+		// elements and emit the canonical `Tuple__T1__T2` form the
+		// monomorphizer expects; that matches what typeExprCanonicalKey
+		// would produce for the equivalent `Tuple[T1, T2]` ast node.
+		parts := []string{"Tuple"}
+
+		for _, el := range n.Elems {
+			ek := cg.exprToTypeParamKey(el)
+			if ek == "" {
+				return ""
+			}
+
+			parts = append(parts, ek)
+		}
+
+		return strings.Join(parts, "__")
 	case *ast.ScopeAccess:
 		// Strip the package qualifier so the key matches the canonical
 		// monomorphized struct name (e.g. `rc::Cell` -> `Cell`, since

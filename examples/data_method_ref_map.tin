@@ -1,0 +1,50 @@
+// examples/data_method_ref_map.tin -- pass a data ADT method as a first-
+// class function value to `.map`, including the case where the method's
+// return type is itself a fat array (`[T]`).  The latter shape used to
+// produce two distinct `Result__[T]__E` vs `Result__[]T__E` named LLVM
+// structs (one from the .map monomorphization, one from the enclosing
+// fn's return-type annotation) and failed type-equality at the return
+// site even though the source types matched.
+
+use assert
+use { Result } from result
+use errors
+
+data Value =
+  Status(s string)
+  Str(s string)
+  List(items [Value])
+
+  fn as_string(this Value) string =
+    match this:
+      case Status(s): return s
+      case Str(s):    return s
+      default:        return ""
+
+  fn as_string_list(this Value) [string] =
+    match this:
+      case List(items):
+        let out [string] = []
+        for x in items:
+          out ++= [x.as_string()]
+        return out
+      default: return []
+
+fn classify(v Value) Result[string, errors::Err] =
+  let r Result[Value, errors::Err] = Ok(v)
+  return r.map(Value::as_string)
+
+fn collect(v Value) Result[[string], errors::Err] =
+  let r Result[Value, errors::Err] = Ok(v)
+  return r.map(Value::as_string_list)
+
+test "method ref into .map projects scalar" =
+  let r = classify(Str("hello"))
+  assert::equals("hello", r.unwrap())
+
+test "method ref into .map projects fat array" =
+  let v = List([Str("a"), Str("b"), Str("c")])
+  let xs = collect(v).unwrap()
+  assert::equals(3, len(xs))
+  assert::equals("a", xs[0])
+  assert::equals("c", xs[2])
