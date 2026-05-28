@@ -135,3 +135,75 @@ test "db::insert_into uses the explicit table name" =
     case Ok(u): assert::ok(u.name == "z")
     case Err(_): assert::ok(false)
   c.close()
+
+// Unsigned and bool field round-trip: value_of / row_into previously
+// only knew about i64/i32/i16/i8/f64/f32/string/none, so a u32 / bool
+// field would silently write NULL on INSERT and read back as zero on
+// SELECT.  The extended type list covers the integer-width family
+// uniformly and lifts bool through Int(0/1).
+
+struct prefs =
+  id       i64    @"db:id,pk"
+  count    u32    @"db:count"
+  active   bool   @"db:active"
+
+test "db handles unsigned + bool struct fields" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS prefs", [])
+  let _ct i64 = c.exec("CREATE TABLE prefs (id INTEGER, count INTEGER, active INTEGER)", [])
+  let _i  i64 = db::insert[prefs](c, prefs{id: 1, count: 42 as u32, active: true})
+  match db::find_by_id[prefs](c, 1):
+    case Ok(p):
+      assert::equals(42 as u32, p.count)
+      assert::ok(p.active)
+    case Err(_): assert::ok(false)
+  c.close()
+
+// update_in's SET-list filter now combines field-name and column-name
+// checks: the PK *field* (by struct field name) is excluded, and any
+// non-PK field that aliases the PK *column* is also excluded so the
+// UPDATE can't silently corrupt the primary key.  Two fields tagged
+// onto the same column is itself a struct-modelling bug, but the test
+// pins the safe degenerate behavior (label still updates, PK survives,
+// shadow is silently dropped).
+struct dupcol =
+  id    i64    @"db:id,pk"
+  shadow string @"db:id"      // accidentally tagged onto the PK column
+  label string @"db:label"
+
+// The *_in entry points used to splice their `table` argument straight
+// into SQL, so an attacker-controlled string could end the statement
+// and chain a second one ("user; DROP TABLE user;--").  valid_sql_-
+// identifier rejects anything outside [A-Za-z_][A-Za-z0-9_]* (plus a
+// single optional schema-dot), short-circuiting before driver dispatch.
+test "db *_in entry points reject SQL-injection attempts in `table`" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  // Insert returns -1 sentinel on rejection (rather than swallowing
+  // the bad name into a driver-level SQL error).
+  let bad i64 = db::insert_into[user](c, "user; DROP TABLE user;--",
+                                       user{id: 1, name: "x", score: 0.0})
+  assert::equals(-1 as i64, bad)
+  match db::find_by_id_in[user](c, "user; DROP TABLE user;--", 1):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  // Sanity: legitimate name still round-trips.
+  let _i  i64 = db::insert_into[user](c, "user", user{id: 1, name: "ok", score: 0.0})
+  match db::find_by_id_in[user](c, "user", 1):
+    case Ok(u):  assert::equals("ok", u.name)
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db update is safe when a non-PK field aliases the PK column" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS dupcol", [])
+  let _ct i64 = c.exec("CREATE TABLE dupcol (id INTEGER, label TEXT)", [])
+  let _i  i64 = db::insert[dupcol](c, dupcol{id: 1, shadow: "ignored", label: "before"})
+  let _u  i64 = db::update[dupcol](c, dupcol{id: 1, shadow: "x", label: "after"})
+  match db::find_by_id[dupcol](c, 1):
+    case Ok(d):
+      assert::equals(1 as i64, d.id)        // PK preserved
+      assert::equals("after", d.label)      // non-aliasing field updates
+    case Err(_): assert::ok(false)
+  c.close()

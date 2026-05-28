@@ -357,20 +357,26 @@ struct Connection (io::Closeable, Conn) =
   // (libs/redis) implement these in their native vocabulary instead
   // of through any SQL parser.
 
-  fn Conn::db_insert_row(this Connection, table string, cols [string], vals [Value]) i64 =
+  fn Conn::db_insert_row(this Connection, table string, pk_col string, cols [string], vals [Value]) i64 =
+    if len(cols) == 0:
+      return 0
     let col_list = join_cols(cols)
     let placeholders = build_placeholders(len(cols))
     let sql = "INSERT INTO " ++ table ++ " (" ++ col_list ++ ") VALUES (" ++ placeholders ++ ")"
     return this.exec(sql, to_sql_values(vals))
 
   fn Conn::db_find_row(this Connection, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err] =
+    if len(want_cols) == 0:
+      return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
     let sql = "SELECT " ++ col_list ++ " FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ? LIMIT 1"
     match this.query(sql, to_sql_values([pk_val])):
       case Err(e): return Err(e)
       case Ok(r):  return Ok(r as RowSet)
 
-  fn Conn::db_all_rows(this Connection, table string, want_cols [string]) Result[RowSet, errors::Err] =
+  fn Conn::db_all_rows(this Connection, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err] =
+    if len(want_cols) == 0:
+      return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
     let sql = "SELECT " ++ col_list ++ " FROM " ++ table
     match this.query(sql, to_sql_values([])):
@@ -378,6 +384,8 @@ struct Connection (io::Closeable, Conn) =
       case Ok(r):  return Ok(r as RowSet)
 
   fn Conn::db_update_row(this Connection, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64 =
+    if len(cols) == 0:
+      return 0
     let sets = ""
     let i i64 = 0
     for i < len(cols):

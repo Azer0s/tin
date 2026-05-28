@@ -69,11 +69,11 @@ trait Conn =
   fn exec(this *Conn, sql string, params [Value]) i64                            = virtual
   fn query(this *Conn, sql string, params [Value]) Result[RowSet, errors::Err]   = virtual
 
-  fn db_insert_row(this *Conn, table string, cols [string], vals [Value]) i64                                                                   = virtual
-  fn db_find_row(this *Conn, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err]                         = virtual
-  fn db_all_rows(this *Conn, table string, want_cols [string]) Result[RowSet, errors::Err]                                                      = virtual
-  fn db_update_row(this *Conn, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64                                      = virtual
-  fn db_delete_row(this *Conn, table string, pk_col string, pk_val Value) i64                                                                   = virtual
+  fn db_insert_row(this *Conn, table string, pk_col string, cols [string], vals [Value]) i64                                                                = virtual
+  fn db_find_row(this *Conn, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err]                                     = virtual
+  fn db_all_rows(this *Conn, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err]                                                   = virtual
+  fn db_update_row(this *Conn, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64                                                  = virtual
+  fn db_delete_row(this *Conn, table string, pk_col string, pk_val Value) i64                                                                               = virtual
 
 // db_column maps a struct field to its SQL column.  Tag grammar:
 //
@@ -134,17 +134,44 @@ fn db_is_pk(tag string) bool =
 fn value_to_string(v Value) string =
   match v:
     case IntVal(n):  return "{n}"
-    case RealVal(x): return "{x}"
+    case RealVal(x): return f64_round_trip(x)
     case TextVal(s): return s
     case NullVal:    return ""
 
+// f64_round_trip formats x with %.17g so strtod() rebuilds the exact
+// same bit-pattern.  Plain "{x}" interpolation uses %g (6 sig digits)
+// which would silently lose precision on hash-backed drivers (Redis).
+fn f64_round_trip(x f64) string =
+  let cstr *char = _tin_f64_to_cstr_round_trip(x)
+  return str::strdup(cstr) as string
+
+fn _tin_f64_to_cstr_round_trip(v f64) *char = extern("_tin_f64_to_cstr_round_trip")
+
+// is_null returns true when v is the NullVal variant.  Drivers that
+// distinguish "stored as empty string" from "absent" (e.g. Redis
+// hashes, which can't carry a real NULL) use this to skip null
+// columns at insert/update time and rely on field-absence to round-
+// trip the null on read.
+fn is_null(v Value) bool =
+  match v:
+    case NullVal: return true
+    default:      return false
+
 // value_of promotes a getfield-returned `any` to a Value.  Width-
-// classed integers all land in Int; floats in Real; strings in Text;
-// the unit/none type maps to SQL NULL.
+// classed integers (signed and unsigned) land in Int; floats in Real;
+// strings in Text; bool widens to Int(0/1) so drivers that don't have
+// a native bool slot (sqlite, redis) still round-trip; the unit/none
+// type maps to SQL NULL.
 fn value_of(v any) Value =
   let t = typeof(v)
-  if t == 'i64 || t == 'i32 || t == 'i16 || t == 'i8:
+  if t == 'i64 || t == 'i32 || t == 'i16 || t == 'i8 || t == 'isize:
     return IntVal(v as i64)
+  if t == 'u64 || t == 'u32 || t == 'u16 || t == 'u8 || t == 'usize || t == 'byte || t == 'char:
+    return IntVal(v as i64)
+  if t == 'bool:
+    if v as bool:
+      return IntVal(1)
+    return IntVal(0)
   if t == 'f64 || t == 'f32:
     return RealVal(v as f64)
   if t == 'string:
@@ -167,8 +194,12 @@ fn row_into[T](rows RowSet, r i64, col_field_names [string], col_field_types [at
     let fname string = col_field_names[c]
     let ft    atom   = col_field_types[c]
     if !rows.is_null(r, c):
-      if ft == 'i64 || ft == 'i32 || ft == 'i16 || ft == 'i8:
+      if ft == 'i64 || ft == 'i32 || ft == 'i16 || ft == 'i8 || ft == 'isize:
         setfield(out, fname, rows.get_i64(r, c))
+      else if ft == 'u64 || ft == 'u32 || ft == 'u16 || ft == 'u8 || ft == 'usize || ft == 'byte || ft == 'char:
+        setfield(out, fname, rows.get_i64(r, c))
+      else if ft == 'bool:
+        setfield(out, fname, rows.get_i64(r, c) != 0)
       else if ft == 'f64 || ft == 'f32:
         setfield(out, fname, rows.get_f64(r, c))
       else if ft == 'string:
@@ -269,7 +300,13 @@ fn build_insert_pairs[T](v T) ([string], [Value]) =
   return (cols, vals)
 
 // build_update_pairs is build_insert_pairs minus the PK column.
-fn build_update_pairs[T](v T, pk string) ([string], [Value]) =
+// Filtering on both field name AND column name lets us pick the PK
+// field exactly (the field-name check is unambiguous) and also drop
+// any non-PK field that aliases the PK column (the column-name check
+// stops it from corrupting the primary key via the UPDATE SET).  A
+// struct with two fields tagged onto the same column is itself a
+// modelling bug, but silent over-write of the PK is the worst outcome.
+fn build_update_pairs[T](v T, pk_col string, pk_field string) ([string], [Value]) =
   let fields = fieldnames(v)
   let nf = len(fields)
   let cols [string] = []
@@ -278,18 +315,55 @@ fn build_update_pairs[T](v T, pk string) ([string], [Value]) =
   for i < nf:
     let fname string = fields[i] as string
     let col = db_column(fname, fieldtag(v, fname))
-    if len(col) > 0 && str::strcmp(col, pk) != 0:
+    if len(col) > 0 && str::strcmp(fname, pk_field) != 0 && str::strcmp(col, pk_col) != 0:
       cols ++= [col]
       vals ++= [value_of(getfield(v, fname))]
     i = i + 1
   return (cols, vals)
 
+// valid_sql_identifier accepts plain SQL identifier shapes
+// ([A-Za-z_][A-Za-z0-9_]*) optionally split once by a dot (so
+// `schema.table` works for SQLite ATTACH'd databases).  This is the
+// trust boundary for the *_in CRUD entry points: drivers interpolate
+// `table` directly into SQL, so an unchecked user-controlled string
+// becomes an injection.  Rejected names short-circuit before reaching
+// the driver (Err for Result-returning entry points, -1 for the int
+// ones).  Callers needing exotic identifiers should drop down to the
+// raw exec/query escape hatch with parameterized SQL.
+fn valid_sql_identifier(s string) bool =
+  let n = len(s)
+  if n == 0 || n > 128: return false
+  let i i64 = 0
+  let seen_dot bool = false
+  let prev_was_dot bool = true   // start of string acts like post-separator
+  for i < n:
+    let c = s[i]
+    let is_alpha = (c >= @'a' && c <= @'z') || (c >= @'A' && c <= @'Z') || c == @'_'
+    let is_digit = c >= @'0' && c <= @'9'
+    if c == @'.':
+      if seen_dot:        return false   // only one dot allowed
+      if prev_was_dot:    return false   // can't start with a dot or have ".."
+      if i == n - 1:      return false   // can't end with a dot
+      seen_dot = true
+      prev_was_dot = true
+    else:
+      if prev_was_dot:
+        if !is_alpha:     return false   // identifier must start with alpha/_
+        prev_was_dot = false
+      else:
+        if !is_alpha && !is_digit: return false
+    i = i + 1
+  return true
+
 // insert_into delegates to the driver's db_insert_row primitive.
 // SQL drivers build INSERT statements internally; KV drivers map
 // the column list to a hash / equivalent record shape.
 fn insert_into[T](c Conn, table string, v T) i64 =
+  if !valid_sql_identifier(table): return -1
+  let probe T
+  let pk = pk_col[T](probe)
   let cv = build_insert_pairs[T](v)
-  return c.db_insert_row(table, cv.a, cv.b)
+  return c.db_insert_row(table, pk, cv.a, cv.b)
 
 // insert uses table_for[T] (the struct name) as the table.
 fn insert[T](c Conn, v T) i64 = return insert_into[T](c, table_for[T](v), v)
@@ -298,6 +372,8 @@ fn insert[T](c Conn, v T) i64 = return insert_into[T](c, table_for[T](v), v)
 // primitive, then materializes it into a T using the reflected field
 // order.  Returns Err on driver error or "not found".
 fn find_by_id_in[T](c Conn, table string, id i64) Result[T, errors::Err] =
+  if !valid_sql_identifier(table):
+    return Err(errors::new("db: invalid table name: " ++ table))
   let probe T
   let cf = build_select_cols[T](probe)
   let sql_cols    = cf.a
@@ -318,12 +394,15 @@ fn find_by_id[T](c Conn, id i64) Result[T, errors::Err] =
 
 // all_in returns every row of the table, in driver order.
 fn all_in[T](c Conn, table string) Result[[T], errors::Err] =
+  if !valid_sql_identifier(table):
+    return Err(errors::new("db: invalid table name: " ++ table))
   let probe T
   let cf = build_select_cols[T](probe)
   let sql_cols    = cf.a
   let field_names = cf.b
   let field_types = cf.c
-  match c.db_all_rows(table, sql_cols):
+  let pk = pk_col[T](probe)
+  match c.db_all_rows(table, pk, sql_cols):
     case Err(e): return Err(e)
     case Ok(rows):
       let n = rows.count()
@@ -343,10 +422,11 @@ fn all[T](c Conn) Result[[T], errors::Err] =
 // PK column is excluded from the SET list and threaded separately
 // as the WHERE bind.
 fn update_in[T](c Conn, table string, v T) i64 =
+  if !valid_sql_identifier(table): return -1
   let pk        string = pk_col[T](v)
   let pk_fname  string = pk_field_name[T](v)
   let pk_val Value     = value_of(getfield(v, pk_fname))
-  let cv = build_update_pairs[T](v, pk)
+  let cv = build_update_pairs[T](v, pk, pk_fname)
   return c.db_update_row(table, pk, pk_val, cv.a, cv.b)
 
 // update uses table_for[T].
@@ -354,6 +434,7 @@ fn update[T](c Conn, v T) i64 = return update_in[T](c, table_for[T](v), v)
 
 // delete_in deletes by PK via the driver's db_delete_row primitive.
 fn delete_in[T](c Conn, table string, id i64) i64 =
+  if !valid_sql_identifier(table): return -1
   let probe T
   let pk = pk_col[T](probe)
   return c.db_delete_row(table, pk, IntVal(id))
@@ -365,7 +446,7 @@ fn delete[T](c Conn, id i64) i64 =
 
 export {
   Value, RowSet, Conn,
-  db_column, db_is_pk, value_of, value_to_string, table_for,
+  db_column, db_is_pk, value_of, value_to_string, is_null, table_for,
   insert, insert_into,
   find_by_id, find_by_id_in,
   all, all_in,

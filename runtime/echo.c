@@ -128,3 +128,13 @@ const char *_tin_f128_to_cstr(tin_fp128_t v) {
     snprintf(buf, sizeof(buf), "%Lg", (long double)v);
     return buf;
 }
+
+// %.17g is the IEEE 754 binary64 round-trip precision: enough digits
+// that strtod() rebuilds the exact same bit-pattern.  Used by stdlib/db
+// value_to_string so string-backed stores (Redis hashes etc.) don't
+// silently lose precision on Float values.
+const char *_tin_f64_to_cstr_round_trip(double v) {
+    static _Thread_local char buf[32];
+    snprintf(buf, sizeof(buf), "%.17g", v);
+    return buf;
+}
