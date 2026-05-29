@@ -276,6 +276,18 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	// retain here, the temp's release frees those buffers and the caller
 	// reads dangling memory (Result[Data, Err] with a string-bearing
 	// variant: the string body comes back empty / freed).
+	//
+	// KNOWN LEAK (C11): for fat-array payloads, emitRetain bumps only
+	// the buffer rc; emitTempRelease via _tin_release_fat_elem_array
+	// then decrement-conditionally walks elements -- the rc math leaves
+	// one extra buffer reference dangling per try-extraction (80 bytes
+	// per call observed via macOS leaks).  Symmetric on the Err branch.
+	// Deep retain (buffer + per-element) over-retains elements instead
+	// of the buffer, so neither shape is balanced; the fix needs to
+	// teach emitTempRelease to do a SHALLOW release (variant envelope
+	// only, payload skipped) when the payload was just extracted to a
+	// caller.  Tracked separately; documented here so future readers
+	// don't shadow-fix it with another retain-side band-aid.
 	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
 		cg.emitRetain(okBlock, okVal)
 	}

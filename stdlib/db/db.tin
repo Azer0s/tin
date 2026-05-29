@@ -162,6 +162,21 @@ fn is_null(v Value) bool =
 // strings in Text; bool widens to Int(0/1) so drivers that don't have
 // a native bool slot (sqlite, redis) still round-trip; the unit/none
 // type maps to SQL NULL.
+//
+// KNOWN LIMITATION: Tin's `any` boxing currently sign-extends every
+// integer into the i64 payload and the type-atom collapses unsigned
+// widths to their signed name (u8/u16/u32/u64 all report as i8/i16/
+// i32/i64).  A field holding u8(200) lands here as 'i8 with the
+// SEXT'd i64 value -56, and that wrong-but-bit-preserving value gets
+// persisted into the column.  Tin-side round-trip masks the corruption
+// (setfield narrows back to u8(200)), but any external reader sees a
+// negative number.  The proper fix is in codegen/helpers_print.go
+// boxToAny (an unsigned hint that switches sext→zext) plus codegen/
+// reflect.go buildTypeIDToNameTable (distinct unsigned atoms).  Tracked
+// as a follow-up; for now: small-positive unsigned values round-trip
+// fine, but unsigned values with the high bit set are corrupted on
+// disk and should be modelled as i64 in the struct if cross-tool
+// fidelity matters.
 fn value_of(v any) Value =
   let t = typeof(v)
   if t == 'i64 || t == 'i32 || t == 'i16 || t == 'i8 || t == 'isize:
@@ -238,9 +253,9 @@ fn build_select_cols[T](v T) ([string], [string], [atom]) =
 //   1. First field tagged `@"db:pk"` or `@"db:colname,pk"` wins.
 //   2. If no field is tagged, fall back to the field literally named
 //      `id` (honouring its `@"db:..."` column rename, if any).
-//   3. If no candidate is found, return "id" - the caller's UPDATE /
-//      DELETE / find_by_id will then fail at the SQL level with a
-//      clear "no such column: id" rather than silently match nothing.
+//   3. If no candidate is found, return "" - the *_in callers short-
+//      circuit on empty PK rather than letting update_in's getfield
+//      on a non-existent "id" field crash on a garbage `any` value.
 fn pk_col[T](v T) string =
   let fields = fieldnames(v)
   let i i64 = 0
@@ -260,10 +275,14 @@ fn pk_col[T](v T) string =
         return col
       return "id"
     j = j + 1
-  return "id"
+  return ""
 
 // pk_field_name is the Tin field name of the PK (needed by update_in
 // to read the WHERE value via getfield).  Same resolution as pk_col.
+// Returns "" when no PK is resolvable; callers must check before
+// calling getfield (a missing-field getfield returns a zero `any`
+// whose type-atom is garbage, and value_of crashes on the unknown
+// atom).
 fn pk_field_name[T](v T) string =
   let fields = fieldnames(v)
   let i i64 = 0
@@ -278,7 +297,7 @@ fn pk_field_name[T](v T) string =
     if str::strcmp(fname_pk, "id") == 0:
       return "id"
     j = j + 1
-  return "id"
+  return ""
 
 // build_insert_pairs gathers (column, value) for each non-skipped
 // field of v.  Returned as parallel arrays so the row-level CRUD
@@ -380,6 +399,8 @@ fn find_by_id_in[T](c Conn, table string, id i64) Result[T, errors::Err] =
   let field_names = cf.b
   let field_types = cf.c
   let pk = pk_col[T](probe)
+  if len(pk) == 0:
+    return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
   match c.db_find_row(table, pk, IntVal(id), sql_cols):
     case Err(e): return Err(e)
     case Ok(rows):
@@ -402,6 +423,8 @@ fn all_in[T](c Conn, table string) Result[[T], errors::Err] =
   let field_names = cf.b
   let field_types = cf.c
   let pk = pk_col[T](probe)
+  if len(pk) == 0:
+    return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
   match c.db_all_rows(table, pk, sql_cols):
     case Err(e): return Err(e)
     case Ok(rows):
@@ -425,6 +448,10 @@ fn update_in[T](c Conn, table string, v T) i64 =
   if !valid_sql_identifier(table): return -1
   let pk        string = pk_col[T](v)
   let pk_fname  string = pk_field_name[T](v)
+  // Both must be present and non-empty - getfield on a missing field
+  // hands back a zero `any` whose type-atom is garbage, and value_of
+  // would crash on the unknown atom.
+  if len(pk) == 0 || len(pk_fname) == 0: return -1
   let pk_val Value     = value_of(getfield(v, pk_fname))
   let cv = build_update_pairs[T](v, pk, pk_fname)
   return c.db_update_row(table, pk, pk_val, cv.a, cv.b)
@@ -437,6 +464,7 @@ fn delete_in[T](c Conn, table string, id i64) i64 =
   if !valid_sql_identifier(table): return -1
   let probe T
   let pk = pk_col[T](probe)
+  if len(pk) == 0: return -1
   return c.db_delete_row(table, pk, IntVal(id))
 
 // delete uses table_for[T].

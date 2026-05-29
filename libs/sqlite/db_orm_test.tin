@@ -195,6 +195,38 @@ test "db *_in entry points reject SQL-injection attempts in `table`" =
     case Err(_): assert::ok(false)
   c.close()
 
+// pk_col / pk_field_name used to fall back to literal "id" when a
+// struct had neither a @"db:pk" tag nor a field named `id`.  update_in
+// then called getfield(v, "id"), which returns a zero `any` whose
+// type-atom is garbage; value_of crashed on the unknown atom and the
+// process aborted silently.  The fix is to return "" from the pk
+// helpers and short-circuit each *_in callsite on the empty PK.
+struct no_pk =
+  name string @"db:name"
+  body string @"db:body"
+
+test "db id-based ops short-circuit on structs with no resolvable PK" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS no_pk", [])
+  let _ct i64 = c.exec("CREATE TABLE no_pk (name TEXT, body TEXT)", [])
+  // insert is OK without a PK -- the row is still well-formed.
+  let _i i64 = db::insert_into[no_pk](c, "no_pk", no_pk{name: "a", body: "b"})
+  // update / delete need pk to build WHERE; -1 sentinel rather than
+  // crashing through getfield on a missing "id" field.
+  let u  i64 = db::update_in[no_pk](c, "no_pk", no_pk{name: "a", body: "b2"})
+  assert::equals(-1 as i64, u)
+  let dl i64 = db::delete_in[no_pk](c, "no_pk", 1)
+  assert::equals(-1 as i64, dl)
+  // find_by_id_in / all_in surface Err with a diagnostic message
+  // rather than running a malformed SELECT.
+  match db::find_by_id_in[no_pk](c, "no_pk", 1):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  match db::all_in[no_pk](c, "no_pk"):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
 test "db update is safe when a non-PK field aliases the PK column" =
   let c = open_test()
   let _d  i64 = c.exec("DROP TABLE IF EXISTS dupcol", [])
