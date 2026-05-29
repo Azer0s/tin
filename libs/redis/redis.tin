@@ -551,13 +551,31 @@ struct Subscription (io::Closeable) =
   conn     Connection
   messages sync::Channel[Message]
 
+  // KNOWN LIMITATION (N1): close() hangs the process when called from
+  // the same scope that owns the Subscription.  The reader_loop fiber
+  // is blocked inside hiredis's synchronous redisGetReply on the
+  // redisContext we're about to free, so the synchronous redisFree
+  // from close() races with the reader's in-flight read -- the
+  // worker thread that's pinned on the read never drains and the
+  // runtime can't make progress to release the Subscription's owned
+  // resources.  Documented for follow-up: needs a shutdown(fd) /
+  // dup-and-close handshake or a switch to hiredis's async API.
+  //
+  // KNOWN LIMITATION (N4): the `messages sync::Channel[Message]`
+  // field above hits a compiler double-free under ASAN.  Channel
+  // intentionally bypasses rc::Cell for hot-path speed (see
+  // stdlib/sync/channel.tin), so a struct-literal store of a Channel
+  // field needs an explicit `_tin_channel_retain` that codegen
+  // doesn't currently emit.  Symptom: each Channel ends up with two
+  // deinit calls and zero retains.  Invisible without ASAN; not
+  // surfaced by `--leaks` (it's a double-free, not a leak).
   fn io::Closeable::close(this Subscription) =
     // Reader is blocked in hiredis's synchronous redisGetReply; the
     // only reliable way to wake it is to drop the socket out from
     // under it -- the next read returns ECONNRESET / EPIPE which the
     // reader translates into an Err, closes the messages channel, and
     // exits.  No polite "stop" sideband is possible here without a
-    // non-blocking hiredis path.
+    // non-blocking hiredis path.  See N1 above for the residual hang.
     this.conn.close()
 
 // reader_loop is the per-Subscription fiber that drains incoming
