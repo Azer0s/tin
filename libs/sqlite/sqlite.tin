@@ -109,7 +109,7 @@ fn c_sqlite_open(path string) *void = extern("_tin_sqlite_open")
 fn c_sqlite_close(conn *void)       = extern("_tin_sqlite_close")
 
 // Generic exec (array of params)
-fn c_sqlite_exec(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64) i64 = extern("_tin_sqlite_exec")
+fn c_sqlite_exec(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [volatile *char], n_params i64) i64 = extern("_tin_sqlite_exec")
 
 // Shape-specialized fast paths
 fn c_exec_fast_0(conn *void, sql string) i64                                   = extern("_tin_sqlite_exec_fast_0")
@@ -121,7 +121,7 @@ fn c_exec_fast_si(conn *void, sql string, a *char, a_len i64, b i64) i64       =
 
 // Query: materializes the whole result set.  Returns NULL on error
 // with *out_err set to -(sqlite_error_code).
-fn c_sqlite_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [*char], n_params i64, out_err *i64) *void = extern("_tin_sqlite_query")
+fn c_sqlite_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [volatile *char], n_params i64, out_err *i64) *void = extern("_tin_sqlite_query")
 
 // Rows accessors
 fn c_rows_free(p *void)                                = extern("_tin_sqlite_rows_free")
@@ -148,7 +148,7 @@ fn c_stmt_exec_is(p *void, a i64, b *char, b_len i64)         i64 = extern("_tin
 fn c_stmt_exec_si(p *void, a *char, a_len i64, b i64)         i64 = extern("_tin_sqlite_stmt_exec_si")
 fn c_stmt_exec_iis(p *void, a i64, b i64, c *char, c_len i64) i64 = extern("_tin_sqlite_stmt_exec_iis")
 
-fn c_str_data(s string) *char = extern("_tin_string_data")
+fn c_str_data(s string) volatile *char = extern("_tin_string_data")
 
 // ---------------------------------------------------------------------------
 // Rows: materialized SELECT result, packed in a C-side buffer.
@@ -254,7 +254,7 @@ struct Connection (io::Closeable, Conn) =
     let ints  [i64]   = [0] * slots
     let reals [f64]   = [0.0] * slots
     let text_keep [string] = [""] * slots
-    let text_ptrs [*char]  = [nil as *char] * slots
+    let text_ptrs [volatile *char] = [nil as volatile *char] * slots
     for let i i64 = 0; i < n; i = i + 1:
       match params[i]:
         case Int(v):
@@ -299,7 +299,7 @@ struct Connection (io::Closeable, Conn) =
     let ints  [i64]   = [0] * slots
     let reals [f64]   = [0.0] * slots
     let text_keep [string] = [""] * slots
-    let text_ptrs [*char]  = [nil as *char] * slots
+    let text_ptrs [volatile *char] = [nil as volatile *char] * slots
     for let i i64 = 0; i < n; i = i + 1:
       match params[i]:
         case Int(v):
