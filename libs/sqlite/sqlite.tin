@@ -361,14 +361,14 @@ struct Connection (io::Closeable, Conn) =
       return 0
     let col_list = join_cols(cols)
     let placeholders = build_placeholders(len(cols))
-    let sql = "INSERT INTO " ++ table ++ " (" ++ col_list ++ ") VALUES (" ++ placeholders ++ ")"
+    let sql = "INSERT INTO " ++ quote_ident(table) ++ " (" ++ col_list ++ ") VALUES (" ++ placeholders ++ ")"
     return this.exec(sql, to_sql_values(vals))
 
   fn Conn::db_find_row(this Connection, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err] =
     if len(want_cols) == 0:
       return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
-    let sql = "SELECT " ++ col_list ++ " FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ? LIMIT 1"
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ quote_ident(table) ++ " WHERE " ++ quote_ident(pk_col) ++ " = ? LIMIT 1"
     let r = try this.query(sql, to_sql_values([pk_val]))
     return Ok(r as RowSet)
 
@@ -376,7 +376,7 @@ struct Connection (io::Closeable, Conn) =
     if len(want_cols) == 0:
       return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
-    let sql = "SELECT " ++ col_list ++ " FROM " ++ table
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ quote_ident(table)
     let r = try this.query(sql, to_sql_values([]))
     return Ok(r as RowSet)
 
@@ -388,14 +388,14 @@ struct Connection (io::Closeable, Conn) =
     for i < len(cols):
       if i > 0:
         sets = sets ++ ", "
-      sets = sets ++ cols[i] ++ " = ?"
+      sets = sets ++ quote_ident(cols[i]) ++ " = ?"
       i = i + 1
     let bind_vals [Value] = vals ++ [pk_val]
-    let sql = "UPDATE " ++ table ++ " SET " ++ sets ++ " WHERE " ++ pk_col ++ " = ?"
+    let sql = "UPDATE " ++ quote_ident(table) ++ " SET " ++ sets ++ " WHERE " ++ quote_ident(pk_col) ++ " = ?"
     return this.exec(sql, to_sql_values(bind_vals))
 
   fn Conn::db_delete_row(this Connection, table string, pk_col string, pk_val Value) i64 =
-    let sql = "DELETE FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ?"
+    let sql = "DELETE FROM " ++ quote_ident(table) ++ " WHERE " ++ quote_ident(pk_col) ++ " = ?"
     return this.exec(sql, to_sql_values([pk_val]))
 
 // open opens (or creates) the database at path.
@@ -410,16 +410,40 @@ fn if_zero_use_one(n i64) i64 =
     return n
   return 1
 
-// join_cols concatenates a list of column names with ", " separators
-// -- mirrors the inline build that used to live inside insert_into /
-// build_select_cols / update_in in stdlib/db.tin.
+// quote_ident wraps a SQL identifier in double quotes so reserved
+// words (order, group, select, ...) and unusual characters survive
+// SQL parsing.  SQLite uses "..." for delimited identifiers; any
+// embedded " is escaped by doubling.  Without this, a struct named
+// `order` (or a column tagged `@"db:select"`) generated SQL that
+// sqlite rejected with a generic "near keyword" error and the
+// driver silently returned -1.
+fn quote_ident(s string) string =
+  let out = "\""
+  let i i64 = 0
+  for i < len(s):
+    let c = s[i]
+    // 34 == ASCII double-quote.  Inline @' " ' confuses Tin's lexer
+    // (the closing single quote and the embedded double quote
+    // collide in the literal scanner).
+    if c == 34:
+      out = out ++ "\"\""
+    else:
+      out = out ++ c
+    i = i + 1
+  return out ++ "\""
+
+// join_cols concatenates a list of column names (each double-quoted
+// per quote_ident) with ", " separators.  Mirrors the inline build
+// that used to live inside insert_into / build_select_cols /
+// update_in in stdlib/db.tin, but with identifier quoting added so
+// reserved words round-trip cleanly.
 fn join_cols(cols [string]) string =
   let out = ""
   let i i64 = 0
   for i < len(cols):
     if i > 0:
       out = out ++ ", "
-    out = out ++ cols[i]
+    out = out ++ quote_ident(cols[i])
     i = i + 1
   return out
 

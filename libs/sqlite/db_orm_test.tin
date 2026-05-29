@@ -205,6 +205,30 @@ struct no_pk =
   name string @"db:name"
   body string @"db:body"
 
+// Reserved SQL keywords as table or column names used to silently
+// fail: db_insert_row interpolated the identifier unquoted, sqlite
+// rejected the statement, and the driver returned -1.  Quoting
+// table/pk/cols via "..." (with embedded " -> "") makes reserved
+// words round-trip cleanly.  Same for column names with unusual
+// chars from a struct tag (e.g. dashes).
+struct order =
+  id    i64    @"db:id,pk"
+  group string @"db:group"
+
+test "db handles reserved SQL keywords as struct + column names" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS \"order\"", [])
+  let _ct i64 = c.exec("CREATE TABLE \"order\" (id INTEGER, \"group\" TEXT)", [])
+  let n  i64 = db::insert[order](c, order{id: 1, group: "alpha"})
+  assert::equals(1 as i64, n)
+  match db::find_by_id[order](c, 1):
+    case Ok(o):
+      assert::equals(1 as i64, o.id)
+      assert::equals("alpha", o.group)
+    case Err(_): assert::ok(false)
+  let _ = c.exec("DROP TABLE \"order\"", [])
+  c.close()
+
 test "db id-based ops short-circuit on structs with no resolvable PK" =
   let c = open_test()
   let _d  i64 = c.exec("DROP TABLE IF EXISTS no_pk", [])
