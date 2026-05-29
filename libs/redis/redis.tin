@@ -556,10 +556,12 @@ fn{#async} reader_loop(conn Connection, out sync::Channel[Message]) =
             pass
       case Err(_):
         // Connection died (close() racing us, or a transport error).
-        // Close the outbound channel so the consumer's `await
-        // sub.messages.recv()` unblocks with is_closed_empty == true
-        // instead of waiting forever for messages that won't arrive.
-        out.close()
+        // Close the outbound channel so the consumer's blocked recv()
+        // wakes up -- on a closed+drained sync::Channel recv() panics
+        // (channel.tin), and that panic propagates back through the
+        // consumer fiber's mailbox.  Better than hanging forever; the
+        // consumer should guard recv with is_closed_empty() when it
+        // wants graceful shutdown.
         return
 
 // decode_push_message turns a raw SUBSCRIBE push reply
