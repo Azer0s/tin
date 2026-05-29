@@ -282,12 +282,14 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	// then decrement-conditionally walks elements -- the rc math leaves
 	// one extra buffer reference dangling per try-extraction (80 bytes
 	// per call observed via macOS leaks).  Symmetric on the Err branch.
-	// Deep retain (buffer + per-element) over-retains elements instead
-	// of the buffer, so neither shape is balanced; the fix needs to
-	// teach emitTempRelease to do a SHALLOW release (variant envelope
-	// only, payload skipped) when the payload was just extracted to a
-	// caller.  Tracked separately; documented here so future readers
-	// don't shadow-fix it with another retain-side band-aid.
+	// Investigated in round 12: ok_value does a net +1 internally for
+	// fat-array (entry data_retain_val + extract retain_ptr - exit
+	// data_release_val), then the caller's retain piles on another +1
+	// while temp release only takes -1.  Removing the caller retain
+	// fixes the leak but UAFs db_orm_test's find_by_id (some types
+	// rely on the retain to balance ok_value).  Needs a per-type
+	// classification of ok_value's net retain delta before the fix
+	// can land; documented for follow-up.
 	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
 		cg.emitRetain(okBlock, okVal)
 	}
