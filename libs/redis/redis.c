@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 #include <hiredis/hiredis.h>
 
@@ -44,6 +45,22 @@ void *_tin_redis_connect(const char *host, int32_t port) {
 
 void _tin_redis_close(void *ctx) {
     if (ctx) redisFree((redisContext *)ctx);
+}
+
+// _tin_redis_shutdown half-closes the underlying socket without
+// freeing the redisContext.  Used by Subscription.close() to wake a
+// reader_loop fiber that's currently blocked in redisGetReply: the
+// next read returns 0 / -EPIPE which the reader translates into Err
+// and exits.  Calling redisFree from a sibling fiber while the
+// reader is mid-read races with hiredis's internal buffers; the
+// shutdown(2) gives the reader a chance to drain cleanly before the
+// final free.
+void _tin_redis_shutdown(void *ctx) {
+    if (!ctx) return;
+    redisContext *c = (redisContext *)ctx;
+    if (c->fd >= 0) {
+        shutdown(c->fd, SHUT_RDWR);
+    }
 }
 
 const char *_tin_redis_errstr(void *ctx) {
