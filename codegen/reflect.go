@@ -335,7 +335,9 @@ func (cg *CodeGen) buildTypeIDToFieldTypesTable() map[int32][]string {
 
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
+
 		astTypes, hasAST := cg.structFieldTinTypes[sn]
+
 		for i, ft := range cg.structFieldLLVMTypes[sn] {
 			if hasAST && i < len(astTypes) {
 				if st, ok := astTypes[i].(*ast.SimpleType); ok && st.Name != "" {
@@ -797,6 +799,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 		// as IntVal(-56) and any external reader sees a negative value
 		// (D8).  The AST source type lives in structFieldTinTypes.
 		var boxVal value.Value = fieldVal
+
 		if astTypes, ok := cg.structFieldTinTypes[sn]; ok && i < len(astTypes) {
 			if isUnsignedTinType(astTypes[i]) {
 				if it, isInt := fieldVal.Type().(*irtypes.IntType); isInt && it.BitSize < 64 {
@@ -804,6 +807,7 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 				}
 			}
 		}
+
 		boxed := cg.boxToAny(block, boxVal)
 		boxes = append(boxes, boxed)
 

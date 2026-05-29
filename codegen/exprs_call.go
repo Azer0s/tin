@@ -782,6 +782,7 @@ func (cg *CodeGen) genCallExpr(block *ir.Block, e *ast.CallExpr) (value.Value, e
 			templateKey := typeNameStr + "_" + methodName
 			if tmpls, isMethod := cg.genericMethodTemplates[templateKey]; isMethod && len(tmpls) > 0 {
 				_ = tmpls
+
 				if len(e.Args) == 0 {
 					return nil, cg.nodeErr(e, "%s::%s[...]: generic method called as static needs at least one arg (the receiver)", typeNameStr, methodName)
 				}

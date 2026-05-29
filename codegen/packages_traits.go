@@ -92,7 +92,7 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 // same shape that no longer compare Equal in LLVM.
 func parseConcreteSubstName(name string) ast.TypeExpr {
 	// Reject obviously-garbage inputs early.  Empty / star-only /
-	// bracket-only canon strings would otherwise materialise as a
+	// bracket-only canon strings would otherwise materialize as a
 	// SimpleType with an empty name (or wrapped in pointers / arrays),
 	// silently flowing into downstream type lookup and resolving to
 	// "undefined type" diagnostics in unrelated locations.  Force the

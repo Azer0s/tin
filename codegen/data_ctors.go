@@ -197,7 +197,7 @@ func (cg *CodeGen) genDataScopeCtorCall(block *ir.Block, fn *ast.ScopeAccess, ar
 	}
 
 	// Bare scope reference (`Option::Some`, `Result::Ok`, ...) with a
-	// non-nullary variant: synthesise an adapter function so the ctor
+	// non-nullary variant: synthesize an adapter function so the ctor
 	// can be passed as a first-class fn value (`.map(Option::Some)`,
 	// channel.send(Result::Err), spawn-as-fn, etc.).  `args == nil`
 	// flags the ScopeAccess-as-value path (see genScopeAccess); the
@@ -494,7 +494,7 @@ func (cg *CodeGen) isDataType(t irtypes.Type) bool {
 //     field (the standard struct-field release machinery takes it from
 //     there).
 
-// ensureVariantCtorAdapter synthesises (and caches) a top-level
+// ensureVariantCtorAdapter synthesizes (and caches) a top-level
 // function that constructs the named variant from its payload args,
 // so the constructor can be passed as a first-class function value
 // (e.g. `.map(Option::Some)`).  Nullary variants don't need an
@@ -539,6 +539,7 @@ func (cg *CodeGen) ensureVariantCtorAdapter(adtName, variantName string) (*ir.Fu
 	// payload.
 	argVals := make([]value.Value, len(params))
 	retainMask := make([]bool, len(params))
+
 	for i, p := range params {
 		argVals[i] = p
 	}

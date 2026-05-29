@@ -485,6 +485,7 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 
 				callArgs[i] = fn
 			}
+
 			instKey := ""
 
 			for i, tp := range tmpl.TypeParams {
@@ -968,6 +969,7 @@ func (cg *CodeGen) genCallFieldAccessGeneric(block *ir.Block, e *ast.CallExpr, f
 	}
 
 	thisArg := objVal
+
 	if len(concreteFunc.Sig.Params) > 0 {
 		if pt, isPtr := concreteFunc.Sig.Params[0].(*irtypes.PointerType); isPtr {
 			if pt.ElemType.Equal(objVal.Type()) {

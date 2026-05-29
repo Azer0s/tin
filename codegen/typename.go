@@ -617,7 +617,7 @@ func canonNameToTypeExpr(canon string) ast.TypeExpr {
 // `HashMap[string, i64]`.  Pointer / array wrappers strip their prefix,
 // convert the element recursively, and re-wrap so a concrete like
 // `[Tuple__string__string]` lands as `[Tuple[string, string]]` -- the
-// shape parseTypeParamStr / the constraint checker need to recognise the
+// shape parseTypeParamStr / the constraint checker need to recognize the
 // inner generic as a `Tuple[string, string]` rather than a raw SimpleType
 // whose name happens to be `Tuple__string__string`.  Plain names with no
 // `__` pass through.

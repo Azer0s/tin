@@ -146,6 +146,7 @@ func (cg *CodeGen) genBody(block *ir.Block, body ast.Node, retType irtypes.Type)
 		// For void functions, generate the call and add a default return.
 		// For value-returning functions, unwrap and treat as an expression.
 		inner := b.Expr
+
 		if !irtypes.IsVoid(retType) {
 			// Propagate the declared return type as a hint so a generic
 			// method/call inside the body (e.g. `fn(v) T = v.get()` with
