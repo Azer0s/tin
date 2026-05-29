@@ -573,6 +573,7 @@ fn{#async} reader_loop(conn Connection, out sync::Channel[Message]) =
         // consumer fiber's mailbox.  Better than hanging forever; the
         // consumer should guard recv with is_closed_empty() when it
         // wants graceful shutdown.
+        out.close()
         return
 
 // decode_push_message turns a raw SUBSCRIBE push reply
