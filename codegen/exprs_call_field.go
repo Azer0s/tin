@@ -340,7 +340,6 @@ func (cg *CodeGen) genCallFieldAccess(block *ir.Block, e *ast.CallExpr, fn *ast.
 		// Check for a generic method template (e.g. map_opt[r] on option__i64).
 		if tmpls, isGenericMethod := cg.genericMethodTemplates[methodName]; isGenericMethod && len(tmpls) > 0 {
 			tmpl := tmpls[0]
-			_ = tmpls
 			// Pre-scan args for bare generic-method-refs (no explicit T),
 			// e.g. `r.map(V::get)`.  These can't be eagerly evaluated --
 			// V::get has no scope binding -- so defer them until typeSubst
