@@ -220,33 +220,16 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if monoOK {
 		thisArg := errBlock.NewLoad(srcType, tempStorage)
 		rewrapped := errBlock.NewCall(monoFn, thisArg)
-		// Same deep-retain dance as the Ok branch below: the temp's
-		// emitTempRelease inside emitPropagatingReturn walks the
-		// container's variant and releases the err-side payload's
-		// interior (string, fat array, ...).  Without a retain here
-		// the propagated value's payload is freed before the caller
-		// sees it.  Wildcard-mono returns a fresh re-wrapped value,
-		// so the retain operates on rewrapped's contents.  Fat-array
-		// payloads skip the retain (C11): the in-IR retain_ptr already
-		// covers them; an extra retain would leak the buffer.
-		//
-		// KNOWN LIMITATION: `try` through this wildcard-mono path
-		// on an Err carrying an iface fat-ptr (errors::Err) leaks
-		// the iface backing block (~64 B per propagation).  Repro:
-		// iface_arc_regressions.tin test 3.  Bisected to 4311983
-		// (generic method dispatch + try ok-branch retain).
-		// Exempting iface from `payloadNeedsRetainOnExtract` here
-		// fixes the leak but regresses libs/sqlite tests (segfault,
-		// the retain is load-bearing for at least one Result[T, E]
-		// shape where E is a struct holding an iface).  Needs a
-		// per-shape analysis of what err_value's IR actually emits
-		// before we can flip the right knob.
-		if cg.payloadNeedsRetainOnExtract(rewrapped.Type()) {
-			if !isFatArrayPtr(rewrapped.Type()) {
-				cg.emitRetain(errBlock, rewrapped)
-			}
-		}
-
+		// No extra retain here: the wildcard-mono wrapper's origFn
+		// does data_retain_val(this) at its entry, and rewrapTryable
+		// extracts + wrapDataVariant-wraps the payload into the fresh
+		// target type without releasing.  The composed call returns
+		// a value with rc bumped by 1 on the payload, and the caller-
+		// side emitTempRelease drops the temp's bitcopy back to the
+		// entry rc.  Adding a second retain here leaks one ref per
+		// propagation -- see iface_arc_regressions test 3 (try
+		// propagating an Err iface through wildcard-mono cross-T
+		// rewrap).
 		emitPropagatingReturn(errBlock, rewrapped)
 	} else {
 		_, errVal, err := callMethod(errBlock, "err_value")
@@ -267,18 +250,16 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 				"`try`: cannot propagate %s through a function returning %s. The impl of tryable on %s did not declare a wildcard slot in its trait bound, so the success type cannot be re-bound at this call site. Add the wildcard (e.g. change the trait bound to `tryable[V, %s[_, ...]]`) or convert the value explicitly with .map / .map_err.",
 				cg.fmtArgType(errVal.Type()), cg.fmtArgType(monoTarget), pretty, pretty)
 		}
-		// Mirror the Ok branch's retain: err_value typically loads the
-		// Err variant payload without retaining its interior, so the
-		// subsequent emitTempRelease would free the strings / fat
-		// arrays / iface data inside the error value before the caller
-		// propagates it.  Fat-array payloads skip the retain (C11):
-		// the in-IR retain_ptr already covers them.
-		if errVal != nil && cg.payloadNeedsRetainOnExtract(errVal.Type()) {
-			if !isFatArrayPtr(errVal.Type()) {
-				cg.emitRetain(errBlock, errVal)
-			}
-		}
-
+		// No extra retain here: err_value's IR does a
+		// data_retain_val(this) at entry and returns the value
+		// without a balancing release on the Err return path. That
+		// retain stays "above" the entry rc; the caller-side
+		// emitTempRelease drops the temp's bitcopy back to 0,
+		// leaving the propagated Err at rc=1 for the caller.  Adding
+		// a second retain here leaks one ref per propagation -- see
+		// iface_arc_regressions tests 6+7 (try propagating an Err
+		// iface fat-ptr / string-bearing struct payload through the
+		// direct err_value path).
 		emitPropagatingReturn(errBlock, errVal)
 	}
 
