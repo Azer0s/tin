@@ -974,5 +974,16 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 		}
 	}
 
+	// When `newVal` came from a temporary expression (inline call, literal,
+	// arithmetic result) the caller has handed us a fresh +1 reference that
+	// the per-field retain/store path does not consume.  Drop that extra
+	// reference here so a hot loop like `setfield(out, fname, get_string(
+	// row, col))` doesn't leak one string per call.  isCopyExpr returns
+	// true for borrows (Identifier / FieldAccess / IndexExpr) whose
+	// original scope owns the rc -- skip the release in those cases.
+	if isRCTrackedType(newVal.Type()) && !isCopyExpr(e.Val) {
+		cg.emitRelease(block, newVal)
+	}
+
 	return nil, nil
 }

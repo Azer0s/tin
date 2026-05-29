@@ -199,6 +199,14 @@ fn value_of(v any) Value =
   // struct's data was never persisted and the corruption was
   // invisible until someone read the DB with an external tool.
   // Aborting at insert time surfaces the modelling bug.
+  //
+  // KNOWN LIMITATION (B21): a struct field typed as a trait fat-pointer
+  // (e.g. `err errors::Err`) SIGSEGVs upstream of this check -- the
+  // fieldtypes() / getfield() walkers deref the trait's null vtable
+  // slot before value_of is reached, so the user gets a bare segfault
+  // rather than this diagnostic.  Until that path is fixed, model
+  // trait fields as a concrete carrier (string, i64) and serialize
+  // them explicitly.
   // {atom} interpolation currently prints the raw u32 typeID rather
   // than the atom name -- cast via `as string` to get the printable
   // form ("Foo" for 'Foo).
