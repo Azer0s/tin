@@ -138,6 +138,19 @@ fn c_str_data(s string) *char = extern("_tin_string_data")
 // rather than as a Reply variant.  Caller is responsible for
 // releasing the C-side reply (the wrapping rc::Cell does this via
 // c_redis_reply_free).
+//
+// KNOWN LIMITATION (N2): when the resulting Reply is a List(items),
+// the Str(s) variants nested inside items leak their string buffers
+// when the outer List is dropped (~32 B per element).  The Reply
+// ADT's data_release_val walker doesn't recurse into the inner
+// Reply elements' Str payloads at the right depth.  The C-side
+// _tin_redis_reply_free correctly frees its own per-child sval
+// buffers, but the SEPARATE copies the Tin side took via
+// _tin_string_from_bytes during translate_reply are owned by the
+// Tin Reply tree and need the recursive release helper to walk
+// them.  Pure-Tin recursive data ADTs don't show the same shape so
+// the bug is specific to how List(items: [Reply]) lowers its
+// per-element release.  Tracked as a follow-up.
 fn translate_reply(p *void) Result[Reply, errors::Err] =
   let k = c_redis_reply_kind(p)
   if k == 0 as i32:
