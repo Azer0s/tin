@@ -274,24 +274,20 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	// Ok variant and releases its payload's RC fields -- the same string
 	// / fat-array pointers we just handed to okVal.  Without a deep
 	// retain here, the temp's release frees those buffers and the caller
-	// reads dangling memory (Result[Data, Err] with a string-bearing
-	// variant: the string body comes back empty / freed).
+	// reads dangling memory.
 	//
-	// KNOWN LEAK (C11): for fat-array payloads, emitRetain bumps only
-	// the buffer rc; emitTempRelease via _tin_release_fat_elem_array
-	// then decrement-conditionally walks elements -- the rc math leaves
-	// one extra buffer reference dangling per try-extraction (80 bytes
-	// per call observed via macOS leaks).  Symmetric on the Err branch.
-	// Investigated in round 12: ok_value does a net +1 internally for
-	// fat-array (entry data_retain_val + extract retain_ptr - exit
-	// data_release_val), then the caller's retain piles on another +1
-	// while temp release only takes -1.  Removing the caller retain
-	// fixes the leak but UAFs db_orm_test's find_by_id (some types
-	// rely on the retain to balance ok_value).  Needs a per-type
-	// classification of ok_value's net retain delta before the fix
-	// can land; documented for follow-up.
+	// Fat-array payloads are the exception (C11): ok_value's generated
+	// IR already does retain_ptr on the buffer at extract time (entry
+	// data_retain_val + extract retain_ptr - local data_release_val
+	// = net +1), and the combined fat-array release helper used by
+	// emitTempRelease's data_release_val also decrement-conditionally
+	// walks elements -- so an additional emitRetain leaves one buffer
+	// reference dangling per call (80 B leaked).  Skip the retain for
+	// fat-array specifically; the in-IR retain_ptr already covers it.
 	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
-		cg.emitRetain(okBlock, okVal)
+		if !isFatArrayPtr(okVal.Type()) {
+			cg.emitRetain(okBlock, okVal)
+		}
 	}
 
 	emitTempRelease(okBlock)

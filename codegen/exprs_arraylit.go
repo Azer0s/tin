@@ -390,8 +390,35 @@ func (cg *CodeGen) inferStructTypeArgs(block *ir.Block, e *ast.StructLit, arityM
 	return nil, false
 }
 
+// callFieldFiberRetainIfDefined dispatches to a field-type's
+// `_fiber_retain` method when one is defined.  Used by struct-lit
+// codegen for fields whose type owns a C-level resource outside the
+// ARC system (e.g. Channel[T] bypasses rc::Cell for hot-path speed);
+// the matching deinit runs at struct drop, so the field-store side
+// needs a retain to keep the rc balanced.  No-op when the field
+// type doesn't define `_fiber_retain`.
+func (cg *CodeGen) callFieldFiberRetainIfDefined(block *ir.Block, val value.Value) {
+	structName := cg.typeNameOf(val.Type())
+	if structName == "" {
+		return
+	}
+
+	entry, ok := cg.curScope.lookup(structName + "__fiber_retain")
+	if !ok {
+		return
+	}
+
+	fn, ok2 := entry.val.(*ir.Func)
+	if !ok2 {
+		return
+	}
+
+	args := cg.adaptArgs(block, []value.Value{val}, fn.Sig)
+	block.NewCall(fn, args...)
+}
+
 func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value, error) {
-	// Capture the original source position before any rewrite below. The
+	// Capture the original source position below. The
 	// rewrites construct fresh StructLit nodes without a Pos, which would
 	// otherwise leak through to error messages as "0:0" or whatever
 	// cg.currentPos last held (typically the position of an unrelated
@@ -669,6 +696,10 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 						cg.emitRetain(block, val)
 					}
 				}
+				// See named-field branch below for the rationale on
+				// _fiber_retain - same pattern, applied to positional
+				// struct literals.
+				cg.callFieldFiberRetainIfDefined(block, val)
 			}
 		}
 	} else {
@@ -742,6 +773,15 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 						cg.emitRetain(block, val)
 					}
 				}
+				// Struct field types that manage C-level resources
+				// outside the ARC system (Channel[T] bypasses rc::Cell
+				// for hot-path speed) define `fn _fiber_retain` to
+				// bump their internal refcount.  Call it on field
+				// store so the struct's eventual scope-exit deinit
+				// is matched by the field's own deinit without
+				// double-freeing the underlying C resource.  Mirrors
+				// the coro ramp's pattern in coro.go.
+				cg.callFieldFiberRetainIfDefined(block, val)
 			}
 		}
 	}
