@@ -226,9 +226,13 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		// interior (string, fat array, ...).  Without a retain here
 		// the propagated value's payload is freed before the caller
 		// sees it.  Wildcard-mono returns a fresh re-wrapped value,
-		// so the retain operates on rewrapped's contents.
+		// so the retain operates on rewrapped's contents.  Fat-array
+		// payloads skip the retain (C11): the in-IR retain_ptr already
+		// covers them; an extra retain would leak the buffer.
 		if cg.payloadNeedsRetainOnExtract(rewrapped.Type()) {
-			cg.emitRetain(errBlock, rewrapped)
+			if !isFatArrayPtr(rewrapped.Type()) {
+				cg.emitRetain(errBlock, rewrapped)
+			}
 		}
 
 		emitPropagatingReturn(errBlock, rewrapped)
@@ -255,9 +259,12 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		// Err variant payload without retaining its interior, so the
 		// subsequent emitTempRelease would free the strings / fat
 		// arrays / iface data inside the error value before the caller
-		// propagates it.
+		// propagates it.  Fat-array payloads skip the retain (C11):
+		// the in-IR retain_ptr already covers them.
 		if errVal != nil && cg.payloadNeedsRetainOnExtract(errVal.Type()) {
-			cg.emitRetain(errBlock, errVal)
+			if !isFatArrayPtr(errVal.Type()) {
+				cg.emitRetain(errBlock, errVal)
+			}
 		}
 
 		emitPropagatingReturn(errBlock, errVal)

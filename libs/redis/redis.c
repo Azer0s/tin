@@ -61,11 +61,21 @@ void *_tin_redis_connect(const char *host, int32_t port) {
 void _tin_redis_close(void *ctx) {
     if (!ctx) return;
     RedisCtx *rcx = (RedisCtx *)ctx;
+    // Free the underlying redisContext under the mutex so we can't race
+    // with an in-flight command on a sibling thread.  We deliberately
+    // do NOT pthread_mutex_destroy(&rcx->mu) or free(rcx) here: any
+    // concurrent _tin_redis_command call that was blocked on the mutex
+    // needs the lock and the struct to stay valid long enough for it
+    // to wake, observe rc==NULL, return EINVAL, and unlock.  Destroying
+    // the mutex from under a waiter is undefined behaviour.  The
+    // RedisCtx struct (+ pthread_mutex_t) leaks one fixed allocation
+    // per Connection - one-shot, in practice at process exit.
     pthread_mutex_lock(&rcx->mu);
-    if (rcx->rc) { redisFree(rcx->rc); rcx->rc = NULL; }
+    if (rcx->rc) {
+        redisFree(rcx->rc);
+        rcx->rc = NULL;
+    }
     pthread_mutex_unlock(&rcx->mu);
-    pthread_mutex_destroy(&rcx->mu);
-    free(rcx);
 }
 
 // _tin_redis_shutdown half-closes the underlying socket without

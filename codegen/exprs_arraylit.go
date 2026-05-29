@@ -396,10 +396,22 @@ func (cg *CodeGen) inferStructTypeArgs(block *ir.Block, e *ast.StructLit, arityM
 // ARC system (e.g. Channel[T] bypasses rc::Cell for hot-path speed);
 // the matching deinit runs at struct drop, so the field-store side
 // needs a retain to keep the rc balanced.  No-op when the field
-// type doesn't define `_fiber_retain`.
-func (cg *CodeGen) callFieldFiberRetainIfDefined(block *ir.Block, val value.Value) {
+// type doesn't define `_fiber_retain` or when the source expression
+// is a fresh producer (call result, literal) -- those already hand
+// us a +1 reference; a second retain would leak the C-level rc.
+// Only borrow-shaped sources (Identifier / FieldAccess / IndexExpr)
+// need the bump.
+func (cg *CodeGen) callFieldFiberRetainIfDefined(block *ir.Block, val value.Value, src ast.Node) {
+	if src == nil || !isCopyExpr(src) {
+		return
+	}
+
 	structName := cg.typeNameOf(val.Type())
 	if structName == "" {
+		return
+	}
+
+	if cg.curScope == nil {
 		return
 	}
 
@@ -699,7 +711,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				// See named-field branch below for the rationale on
 				// _fiber_retain - same pattern, applied to positional
 				// struct literals.
-				cg.callFieldFiberRetainIfDefined(block, val)
+				cg.callFieldFiberRetainIfDefined(block, val, v)
 			}
 		}
 	} else {
@@ -781,7 +793,7 @@ func (cg *CodeGen) genStructLit(block *ir.Block, e *ast.StructLit) (value.Value,
 				// is matched by the field's own deinit without
 				// double-freeing the underlying C resource.  Mirrors
 				// the coro ramp's pattern in coro.go.
-				cg.callFieldFiberRetainIfDefined(block, val)
+				cg.callFieldFiberRetainIfDefined(block, val, f.Value)
 			}
 		}
 	}
