@@ -427,19 +427,22 @@ struct Connection (io::Closeable, db::Conn) =
     return this.command(["HLEN", key]).map(Reply::get)
 
 // pk_value_for_col scans cols for the entry matching pk_col_name and
-// returns the parallel value, stringified.  Falls back to vals[0] when
-// the named column is absent (e.g. legacy callers that pass an empty
-// pk_col name -- the trait now requires it but old call sites used
-// to skip).  Returns "" only when cols is empty.
+// returns the parallel value, stringified.  Returns "" when the named
+// column isn't in `cols` (or when pk_col_name itself is empty) -- the
+// caller treats empty as "no usable PK" and surfaces -1 / Err rather
+// than silently picking a wrong key.  The previous fallback to vals[0]
+// silently collided two records whose first non-PK column happened to
+// coincide (e.g. structs without a tagged PK), making one HSET
+// overwrite the other under key `<table>:<first-col-value>`.
 fn pk_value_for_col(pk_col_name string, cols [string], vals [db::Value]) string =
-  if len(cols) == 0:
+  if len(cols) == 0 || len(pk_col_name) == 0:
     return ""
   let i i64 = 0
   for i < len(cols):
     if str::strcmp(cols[i], pk_col_name) == 0:
       return db_value_to_string(vals[i])
     i = i + 1
-  return db_value_to_string(vals[0])
+  return ""
 
 // glob_escape backslash-escapes the four pattern metacharacters Redis
 // honours in KEYS/SCAN patterns (*, ?, [, \).  Without escaping, a

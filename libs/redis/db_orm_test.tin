@@ -143,6 +143,29 @@ test "db round-trip preserves empty string vs null (redis)" =
   cleanup(c, "user_n")
   c.close()
 
+// pk_value_for_col used to fall back to `vals[0]` when the named PK
+// column wasn't present in `cols` (or when pk_col_name was empty),
+// silently collapsing every record whose first non-skipped column
+// shared a value onto the same `<table>:<first-col>` hash key -- so
+// two distinct inserts overwrote each other.  Fix: return "" instead,
+// which db_insert_row treats as a hard error (-1).
+struct nopk =
+  name string @"db:name"
+  age  i64    @"db:age"
+
+test "db::insert_into without a PK is rejected, not silently collided" =
+  let c = fresh_conn()
+  cleanup(c, "nopk_t")
+  let n1 i64 = db::insert_into[nopk](c, "nopk_t", nopk{name: "alice", age: 30})
+  let n2 i64 = db::insert_into[nopk](c, "nopk_t", nopk{name: "alice", age: 99})
+  assert::equals(-1 as i64, n1)
+  assert::equals(-1 as i64, n2)
+  // No keys should exist for nopk_t since both inserts were rejected.
+  let ks [string] = c.keys("nopk_t:*").unwrap()
+  assert::equals(0, len(ks))
+  cleanup(c, "nopk_t")
+  c.close()
+
 // f64 fields used to be serialized with "{x}" interpolation (%g, 6 sig
 // digits), so non-trivial doubles silently lost precision on the
 // round-trip through Redis hashes.  value_to_string now uses %.17g
