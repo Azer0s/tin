@@ -15,6 +15,7 @@
 #endif
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,16 @@
 #include <sys/socket.h>
 
 #include <hiredis/hiredis.h>
+
+// Per-redisContext mutex.  hiredis's sync API is NOT safe for
+// concurrent access on one redisContext: two parallel commands
+// interleave their write+read pairs on the socket and each fiber's
+// read returns the wrong reply.  Wrap the redisContext + mutex
+// inline in RedisCtx so the Tin-side handle stays a single *void.
+typedef struct {
+    redisContext   *rc;
+    pthread_mutex_t mu;
+} RedisCtx;
 
 // Runtime helpers (see runtime/runtime.h).
 typedef struct { char *ptr; int64_t len; int64_t cap; } _TinString;
@@ -40,33 +51,43 @@ void *_tin_redis_connect(const char *host, int32_t port) {
         redisFree(c);
         return NULL;
     }
-    return c;
+    RedisCtx *rcx = (RedisCtx *)malloc(sizeof(RedisCtx));
+    if (!rcx) { redisFree(c); return NULL; }
+    rcx->rc = c;
+    pthread_mutex_init(&rcx->mu, NULL);
+    return rcx;
 }
 
 void _tin_redis_close(void *ctx) {
-    if (ctx) redisFree((redisContext *)ctx);
+    if (!ctx) return;
+    RedisCtx *rcx = (RedisCtx *)ctx;
+    pthread_mutex_lock(&rcx->mu);
+    if (rcx->rc) { redisFree(rcx->rc); rcx->rc = NULL; }
+    pthread_mutex_unlock(&rcx->mu);
+    pthread_mutex_destroy(&rcx->mu);
+    free(rcx);
 }
 
 // _tin_redis_shutdown half-closes the underlying socket without
 // freeing the redisContext.  Used by Subscription.close() to wake a
 // reader_loop fiber that's currently blocked in redisGetReply: the
 // next read returns 0 / -EPIPE which the reader translates into Err
-// and exits.  Calling redisFree from a sibling fiber while the
-// reader is mid-read races with hiredis's internal buffers; the
-// shutdown(2) gives the reader a chance to drain cleanly before the
-// final free.
+// and exits.  Does NOT take the per-conn mutex -- the reader_loop is
+// HOLDING it inside _tin_redis_command, so a lock here would deadlock.
+// shutdown(2) on the underlying fd wakes the recv without the mutex.
 void _tin_redis_shutdown(void *ctx) {
     if (!ctx) return;
-    redisContext *c = (redisContext *)ctx;
-    if (c->fd >= 0) {
-        shutdown(c->fd, SHUT_RDWR);
+    RedisCtx *rcx = (RedisCtx *)ctx;
+    if (rcx->rc && rcx->rc->fd >= 0) {
+        shutdown(rcx->rc->fd, SHUT_RDWR);
     }
 }
 
 const char *_tin_redis_errstr(void *ctx) {
-    redisContext *c = (redisContext *)ctx;
-    if (!c) return "redis: null context";
-    return c->errstr[0] ? c->errstr : "";
+    if (!ctx) return "redis: null context";
+    RedisCtx *rcx = (RedisCtx *)ctx;
+    if (!rcx->rc) return "redis: closed context";
+    return rcx->rc->errstr[0] ? rcx->rc->errstr : "";
 }
 
 // Reply marshalling: hiredis reply -> TinRedisReply
@@ -185,27 +206,43 @@ static TinRedisReply *_translate_reply(redisReply *r) {
 TinRedisReply *_tin_redis_command(void *ctx, int32_t argc,
                                    const char **argv, const int64_t *arglens,
                                    int64_t *err_out) {
-    redisContext *c = (redisContext *)ctx;
     *err_out = 0;
-    if (!c) { *err_out = -EINVAL; return NULL; }
+    RedisCtx *rcx = (RedisCtx *)ctx;
+    if (!rcx) { *err_out = -EINVAL; return NULL; }
     // Tin's caller passes argc via `len(args) as i32`.  Reject a
     // negative value here -- without this guard `(size_t)argc` wraps
     // to ~SIZE_MAX and the subsequent malloc returns NULL or aborts.
     if (argc < 0) { *err_out = -EINVAL; return NULL; }
 
+    // Serialise concurrent fiber/thread access to one redisContext.
+    // hiredis's sync API isn't safe for parallel use -- C12.
+    pthread_mutex_lock(&rcx->mu);
+    redisContext *c = rcx->rc;
+    if (!c) {
+        pthread_mutex_unlock(&rcx->mu);
+        *err_out = -EINVAL;
+        return NULL;
+    }
+
     redisReply *r = NULL;
     if (argc == 0) {
         if (redisGetReply(c, (void **)&r) == REDIS_ERR || !r) {
+            pthread_mutex_unlock(&rcx->mu);
             *err_out = -(int64_t)EPROTO;
             return NULL;
         }
     } else {
         size_t *sizes = (size_t *)malloc(sizeof(size_t) * (size_t)argc);
-        if (!sizes) { *err_out = -ENOMEM; return NULL; }
+        if (!sizes) {
+            pthread_mutex_unlock(&rcx->mu);
+            *err_out = -ENOMEM;
+            return NULL;
+        }
         for (int i = 0; i < argc; i++) sizes[i] = (size_t)arglens[i];
         r = (redisReply *)redisCommandArgv(c, (int)argc, argv, sizes);
         free(sizes);
         if (!r) {
+            pthread_mutex_unlock(&rcx->mu);
             *err_out = -(int64_t)EPROTO;
             return NULL;
         }
@@ -213,6 +250,7 @@ TinRedisReply *_tin_redis_command(void *ctx, int32_t argc,
 
     TinRedisReply *out = _translate_reply(r);
     freeReplyObject(r);
+    pthread_mutex_unlock(&rcx->mu);
     return out;
 }
 
