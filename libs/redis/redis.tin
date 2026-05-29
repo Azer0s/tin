@@ -334,12 +334,19 @@ struct Connection (io::Closeable, db::Conn) =
     // KNOWN ISSUE (R4-A): HSET on a missing key creates the hash, so
     // db::update_in for a non-existent PK silently inserts a phantom
     // record (sqlite returns 0 rows-affected in the same case).  The
-    // obvious EXISTS-then-HSET precondition is incompatible with the
-    // current method-receiver Connection / args-array ARC bookkeeping
-    // (the extra command call appears to short-circuit the subsequent
-    // HSET).  Tracked separately; a proper fix likely uses a Lua
-    // script `if redis.call('EXISTS', KEYS[1]) == 1 then redis.call(
-    // 'HSET', KEYS[1], ARGV...) end` to keep the operation atomic.
+    // obvious EXISTS-then-HSET precondition triggers a separate
+    // codegen bug: building two [string] array literals from the same
+    // let-bound `key` variable in one function produces IR that calls
+    // _tin_release_fat_elem_array on the first array *right after*
+    // the command call (treating the let-bound array as an arg-temp)
+    // even though the let is still in scope, leading to a use-after-
+    // free of the second array's key element when the second command
+    // fires.  Verified via LLVM IR dump + `redis-cli MONITOR` showing
+    // a garbage key on the second HSET.  Proper fix needs the call-
+    // site arg ARC bookkeeping to recognise let-bound array sources
+    // as non-temp -- out of scope for this commit; tracked separately.
+    // A robust correctness fix would also use a Lua script to keep
+    // the EXISTS+HSET atomic against a concurrent DEL.
     match this.command(args):
       case Ok(_):  return 1
       case Err(_): return 0 - 1
