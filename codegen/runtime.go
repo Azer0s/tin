@@ -305,6 +305,16 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 				}
 
 				if pt2, isPtr := elemType.(*irtypes.PointerType); isPtr {
+					// [volatile *T]: elements are rc-opted-out raw pointers (the C/extern
+					// escape hatch). Stores into the slot don't retain, so the per-element
+					// release walk would corrupt the rc of whatever the pointer aliases.
+					// Drop the outer buffer's rc only.
+					if isVolatilePtr(pt2) {
+						block.NewCall(cg.ensureReleasePtr(), dataPtrI8)
+
+						return
+					}
+
 					// [*T]: check if the inner type T has RC fields that need
 					// deep release (load T, release its fields, free the block).
 					if cg.elemNeedsRelease(pt2.ElemType) {

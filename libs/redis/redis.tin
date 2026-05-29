@@ -121,7 +121,7 @@ fn c_redis_connect(host string, port i32) *void                                 
 fn c_redis_close(ctx *void)                                                                 = extern("_tin_redis_close")
 fn c_redis_shutdown(ctx *void)                                                              = extern("_tin_redis_shutdown")
 fn c_redis_errstr(ctx *void) string                                                         = extern("_tin_redis_errstr")
-fn c_redis_command(ctx *void, argc i32, argv [*char], arglens [i64], out_err *i64) *void   = extern("_tin_redis_command")
+fn c_redis_command(ctx *void, argc i32, argv [volatile *char], arglens [i64], out_err *i64) *void   = extern("_tin_redis_command")
 fn c_redis_reply_free(p *void)                                                              = extern("_tin_redis_reply_free")
 fn c_redis_reply_kind(p *void) i32                                                          = extern("_tin_redis_reply_kind")
 fn c_redis_reply_int(p *void)  i64                                                          = extern("_tin_redis_reply_int")
@@ -129,7 +129,7 @@ fn c_redis_reply_count(p *void) i64                                             
 fn c_redis_reply_str(p *void, out *string)                                                  = extern("_tin_redis_reply_str")
 fn c_redis_reply_child(p *void, i i64) *void                                                = extern("_tin_redis_reply_child")
 
-fn c_str_data(s string) *char = extern("_tin_string_data")
+fn c_str_data(s string) volatile *char = extern("_tin_string_data")
 
 // Reply -> Tin Reply conversion
 
@@ -234,7 +234,7 @@ struct Connection (io::Closeable, db::Conn) =
   fn command(this Connection, args [string]) Result[Reply, errors::Err] =
     let argc i32 = len(args) as i32
     let slots i64 = if_zero_use_one(argc as i64)
-    let argv    [*char] = [nil as *char] * slots
+    let argv    [volatile *char] = [nil as volatile *char] * slots
     let arglens [i64]   = [0] * slots
     let keep    [string] = [""] * slots
     let i i64 = 0
