@@ -193,7 +193,16 @@ fn value_of(v any) Value =
     return TextVal(v as string)
   if t == 'none:
     return NullVal
+  // Unsupported field type (struct, tuple, fat array, fn-ptr,
+  // user-defined data ADT...).  Previously fell through to NullVal,
+  // which silently dropped the field from INSERT/UPDATE -- the
+  // struct's data was never persisted and the corruption was
+  // invisible until someone read the DB with an external tool.
+  // Aborting at insert time surfaces the modelling bug.
+  _tin_db_abort("db::value_of: unsupported field type: {t}; only width-classed integers, bool, f32/f64, string, and none are persistable")
   return NullVal
+
+fn _tin_db_abort(msg string) = extern("_tin_assert_abort")
 
 // table_for returns the default table name for T = the struct name.
 fn table_for[T](v T) string = return typeof(v) as string
@@ -401,12 +410,10 @@ fn find_by_id_in[T](c Conn, table string, id i64) Result[T, errors::Err] =
   let pk = pk_col[T](probe)
   if len(pk) == 0:
     return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
-  match c.db_find_row(table, pk, IntVal(id), sql_cols):
-    case Err(e): return Err(e)
-    case Ok(rows):
-      if rows.count() == 0:
-        return Err(errors::new("db: not found"))
-      return Ok(row_into[T](rows, 0, field_names, field_types))
+  let rows = try c.db_find_row(table, pk, IntVal(id), sql_cols)
+  if rows.count() == 0:
+    return Err(errors::new("db: not found"))
+  return Ok(row_into[T](rows, 0, field_names, field_types))
 
 // find_by_id resolves the table from the struct name.
 fn find_by_id[T](c Conn, id i64) Result[T, errors::Err] =
@@ -425,16 +432,14 @@ fn all_in[T](c Conn, table string) Result[[T], errors::Err] =
   let pk = pk_col[T](probe)
   if len(pk) == 0:
     return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
-  match c.db_all_rows(table, pk, sql_cols):
-    case Err(e): return Err(e)
-    case Ok(rows):
-      let n = rows.count()
-      let out [T] = []
-      let r i64 = 0
-      for r < n:
-        out ++= [row_into[T](rows, r, field_names, field_types)]
-        r = r + 1
-      return Ok(out)
+  let rows = try c.db_all_rows(table, pk, sql_cols)
+  let n = rows.count()
+  let out [T] = []
+  let r i64 = 0
+  for r < n:
+    out ++= [row_into[T](rows, r, field_names, field_types)]
+    r = r + 1
+  return Ok(out)
 
 // all uses table_for[T].
 fn all[T](c Conn) Result[[T], errors::Err] =

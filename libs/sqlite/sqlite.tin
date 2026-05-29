@@ -348,9 +348,8 @@ struct Connection (io::Closeable, Conn) =
     return this.exec(sql, to_sql_values(params))
 
   fn Conn::query(this Connection, sql string, params [Value]) Result[RowSet, errors::Err] =
-    match this.query(sql, to_sql_values(params)):
-      case Err(e): return Err(e)
-      case Ok(r):  return Ok(r as RowSet)
+    let r = try this.query(sql, to_sql_values(params))
+    return Ok(r as RowSet)
 
   // CRUD primitives: build the SQL string from the structural pieces
   // and dispatch through the existing exec / query paths.  KV drivers
@@ -370,18 +369,16 @@ struct Connection (io::Closeable, Conn) =
       return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
     let sql = "SELECT " ++ col_list ++ " FROM " ++ table ++ " WHERE " ++ pk_col ++ " = ? LIMIT 1"
-    match this.query(sql, to_sql_values([pk_val])):
-      case Err(e): return Err(e)
-      case Ok(r):  return Ok(r as RowSet)
+    let r = try this.query(sql, to_sql_values([pk_val]))
+    return Ok(r as RowSet)
 
   fn Conn::db_all_rows(this Connection, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err] =
     if len(want_cols) == 0:
       return Err(ExecFailed(0 as i32, "db: no columns to select"))
     let col_list = join_cols(want_cols)
     let sql = "SELECT " ++ col_list ++ " FROM " ++ table
-    match this.query(sql, to_sql_values([])):
-      case Err(e): return Err(e)
-      case Ok(r):  return Ok(r as RowSet)
+    let r = try this.query(sql, to_sql_values([]))
+    return Ok(r as RowSet)
 
   fn Conn::db_update_row(this Connection, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64 =
     if len(cols) == 0:

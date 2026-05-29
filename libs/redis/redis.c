@@ -200,9 +200,25 @@ TinRedisReply *_tin_redis_command(void *ctx, int32_t argc,
 }
 
 // _tin_redis_reply_free is the rc destructor for TinRedisReply.
+// Walks the items array (releasing each child), frees the C-allocated
+// items[] buffer, then `_tin_release(p)` decrements the outer block's
+// own rc.  The Tin-side caller invokes this once per command(), so
+// missing the outer release leaked ~80 bytes per redis call (the
+// TinRedisReply struct's rc-managed allocation never reached rc=0).
 void _tin_redis_reply_free(void *p) {
     if (!p) return;
     TinRedisReply *r = (TinRedisReply *)p;
+    // sval is a _TinString {ptr, len, cap} whose buffer was allocated
+    // via _tin_string_from_bytes (rc-managed).  Releasing the buffer
+    // here matches the rc=1 the translate path established; without
+    // this every Status / Error / String / Verb / Double / BigNum
+    // reply leaked its payload buffer.
+    if (r->sval.ptr) {
+        _tin_release(r->sval.ptr);
+        r->sval.ptr = NULL;
+        r->sval.len = 0;
+        r->sval.cap = 0;
+    }
     if (r->items) {
         for (int64_t i = 0; i < r->nitems; i++) {
             _tin_release(r->items[i]);
@@ -214,6 +230,12 @@ void _tin_redis_reply_free(void *p) {
         r->items  = NULL;
         r->nitems = 0;
     }
+    // Release the outer TinRedisReply rc block itself.  _translate_-
+    // reply allocates via _tin_rc_alloc (rc=1) and the Tin caller
+    // (Connection.command) invokes us once per reply; without this
+    // final release the outer block never reaches rc=0 and every
+    // redis command leaks ~80 bytes.
+    _tin_release(p);
 }
 
 // Reply accessors -- called from Tin to drain a TinRedisReply into a
