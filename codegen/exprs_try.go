@@ -229,6 +229,18 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 		// so the retain operates on rewrapped's contents.  Fat-array
 		// payloads skip the retain (C11): the in-IR retain_ptr already
 		// covers them; an extra retain would leak the buffer.
+		//
+		// KNOWN LIMITATION: `try` through this wildcard-mono path
+		// on an Err carrying an iface fat-ptr (errors::Err) leaks
+		// the iface backing block (~64 B per propagation).  Repro:
+		// iface_arc_regressions.tin test 3.  Bisected to 4311983
+		// (generic method dispatch + try ok-branch retain).
+		// Exempting iface from `payloadNeedsRetainOnExtract` here
+		// fixes the leak but regresses libs/sqlite tests (segfault,
+		// the retain is load-bearing for at least one Result[T, E]
+		// shape where E is a struct holding an iface).  Needs a
+		// per-shape analysis of what err_value's IR actually emits
+		// before we can flip the right knob.
 		if cg.payloadNeedsRetainOnExtract(rewrapped.Type()) {
 			if !isFatArrayPtr(rewrapped.Type()) {
 				cg.emitRetain(errBlock, rewrapped)
