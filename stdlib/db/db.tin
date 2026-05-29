@@ -199,7 +199,11 @@ fn value_of(v any) Value =
   // struct's data was never persisted and the corruption was
   // invisible until someone read the DB with an external tool.
   // Aborting at insert time surfaces the modelling bug.
-  _tin_db_abort("db::value_of: unsupported field type: {t}; only width-classed integers, bool, f32/f64, string, and none are persistable")
+  // {atom} interpolation currently prints the raw u32 typeID rather
+  // than the atom name -- cast via `as string` to get the printable
+  // form ("Foo" for 'Foo).
+  let tname string = t as string
+  _tin_db_abort("db::value_of: unsupported field type: " ++ tname ++ "; only width-classed integers, bool, f32/f64, string, and none are persistable")
   return NullVal
 
 fn _tin_db_abort(msg string) = extern("_tin_assert_abort")
