@@ -206,6 +206,17 @@ struct Connection (io::Closeable, db::Conn) =
   // already-stringified parts.  Returns the parsed Reply or a
   // structured RedisError.  Most callers should use the typed
   // helpers (get/set/lpush/...) which build the argv internally.
+  //
+  // KNOWN LIMITATION (C12): NOT fiber-safe -- four fibers sharing a
+  // single Connection see ~100% cross-routed replies because hiredis
+  // synchronous API requires single-threaded access to its
+  // redisContext.  A first attempt at a try-spin mutex didn't fix it
+  // (the SET completes but the immediate GET in the same fiber reads
+  // the wrong fiber's response) suggesting the actual race is in the
+  // socket read order rather than just call serialisation.  Until the
+  // driver is rewritten on top of hiredis's async API or its commands
+  // are routed through a dedicated worker thread, callers MUST open
+  // one Connection per fiber.  Documented separately as a TODO.
   fn command(this Connection, args [string]) Result[Reply, errors::Err] =
     let argc i32 = len(args) as i32
     let slots i64 = if_zero_use_one(argc as i64)

@@ -193,3 +193,8 @@ test "hkeys + hvals + hlen agree on shape" =
 //   assert::equals("hello-redis", msg.payload)
 //   pub.close()
 //   sub.close()
+
+// C12 (KNOWN LIMITATION): Connection is NOT fiber-safe.  Sharing one
+// across multiple fibers causes cross-routed replies.  Open one
+// Connection per fiber until the driver is rewritten on hiredis's
+// async API or routed through a dedicated worker thread.

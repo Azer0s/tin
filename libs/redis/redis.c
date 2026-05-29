@@ -205,14 +205,17 @@ TinRedisReply *_tin_redis_command(void *ctx, int32_t argc,
 // own rc.  The Tin-side caller invokes this once per command(), so
 // missing the outer release leaked ~80 bytes per redis call (the
 // TinRedisReply struct's rc-managed allocation never reached rc=0).
-void _tin_redis_reply_free(void *p) {
-    if (!p) return;
-    TinRedisReply *r = (TinRedisReply *)p;
+// _tin_redis_reply_release_inner walks one TinRedisReply releasing its
+// owned payload buffers WITHOUT touching the outer rc block.  Used as
+// the recursive helper for list replies: the items array is owned by
+// the parent and freed inline here, but each child's outer rc block
+// is owned by the Tin-side translate_reply (which holds it via a
+// `child *void` local) and gets released at that scope exit.  Recursive
+// release of the outer would double-free.
+static void _tin_redis_reply_release_inner(TinRedisReply *r) {
+    if (!r) return;
     // sval is a _TinString {ptr, len, cap} whose buffer was allocated
-    // via _tin_string_from_bytes (rc-managed).  Releasing the buffer
-    // here matches the rc=1 the translate path established; without
-    // this every Status / Error / String / Verb / Double / BigNum
-    // reply leaked its payload buffer.
+    // via _tin_string_from_bytes (rc-managed).
     if (r->sval.ptr) {
         _tin_release(r->sval.ptr);
         r->sval.ptr = NULL;
@@ -221,20 +224,25 @@ void _tin_redis_reply_free(void *p) {
     }
     if (r->items) {
         for (int64_t i = 0; i < r->nitems; i++) {
-            _tin_release(r->items[i]);
+            // Walk inner state (sval + grandchildren) without bumping
+            // the child's outer rc -- the Tin translate_reply path
+            // already balances that.
+            _tin_redis_reply_release_inner(r->items[i]);
         }
         free(r->items);
-        // Defensive: null out the slot so an accidental double-free
-        // (e.g. an RC double-decrement bug elsewhere) doesn't free
-        // already-freed memory.
         r->items  = NULL;
         r->nitems = 0;
     }
+}
+
+void _tin_redis_reply_free(void *p) {
+    if (!p) return;
+    _tin_redis_reply_release_inner((TinRedisReply *)p);
     // Release the outer TinRedisReply rc block itself.  _translate_-
     // reply allocates via _tin_rc_alloc (rc=1) and the Tin caller
     // (Connection.command) invokes us once per reply; without this
     // final release the outer block never reaches rc=0 and every
-    // redis command leaks ~80 bytes.
+    // redis command leaked ~80 bytes.
     _tin_release(p);
 }
 
