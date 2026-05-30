@@ -136,7 +136,7 @@ func (cg *CodeGen) genArrayLitWithElemType(block *ir.Block, e *ast.ArrayLit, tar
 		// ARC: retain copy expressions (identifiers, field accesses, etc.) so that
 		// both the array and the original owner hold an independent RC reference.
 		// Temporaries (call results, literals) are already owned by the array at RC=1.
-		if isRCTrackedType(elemType) && isCopyExpr(e.Elems[i]) {
+		if isCopyExpr(e.Elems[i]) && (isRCTrackedType(elemType) || cg.elemNeedsRelease(elemType)) {
 			cg.emitRetain(block, v)
 		}
 	}

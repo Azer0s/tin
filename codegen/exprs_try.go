@@ -268,24 +268,26 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if err != nil {
 		return nil, err
 	}
-	// The default ok_value impl loads the variant payload out of the
-	// container without bumping deep RC.  The matching emitTempRelease
-	// below runs data_release_val on the temp container, which walks the
-	// Ok variant and releases its payload's RC fields -- the same string
-	// / fat-array pointers we just handed to okVal.  Without a deep
-	// retain here, the temp's release frees those buffers and the caller
-	// reads dangling memory.
+	// ok_value's generated IR is shape-asymmetric.  Retain here only
+	// for the payload shapes whose match-bind path leaves the extracted
+	// value at rc==0 above the source (string, iface fat-ptr, any, fn
+	// closure).  Without the bump, emitTempRelease below would free the
+	// payload's buffer while the caller still aliases it (the original
+	// C11 UAF).
 	//
-	// Fat-array payloads are the exception (C11): ok_value's generated
-	// IR already does retain_ptr on the buffer at extract time (entry
-	// data_retain_val + extract retain_ptr - local data_release_val
-	// = net +1), and the combined fat-array release helper used by
-	// emitTempRelease's data_release_val also decrement-conditionally
-	// walks elements -- so an additional emitRetain leaves one buffer
-	// reference dangling per call (80 B leaked).  Skip the retain for
-	// fat-array specifically; the in-IR retain_ptr already covers it.
+	// Two shapes already self-balance and MUST be skipped:
+	//   - fat-array: arm runs retain_ptr on the buffer (data_retain_val
+	//     + extract retain_ptr - local data_release_val = net +1).
+	//     Doubling up here leaks one buffer reference per call.
+	//   - ADT: arm runs data_retain_val on the extracted variant value,
+	//     deep-retaining every inner pointer.  Doubling up used to mask
+	//     a latent under-retain in array-literal codegen (`[v]` for ADT
+	//     v didn't retain v's variant payload, see
+	//     exprs_arraylit.go's storeField).  Both fixed in tandem: the
+	//     deep retain transfers through `let v = try ...; items ++= [v]`
+	//     cleanly with the array-lit fix.
 	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
-		if !isFatArrayPtr(okVal.Type()) {
+		if !isFatArrayPtr(okVal.Type()) && !cg.isDataType(okVal.Type()) {
 			cg.emitRetain(okBlock, okVal)
 		}
 	}
