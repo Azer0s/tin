@@ -2,6 +2,7 @@ package codegen
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Azer0s/tin/ast"
 )
@@ -78,21 +79,58 @@ func (cg *CodeGen) ensureDefaultTraitMethods(concreteName string, traitExpr ast.
 // instKey is the unique suffix, e.g. "animal" for fn foo[t] with t->animal.
 // typeSubst maps type-param names to concrete struct names: {"t": "animal"}.
 // parseConcreteSubstName turns the string form of an inferred type
-// (e.g. "i64", "Show", "*Foo", "**Bar") into a structural ast.TypeExpr.
-// Leading `*` runs become nested *ast.PointerType wrappers around an
-// inner *ast.SimpleType; anything else lands as a bare SimpleType.
-// Used by monomorphizeFunc to expand `typeSubst[T] = "*Show"` into a
-// well-formed `*Show` (PointerType -> SimpleType) so the type
-// resolver sees structural pointer-ness rather than a SimpleType
-// whose name happens to start with `*`.
+// (e.g. "i64", "Show", "*Foo", "**Bar", "[string]") into a structural
+// ast.TypeExpr. Leading `*` runs become nested *ast.PointerType wrappers
+// around an inner *ast.SimpleType. The bracketed `[T]` form (what
+// llvmTypeName / prettyForExpr emit for fat arrays) lifts to a proper
+// *ast.ArrayType so downstream typeExprCanonicalKey produces the same
+// `[]T` canonical key as the AST-driven path. Without this lift the inner
+// name `[string]` would survive as a SimpleType and the canonical key
+// (which echoes SimpleType names verbatim) would diverge into
+// `Result__[string]__...` while the matching return-type annotation
+// renders `Result__[]string__...` -- two distinct named structs with the
+// same shape that no longer compare Equal in LLVM.
 func parseConcreteSubstName(name string) ast.TypeExpr {
+	// Reject obviously-garbage inputs early.  Empty / star-only /
+	// bracket-only canon strings would otherwise materialize as a
+	// SimpleType with an empty name (or wrapped in pointers / arrays),
+	// silently flowing into downstream type lookup and resolving to
+	// "undefined type" diagnostics in unrelated locations.  Force the
+	// failure here with a SimpleType whose name advertises the cause.
+	if name == "" {
+		return &ast.SimpleType{Name: "_empty_subst"}
+	}
+
 	stars := 0
 
 	for stars < len(name) && name[stars] == '*' {
 		stars++
 	}
 
-	var t ast.TypeExpr = &ast.SimpleType{Name: name[stars:]}
+	rest := name[stars:]
+
+	if rest == "" || rest == "[]" {
+		return &ast.SimpleType{Name: "_empty_subst"}
+	}
+
+	var t ast.TypeExpr
+
+	switch {
+	case strings.HasPrefix(rest, "[]"):
+		// Canonical-key form for fat arrays from typeExprCanonicalKey
+		// (`[]string`, `[]Tuple__a__b`).  Lift back to an ArrayType so
+		// downstream re-canonicalization produces the same form rather
+		// than a leaf SimpleType named literally `[]string`.
+		t = &ast.ArrayType{Elem: parseConcreteSubstName(rest[2:]), Size: -1}
+	case len(rest) >= 2 && rest[0] == '[' && rest[len(rest)-1] == ']':
+		// Bracketed source-form (`[string]`) -- e.g. from llvmTypeName /
+		// prettyForExpr.  Same lift to ArrayType so both encodings
+		// collapse to one canonical shape in the monomorphization key.
+		t = &ast.ArrayType{Elem: parseConcreteSubstName(rest[1 : len(rest)-1]), Size: -1}
+	default:
+		t = &ast.SimpleType{Name: rest}
+	}
+
 	for i := 0; i < stars; i++ {
 		t = &ast.PointerType{Elem: t}
 	}

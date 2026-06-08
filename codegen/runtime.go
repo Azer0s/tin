@@ -109,6 +109,34 @@ func (cg *CodeGen) emitStructFieldRetain(block *ir.Block, fieldVal value.Value) 
 			}
 		}
 	}
+	// Fat array whose elements carry deep RC (strings, ADT variants holding
+	// strings, nested arrays).  Deep retain mirrors the deep release the
+	// element type's release helper performs at buffer-RC-0.  Pre-cleanup
+	// note: an earlier draft used only a buffer retain, which UAFs the
+	// .map(...) chains that aliased strings out of variant payloads
+	// after the source's scope-release ran.  The deep retain leaks in
+	// the strict struct-copy case but the alternative is the UAF; a
+	// proper fix needs flow-aware ownership analysis (tracked separately).
+	if isFatArrayPtr(t) {
+		if st, ok := t.(*irtypes.StructType); ok && len(st.Fields) == 3 {
+			if pt, ok2 := st.Fields[0].(*irtypes.PointerType); ok2 {
+				elemType := pt.ElemType
+				if cg.elemNeedsRelease(elemType) {
+					dataPtr := block.NewExtractValue(fieldVal, 0)
+					length := block.NewExtractValue(fieldVal, 1)
+					dataPtrI8 := block.NewBitCast(dataPtr, irtypes.I8Ptr)
+					block.NewCall(cg.ensureRetainPtr(), dataPtrI8)
+
+					elemSize := cg.llvmSizeOf(block, elemType)
+					retainFn := cg.ensureElemRetainHelper(elemType)
+					retainFnI8 := block.NewBitCast(retainFn, irtypes.I8Ptr)
+					block.NewCall(cg.ensureForeachStructElemRetain(), dataPtrI8, length, elemSize, retainFnI8)
+
+					return
+				}
+			}
+		}
+	}
 
 	cg.emitRetain(block, fieldVal)
 }
@@ -277,6 +305,16 @@ func (cg *CodeGen) emitReleaseInner(block *ir.Block, val value.Value, skipDeinit
 				}
 
 				if pt2, isPtr := elemType.(*irtypes.PointerType); isPtr {
+					// [volatile *T]: elements are rc-opted-out raw pointers (the C/extern
+					// escape hatch). Stores into the slot don't retain, so the per-element
+					// release walk would corrupt the rc of whatever the pointer aliases.
+					// Drop the outer buffer's rc only.
+					if isVolatilePtr(pt2) {
+						block.NewCall(cg.ensureReleasePtr(), dataPtrI8)
+
+						return
+					}
+
 					// [*T]: check if the inner type T has RC fields that need
 					// deep release (load T, release its fields, free the block).
 					if cg.elemNeedsRelease(pt2.ElemType) {

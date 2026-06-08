@@ -528,6 +528,125 @@ func (p *Parser) parseTypeArgList() ([]ast.TypeExpr, error) {
 // otherwise a plain StringLit.
 func ParseStringInterp(s string) (ast.Node, error) { return parseStringInterp(s) }
 
+// ParseBacktickInterp parses a backtick-template body's content. Like
+// ParseStringInterp it splits on `{expr}` slots, but `{` preceded by an
+// identifier character is treated as a struct-literal or block brace
+// (e.g. `Foo{x: 1}` is not an interp slot) and the matching `}` is
+// found via depth tracking so nested braces don't trip the scan. Used
+// by BacktickLit codegen so CTFE macros can emit struct/block bodies
+// with embedded {param} interp slots.
+func ParseBacktickInterp(s string) (ast.Node, error) {
+	isIdentCont := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '_'
+	}
+
+	if !strings.Contains(s, "{") {
+		return &ast.StringLit{Value: s}, nil
+	}
+
+	var parts []ast.StringPart
+
+	i := 0
+	literalStart := 0
+
+	flushLiteral := func(end int) {
+		if end > literalStart {
+			parts = append(parts, ast.StringPart{Str: s[literalStart:end]})
+		}
+	}
+
+	for i < len(s) {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) && (s[i+1] == '{' || s[i+1] == '}') {
+			// `\{` / `\}` escape: emit the brace as literal text, skip both chars.
+			flushLiteral(i)
+			parts = append(parts, ast.StringPart{Str: string(s[i+1])})
+			i += 2
+			literalStart = i
+
+			continue
+		}
+
+		if c != '{' {
+			i++
+
+			continue
+		}
+		// Struct-literal / block brace (preceded by ident char): keep literal.
+		if i > 0 && isIdentCont(s[i-1]) {
+			i++
+
+			continue
+		}
+		// Interp slot: flush literal prefix, then find matching `}` with depth.
+		flushLiteral(i)
+
+		depth := 1
+		j := i + 1
+
+		for j < len(s) && depth > 0 {
+			switch s[j] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+
+			if depth == 0 {
+				break
+			}
+
+			j++
+		}
+
+		if depth != 0 {
+			literalStart = i
+
+			break
+		}
+
+		exprSrc := s[i+1 : j]
+
+		fmtSpec := ""
+		if colonIdx := findFormatColon(exprSrc); colonIdx >= 0 {
+			fmtSpec = exprSrc[colonIdx+1:]
+			exprSrc = exprSrc[:colonIdx]
+		}
+
+		l := newInlineLexer(exprSrc)
+
+		toks, err := l.Tokenize()
+		if err != nil {
+			return nil, fmt.Errorf("interpolation error in {%s}: %w", exprSrc, err)
+		}
+
+		rp := New(toks, "<interp>")
+
+		expr, err := rp.parseExpr()
+		if err != nil {
+			return nil, fmt.Errorf("interpolation error in {%s}: %w", exprSrc, err)
+		}
+
+		parts = append(parts, ast.StringPart{IsExpr: true, Expr: expr, Format: fmtSpec})
+
+		i = j + 1
+		literalStart = i
+	}
+
+	flushLiteral(len(s))
+
+	if len(parts) == 0 {
+		return &ast.StringLit{Value: s}, nil
+	}
+
+	if len(parts) == 1 && !parts[0].IsExpr {
+		return &ast.StringLit{Value: parts[0].Str}, nil
+	}
+
+	return &ast.InterpolatedString{Parts: parts}, nil
+}
+
 // findFormatColon finds the index of a single ':' in s that acts as a format
 // specifier separator, skipping '::' (scope-access operator).
 // Returns -1 if no such colon is found.
@@ -631,6 +750,30 @@ func parseStringInterp(s string) (ast.Node, error) {
 
 	if len(parts) == 1 && !parts[0].IsExpr {
 		return &ast.StringLit{Value: parts[0].Str}, nil
+	}
+	// If every part is a literal string fragment (no interp), the result
+	// is really a plain string -- consolidate into a single StringLit so
+	// downstream type checks (isCodeFragmentArg, %q printing, etc.) see
+	// a simple string value instead of a multi-part InterpolatedString.
+	// Happens for inputs like `"\{x\}"` where brace escapes create
+	// fragmented literal-only parts.
+	allLiteral := true
+
+	for _, p := range parts {
+		if p.IsExpr {
+			allLiteral = false
+
+			break
+		}
+	}
+
+	if allLiteral {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Str)
+		}
+
+		return &ast.StringLit{Value: sb.String()}, nil
 	}
 
 	return &ast.InterpolatedString{Parts: parts}, nil

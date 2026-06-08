@@ -25,7 +25,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) required by tin codegen
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev libsqlite3-dev
           clang --version
           opt --version | head -2
           ld.lld --version
@@ -54,6 +54,12 @@ jobs:
 
       - name: Run libs/blas tests under valgrind
         run: ./tin test --valgrind libs/blas/...
+
+      - name: Run libs/sqlite tests
+        run: ./tin test libs/sqlite/...
+
+      - name: Run libs/sqlite tests under valgrind
+        run: ./tin test --valgrind libs/sqlite/...
 
       - name: Run fiber example tests
         run: |
@@ -155,7 +161,7 @@ jobs:
       - name: Install clang + LLVM tools (opt + lld) + valgrind
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev
+          sudo apt-get install -y clang lld llvm valgrind libunwind-dev libdw-dev libmimalloc-dev libopenblas-dev libsqlite3-dev
           clang --version
           opt --version | head -2
           ld.lld --version
@@ -178,6 +184,12 @@ jobs:
 
       - name: Run libs/blas tests under valgrind
         run: ./tin test --valgrind libs/blas/...
+
+      - name: Run libs/sqlite tests
+        run: ./tin test libs/sqlite/...
+
+      - name: Run libs/sqlite tests under valgrind
+        run: ./tin test --valgrind libs/sqlite/...
 
       - name: Run fiber example tests
         run: |

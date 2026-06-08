@@ -143,6 +143,22 @@ typedef struct {
     // Set to 1 when _tin_fiber_get_panic_msg reads a non-NULL panic_msg.
     // Used at shutdown to detect fire-and-forget panics nobody awaited.
     int      panic_checked;
+    // Parent-routed panic mailbox.  When a child fiber finishes with an
+    // unhandled panic, _route_pending_panic_to_ancestor walks the
+    // spawn_parent_pid chain and CAS-installs the panic msg into the
+    // first alive ancestor whose own mailbox is empty.  That ancestor's
+    // next autoyield reads this slot and re-raises the panic in its
+    // own defer context (catchable via defer + recover()).  Replaces
+    // the old "global _has_unhandled_panics flag + table walk" design
+    // whose flag-stale-after-await race made the back-edge re-raise
+    // flaky on ARM64 valgrind (any unrelated fiber's slow path could
+    // self-clear the stale flag and mask the next real panic).
+    //
+    // _Atomic so panic routing (set via CAS) and the autoyield read
+    // (load + take) are race-free without holding _table_mu.  Stored
+    // as the rc-managed ARC buffer pointer; the consumer must release
+    // it once handed to _tin_panic.
+    _Atomic(char *) pending_child_panic;
     // Set by _tin_fiber_spawn when this fiber spawns a child while running on a
     // worker.  Cleared by the worker loop at the start of each resume and again
     // when the yield path reads it.  Causes the first post-spawn yield to go to
@@ -230,6 +246,14 @@ static int64_t  _free_slots_cap = 0;
 // Gives _tin_fiber_check_panic an O(1) fast-path so the loop-edge check is
 // a single atomic load in the common (no panic) case.
 _Atomic int _has_unhandled_panics = 0;
+
+// Forward decls for the parent-routed panic mailbox helpers (definitions
+// live next to _tin_fiber_take_pending_panic further down).  Needed up
+// here because the two panic-finalize paths (_coro_inline_drive and
+// the worker loop's panic branch) call them many hundreds of lines
+// before the definitions appear in source order.
+static int  _route_pending_panic_to_ancestor(TinFiber *originator, char *msg);
+static void _drain_pending_panic_on_done(TinFiber *f);
 
 // Fiber struct pool: reuse TinFiber heap allocations instead of calloc/free on
 // every spawn+reclaim cycle.  FIBER_POOL_MAX caps the pool; the high-water mark
@@ -840,7 +864,18 @@ int _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl) {
         char *pmsg_buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
         memcpy(pmsg_buf, panicked, plen + 1);
         f->panic_msg = pmsg_buf;
-        atomic_store(&_has_unhandled_panics, 1);
+        // Hand the panic to the first alive ancestor whose mailbox is
+        // empty so the spawner's next back-edge re-raises it.  Falls
+        // back to the global flag (consumed only by the shutdown
+        // sweep) when the spawn chain is exhausted or all ancestors
+        // already have pending panics.
+        if (!_route_pending_panic_to_ancestor(f, pmsg_buf)) {
+            atomic_store(&_has_unhandled_panics, 1);
+        }
+        // Re-route any un-consumed child panic we'd parked in our
+        // mailbox -- we never reached the back-edge that would have
+        // taken it.
+        _drain_pending_panic_on_done(f);
         f->status    = FIBER_DONE;
         atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
         _fire_done_waiters(f);
@@ -861,6 +896,10 @@ int _tin_fiber_direct_resume(void *fib, int64_t pid, void *hdl) {
         }
         pthread_mutex_lock(&_table_mu);
         f->result = target_result;
+        // Re-route any un-consumed child panic still in our mailbox
+        // to the next live ancestor; without this the panic would be
+        // orphaned (we're about to mark ourselves DONE).
+        _drain_pending_panic_on_done(f);
         f->status = FIBER_DONE;
         atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
         int had_waiters = (f->waiter_cnt > 0) || (f->os_waiter_cnt > 0) || f->prejoined;
@@ -1159,7 +1198,15 @@ static void *_worker_thread(void *_) {
             char *pmsg_buf = (char *)_tin_rc_alloc((int64_t)(plen + 1));
             memcpy(pmsg_buf, panicked, plen + 1);
             f->panic_msg = pmsg_buf;
-            atomic_store(&_has_unhandled_panics, 1);
+            // Hand the panic to the first alive ancestor whose mailbox
+            // is empty; fall back to the global shutdown-sink flag if
+            // none accept it.  See _route_pending_panic_to_ancestor.
+            if (!_route_pending_panic_to_ancestor(f, pmsg_buf)) {
+                atomic_store(&_has_unhandled_panics, 1);
+            }
+            // Re-route any un-consumed child panic still in our
+            // mailbox so it isn't lost when we mark ourselves DONE.
+            _drain_pending_panic_on_done(f);
             f->status    = FIBER_DONE;
             atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
             _fire_done_waiters(f);           // wake any fiber waiters
@@ -1190,6 +1237,10 @@ static void *_worker_thread(void *_) {
             }
             pthread_mutex_lock(&_table_mu);
             f->result = _coro_result;
+            // Re-route any un-consumed child panic on normal exit too;
+            // an awaiting parent should never lose a panic that was
+            // queued for us but never made it to a back-edge.
+            _drain_pending_panic_on_done(f);
             f->status = FIBER_DONE;
             atomic_store_explicit(&f->done_atomic, 1, memory_order_release);
             // Snapshot had_waiters BEFORE _fire_done_waiters resets waiter_cnt.
@@ -1534,10 +1585,17 @@ static int64_t _spawn_impl(void *hdl, int prejoined, uintptr_t caller_ip) {
     // walk terminates after this fiber's contribution.
     if (caller_ip != 0) {
         f->spawn_caller_ip = caller_ip;
-        if (_current_fib != NULL) {
-            f->spawn_parent_pid = _current_fib->pid;
-            f->spawn_parent_gen = _current_fib->generation;
-        }
+    }
+    // spawn_parent_pid/_gen are recorded unconditionally now: the
+    // parent-routed panic mailbox walks the chain at panic time to
+    // find the first alive ancestor with an empty slot.  The old code
+    // only set these when the stacktrace path was active (caller_ip
+    // != 0), which meant panics from a child spawned by a non-
+    // stacktrace fiber had nowhere to route and ended up as
+    // table-walk orphans.
+    if (_current_fib != NULL) {
+        f->spawn_parent_pid = _current_fib->pid;
+        f->spawn_parent_gen = _current_fib->generation;
     }
 
     _fibers[pid] = f;
@@ -1772,6 +1830,133 @@ void *_tin_fiber_get_result(int64_t pid) {
         _fiber_struct_reclaim(f);
     pthread_mutex_unlock(&_table_mu);
     return r;
+}
+
+// _route_pending_panic_to_ancestor walks the spawn_parent_pid chain of
+// `originator` (a fiber that just stored an unhandled panic_msg) and
+// installs `msg` into the first alive ancestor's pending_child_panic
+// mailbox via CAS.  Returns 1 if the panic was placed (handed off to
+// an ancestor's back-edge re-raise), 0 if no eligible ancestor exists
+// and the panic should fall through to shutdown's orphan sweep.
+//
+// `msg` is the ARC-managed buffer already retained for the mailbox's
+// slot; the caller does NOT release on success.  On no-eligible-
+// ancestor, the original f->panic_msg slot keeps its own +1 and
+// shutdown frees it.
+//
+// Caller must hold _table_mu.  The CAS uses memory_order_release so
+// the receiving fiber's acquire load on its mailbox sees a fully-
+// constructed pmsg buffer (the panic message bytes were written
+// before this routing step).
+//
+// Why walk: the immediate parent may have completed (DONE) before the
+// child got around to panicking; in that case we keep walking.  The
+// (pid, generation) check guards against parent-pid slot recycling.
+static int _route_pending_panic_to_ancestor(TinFiber *originator, char *msg) {
+    if (!originator || !msg) return 0;
+    int64_t p   = originator->spawn_parent_pid;
+    int64_t pgen = originator->spawn_parent_gen;
+    for (int hops = 0; p > 0 && hops < _fiber_cnt; hops++) {
+        TinFiber *anc = (p < _fiber_cnt) ? _fibers[p] : NULL;
+        if (!anc || anc->generation != pgen) {
+            // Slot was reused since this child was spawned -- the
+            // ancestor we wanted is gone.  Stop the walk; this is an
+            // orphan candidate.
+            return 0;
+        }
+        // Skip ancestors that already have a pending panic from
+        // another child; CAS only succeeds when the slot is NULL.
+        char *expected = NULL;
+        if (atomic_compare_exchange_strong_explicit(
+                &anc->pending_child_panic, &expected, msg,
+                memory_order_release, memory_order_relaxed)) {
+            _tin_retain((void *)msg);
+            // Hand the originator's "this panic is unhandled" duty to
+            // the ancestor's mailbox.  Without marking checked here,
+            // shutdown's orphan sweep would re-surface the same panic
+            // a second time after the ancestor's back-edge already
+            // consumed and recovered it.
+            originator->panic_checked = 1;
+            return 1;
+        }
+        // CAS failed: ancestor's mailbox occupied.  Walk further up
+        // so panics don't pile up at the immediate parent.
+        p    = anc->spawn_parent_pid;
+        pgen = anc->spawn_parent_gen;
+    }
+    return 0;
+}
+
+// _drain_pending_panic_on_done is called at fiber-completion (both
+// the panicked-fiber and normal-done arms of the worker loop) to
+// handle the case where a child's panic was routed into THIS fiber's
+// mailbox but the back-edge never had a chance to consume it: e.g.
+// the fiber returned normally before the next loop iteration, or
+// itself panicked first.  Take the mailbox atomically and re-route
+// up the spawn chain so the panic reaches the next live ancestor.
+//
+// Caller must hold _table_mu (so the originator-mark on success is
+// safe).  No-op when the mailbox is empty.  If the re-route walk
+// finds nothing, set _has_unhandled_panics so the shutdown sweep
+// surfaces the orphan; the mailbox buffer itself is released.
+static void _drain_pending_panic_on_done(TinFiber *f) {
+    if (!f) return;
+    char *msg = atomic_exchange_explicit(
+        &f->pending_child_panic, NULL, memory_order_acquire);
+    if (!msg) return;
+    if (!_route_pending_panic_to_ancestor(f, msg)) {
+        // No further ancestor accepted ownership.  Park the buffer
+        // on f->panic_msg if empty so shutdown's existing sweep can
+        // surface it; otherwise we already have something there and
+        // we just drop the extra reference.
+        if (!f->panic_msg) {
+            f->panic_msg = msg;
+            atomic_store(&_has_unhandled_panics, 1);
+            // panic_checked stays 0: shutdown should treat this as
+            // an orphan and crash the process.
+            return;
+        }
+    }
+    // _route_pending_panic_to_ancestor retained the msg for the new
+    // owner's slot (or panic_msg above held our +1); release this
+    // function's reference (the one we took out of the mailbox via
+    // atomic_exchange).
+    _tin_release((void *)msg);
+}
+
+// _tin_fiber_take_pending_panic: per-fiber back-edge re-raise hook.
+// Returns the message in the current fiber's pending_child_panic
+// mailbox (atomically taking ownership), or NULL when empty.  Called
+// from the codegen-emitted autoyield slow path; the message is the
+// ARC-managed buffer routed by _route_pending_panic_to_ancestor, and
+// the caller is expected to hand it to _tin_panic which will release
+// it via ARC.
+//
+// Replaces the old _tin_fiber_check_panic table-walk: each fiber
+// reads its own mailbox slot, never racing other observers, never
+// stealing siblings' panics, never tricked by a stale global flag.
+const char *_tin_fiber_take_pending_panic(void) {
+    if (!_current_fib) {
+        return NULL;
+    }
+    // Two-step take: cheap acquire-load first so the (vastly more
+    // common) empty-mailbox case doesn't pay for a locked xchg.  On
+    // x86 the load is a plain mov; only when there's actually a
+    // panic to take do we issue the locked exchange that hands
+    // ownership over.  Without this gating, tight autoyielding loops
+    // (jitter, mpmc) saw a ~7-8% regression vs the old global-flag
+    // load on x86 because every loop back-edge paid for a `lock
+    // xchg` against a contended cache line.
+    if (!atomic_load_explicit(&_current_fib->pending_child_panic,
+                              memory_order_acquire)) {
+        return NULL;
+    }
+    // Mailbox non-empty: take ownership via exchange.  Acquire
+    // pairs with the release CAS in _route_pending_panic_to_ancestor
+    // so the pmsg bytes constructed before routing are fully visible
+    // to whoever consumes msg next.
+    return atomic_exchange_explicit(
+        &_current_fib->pending_child_panic, NULL, memory_order_acquire);
 }
 
 // Returns the panic message of a completed fiber, or NULL if it completed normally.
@@ -2146,16 +2331,28 @@ void _tin_fiber_run(void) {
     // Check for fire-and-forget panics: fibers that panicked but were never
     // awaited.  Re-raise the first such panic on the main thread (fatal).
     // This matches Go semantics: an unrecovered goroutine panic kills the process.
+    //
+    // Two surfaces to scan:
+    //   1. panic_msg on a fiber whose panic was never claimed via
+    //      await or parent-mailbox routing (panic_checked stays 0).
+    //   2. pending_child_panic mailboxes that no fiber's back-edge
+    //      ever consumed (all ancestors died before the autoyield
+    //      observed the mailbox).  These were routed but orphaned.
     if (_fibers) {
         for (int64_t i = 1; i < _fiber_cnt; i++) {
-            if (_fibers[i] && _fibers[i]->panic_msg && !_fibers[i]->panic_checked) {
-                // Re-panic: will call exit(1) since we're on the main thread
-                // with no fiber catch mode active.
-                const char *msg = _fibers[i]->panic_msg;
-                _fibers[i]->panic_msg = NULL;  // prevent double-release below
+            TinFiber *cand = _fibers[i];
+            if (!cand) continue;
+            if (cand->panic_msg && !cand->panic_checked) {
+                const char *msg = cand->panic_msg;
+                cand->panic_msg = NULL;  // prevent double-release below
                 _tin_panic(msg);
-                // unreachable (exit(1) above), but needed for C:
-                return;
+                return;  // unreachable (exit(1) above), but needed for C
+            }
+            char *pending = atomic_exchange_explicit(
+                &cand->pending_child_panic, NULL, memory_order_acquire);
+            if (pending) {
+                _tin_panic(pending);
+                return;  // unreachable
             }
         }
     }

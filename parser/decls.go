@@ -665,10 +665,19 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 	anyPayload := false
 
 	for !p.check(lexer.DEDENT) && !p.check(lexer.EOF) {
-		// Methods (fn ...) can interleave with variants in the body.
-		// Useful for trait impl bodies on the ADT itself.
+		// Methods (fn ...) and static fns (static fn ...) can
+		// interleave with variants in the body.  Static fns are
+		// needed for `implicit[T]` registration to find the
+		// conversion -- genTraitVtables filters on `m.IsStatic`.
+		isStatic := false
+		if p.check(lexer.KW_STATIC) {
+			isStatic = true
+
+			p.advance()
+		}
+
 		if p.check(lexer.KW_FN) {
-			fn, err2 := p.parseFuncDecl(nil, false)
+			fn, err2 := p.parseFuncDecl(nil, isStatic)
 			if err2 != nil {
 				return nil, err2
 			}
@@ -680,6 +689,10 @@ func (p *Parser) parseDataDecl() (*ast.DataDecl, error) {
 			p.skipNewlines()
 
 			continue
+		}
+
+		if isStatic {
+			return nil, p.errAtTok(p.peek(), "data %s: `static` must be followed by `fn`", decl.Name)
 		}
 
 		v, err2 := p.parseDataVariant()

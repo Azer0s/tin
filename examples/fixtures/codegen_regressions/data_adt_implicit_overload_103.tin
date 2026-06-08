@@ -1,0 +1,28 @@
+// Regression: data ADTs declaring multiple `static fn ::implicit(...)`
+// overloads silently overwrote each other in the scope.  The parser
+// rejected `static fn` inside data blocks at all, and even after that
+// was fixed, scanOverloadedNamesPkg only handled StructDecl --
+// DataDecl methods never got marked as overloaded, so two
+// `static fn ::implicit(...)` shared one scope key and only the last
+// registered impl was reachable by `implicit` dispatch.
+//
+// Net effect pre-fix: `let v [Wrap] = [42, "alice"]` stored the
+// string element as Int with garbage, because the i64 impl was the
+// only one registered (or the only one that matched first).
+
+data Wrap (implicit[i64], implicit[string]) =
+  Int(v i64)
+  Text(v string)
+
+  static fn ::implicit(v i64) Wrap    = return Int(v)
+  static fn ::implicit(s string) Wrap = return Text(s)
+
+  fn show(this Wrap) string =
+    match this:
+      case Int(v):  return "int:{v}"
+      case Text(s): return "text:{s}"
+
+fn main() =
+  let xs [Wrap] = [42, "alice"]
+  for let i i64 = 0; i < len(xs); i = i + 1:
+    echo("ok ", xs[i].show())

@@ -86,7 +86,27 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 	// explicit `move x` exactly: emit a post-call release and mark
 	// the binding so its scope-exit release is elided.  Without the
 	// mark the scope exit would double-release.
+	//
+	// EXCEPTION (R4-A): for fat-array Identifier args, the post-call
+	// emitRelease walks elements and decrements their RC at buffer-rc-0.
+	// When the elements are RC-tracked pointers borrowed from sibling
+	// let-bindings still live in the enclosing scope (e.g. two array
+	// literals built from the same `let key`), that walk frees memory
+	// the sibling still references.  Anchor the value as a scope temp
+	// instead: release at scope exit, after all sibling uses are done.
 	if id, isID := astArg.(*ast.Identifier); isID && cg.implicitMoveSites[id] {
+		if isFatArrayPtr(pre.Type()) && cg.curScope != nil {
+			alloca := block.NewAlloca(pre.Type())
+			block.NewStore(pre, alloca)
+
+			name := fmt.Sprintf(".tmparr_%d", cg.strCount)
+			cg.strCount++
+			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isRC: true})
+			cg.markImplicitMoved(id.Name)
+
+			return
+		}
+
 		cg.emitRelease(block, pre)
 		cg.markImplicitMoved(id.Name)
 
@@ -169,6 +189,24 @@ func (cg *CodeGen) emitCallArgReleaseForRet(block *ir.Block, astArg ast.Node, pr
 			block.NewStore(pre, alloca)
 
 			name := fmt.Sprintf(".tmpfn_%d", cg.strCount)
+			cg.strCount++
+			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isRC: true})
+
+			return
+		}
+		// Fat-array literal passed inline as an arg: deferring release
+		// to scope exit avoids the post-call deep release walk freeing
+		// element strings that a still-live let-binding (e.g. `key`)
+		// also references.  Without this, two array literals built
+		// from the same let-bound rc-string see the second one read
+		// freed memory (R4-A).  Anchoring as a scope temp lets the
+		// enclosing scope's release sweep handle cleanup AFTER all
+		// downstream uses of the element bindings are done.
+		if _, isArrayLit := astArg.(*ast.ArrayLit); isArrayLit && isFatArrayPtr(pre.Type()) && cg.curScope != nil {
+			alloca := block.NewAlloca(pre.Type())
+			block.NewStore(pre, alloca)
+
+			name := fmt.Sprintf(".tmparr_%d", cg.strCount)
 			cg.strCount++
 			cg.curScope.set(name, &scopeEntry{val: alloca, isAlloc: true, isRC: true})
 

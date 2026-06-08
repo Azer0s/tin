@@ -89,8 +89,10 @@ func (cg *CodeGen) genExpr(block *ir.Block, node ast.Node) (value.Value, error) 
 		// If the content contains {expr} interpolations (used in CTFE macro bodies),
 		// expand them so that variable values are substituted at runtime.
 		// In non-CTFE macro context the expander unwraps this before codegen (see expandMacro).
+		// ParseBacktickInterp (not ParseStringInterp) is brace-aware: `Foo{x: {v}}`
+		// keeps `Foo{...}` as struct-lit text and only treats `{v}` as an interp slot.
 		if strings.Contains(e.Content, "{") {
-			node, err := parser.ParseStringInterp(e.Content)
+			node, err := parser.ParseBacktickInterp(e.Content)
 			if err == nil {
 				if interp, ok := node.(*ast.InterpolatedString); ok {
 					// Wrap interpolated parts with backtick delimiters.

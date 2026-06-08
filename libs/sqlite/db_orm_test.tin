@@ -1,0 +1,265 @@
+// libs/sqlite/db_orm_test - integration tests for stdlib/db's
+// trait-driven CRUD against the sqlite driver.  Each test creates
+// and drops its own table for re-run determinism.
+
+use sqlite
+use db
+use assert
+
+const TEST_DB = "/tmp/tin_db_orm_test.db"
+
+struct user =
+  id    i64    @"db:id"
+  name  string @"db:name"
+  score f64    @"db:score"
+
+struct product =
+  id   i64    @"db:id"
+  sku  string @"db:product_code"   // tag renames column
+  pwd  string @"db:-"              // tag skips field
+
+fn open_test() sqlite::Connection =
+  return sqlite::open(TEST_DB).unwrap()
+
+test "db::insert + db::find_by_id round-trip" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 1, name: "alice", score: 4.5})
+  match db::find_by_id[user](c, 1):
+    case Ok(u):
+      assert::ok(u.id == 1)
+      assert::ok(u.name == "alice")
+      assert::ok(u.score == 4.5)
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::find_by_id Err on missing row" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  match db::find_by_id[user](c, 999):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db::all returns every inserted row in driver order" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _1  i64 = db::insert[user](c, user{id: 1, name: "alice", score: 1.0})
+  let _2  i64 = db::insert[user](c, user{id: 2, name: "bob",   score: 2.0})
+  let _3  i64 = db::insert[user](c, user{id: 3, name: "carol", score: 3.0})
+  match db::all[user](c):
+    case Ok(rows):
+      assert::ok(len(rows) == 3)
+      assert::ok(rows[0].name == "alice")
+      assert::ok(rows[1].name == "bob")
+      assert::ok(rows[2].name == "carol")
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::update changes a row WHERE pk = id" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 7, name: "old", score: 0.0})
+  let _u  i64 = db::update[user](c, user{id: 7, name: "new", score: 9.0})
+  match db::find_by_id[user](c, 7):
+    case Ok(u):
+      assert::ok(u.name == "new")
+      assert::ok(u.score == 9.0)
+    case Err(_): assert::ok(false)
+  c.close()
+
+test "db::delete removes the row" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert[user](c, user{id: 5, name: "doomed", score: 0.0})
+  let _dl i64 = db::delete[user](c, 5)
+  match db::find_by_id[user](c, 5):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db column-rename tag (@\"db:product_code\") drives SQL column name" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS product", [])
+  let _ct i64 = c.exec("CREATE TABLE product (id INTEGER, product_code TEXT)", [])
+  let _i  i64 = db::insert[product](c, product{id: 1, sku: "ABC-123", pwd: "secret"})
+  match db::find_by_id[product](c, 1):
+    case Ok(p):
+      assert::ok(p.sku == "ABC-123")
+      assert::ok(p.pwd == "")    // skipped field stays at zero
+    case Err(_): assert::ok(false)
+  c.close()
+
+// `@"db:colname,pk"` lets a struct name its PK field something other
+// than `id` and still drive find_by_id / update / delete via the
+// tag-derived PK column.
+struct account =
+  account_id i64    @"db:account_id,pk"
+  email      string @"db:email"
+  balance    i64    @"db:balance"
+
+test "db @\"db:colname,pk\" tag picks non-`id` PK field" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS account", [])
+  let _ct i64 = c.exec("CREATE TABLE account (account_id INTEGER, email TEXT, balance INTEGER)", [])
+  let _i  i64 = db::insert[account](c, account{account_id: 42, email: "a@b.c", balance: 100})
+  match db::find_by_id[account](c, 42):
+    case Ok(a):
+      assert::ok(a.account_id == 42)
+      assert::ok(a.email == "a@b.c")
+      assert::ok(a.balance == 100)
+    case Err(_): assert::ok(false)
+  let _u i64 = db::update[account](c, account{account_id: 42, email: "x@y.z", balance: 500})
+  match db::find_by_id[account](c, 42):
+    case Ok(a):
+      assert::ok(a.email == "x@y.z")
+      assert::ok(a.balance == 500)
+    case Err(_): assert::ok(false)
+  let _dl i64 = db::delete[account](c, 42)
+  match db::find_by_id[account](c, 42):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db::insert_into uses the explicit table name" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS users_v2", [])
+  let _ct i64 = c.exec("CREATE TABLE users_v2 (id INTEGER, name TEXT, score REAL)", [])
+  let _i  i64 = db::insert_into[user](c, "users_v2", user{id: 1, name: "z", score: 0.0})
+  match db::find_by_id_in[user](c, "users_v2", 1):
+    case Ok(u): assert::ok(u.name == "z")
+    case Err(_): assert::ok(false)
+  c.close()
+
+// Unsigned and bool field round-trip: value_of / row_into previously
+// only knew about i64/i32/i16/i8/f64/f32/string/none, so a u32 / bool
+// field would silently write NULL on INSERT and read back as zero on
+// SELECT.  The extended type list covers the integer-width family
+// uniformly and lifts bool through Int(0/1).
+
+struct prefs =
+  id       i64    @"db:id,pk"
+  count    u32    @"db:count"
+  active   bool   @"db:active"
+
+test "db handles unsigned + bool struct fields" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS prefs", [])
+  let _ct i64 = c.exec("CREATE TABLE prefs (id INTEGER, count INTEGER, active INTEGER)", [])
+  let _i  i64 = db::insert[prefs](c, prefs{id: 1, count: 42 as u32, active: true})
+  match db::find_by_id[prefs](c, 1):
+    case Ok(p):
+      assert::equals(42 as u32, p.count)
+      assert::ok(p.active)
+    case Err(_): assert::ok(false)
+  c.close()
+
+// update_in's SET-list filter now combines field-name and column-name
+// checks: the PK *field* (by struct field name) is excluded, and any
+// non-PK field that aliases the PK *column* is also excluded so the
+// UPDATE can't silently corrupt the primary key.  Two fields tagged
+// onto the same column is itself a struct-modelling bug, but the test
+// pins the safe degenerate behavior (label still updates, PK survives,
+// shadow is silently dropped).
+struct dupcol =
+  id    i64    @"db:id,pk"
+  shadow string @"db:id"      // accidentally tagged onto the PK column
+  label string @"db:label"
+
+// The *_in entry points used to splice their `table` argument straight
+// into SQL, so an attacker-controlled string could end the statement
+// and chain a second one ("user; DROP TABLE user;--").  valid_sql_-
+// identifier rejects anything outside [A-Za-z_][A-Za-z0-9_]* (plus a
+// single optional schema-dot), short-circuiting before driver dispatch.
+test "db *_in entry points reject SQL-injection attempts in `table`" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS user", [])
+  let _ct i64 = c.exec("CREATE TABLE user (id INTEGER, name TEXT, score REAL)", [])
+  // Insert returns -1 sentinel on rejection (rather than swallowing
+  // the bad name into a driver-level SQL error).
+  let bad i64 = db::insert_into[user](c, "user; DROP TABLE user;--",
+                                       user{id: 1, name: "x", score: 0.0})
+  assert::equals(-1 as i64, bad)
+  match db::find_by_id_in[user](c, "user; DROP TABLE user;--", 1):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  // Sanity: legitimate name still round-trips.
+  let _i  i64 = db::insert_into[user](c, "user", user{id: 1, name: "ok", score: 0.0})
+  match db::find_by_id_in[user](c, "user", 1):
+    case Ok(u):  assert::equals("ok", u.name)
+    case Err(_): assert::ok(false)
+  c.close()
+
+// pk_col / pk_field_name used to fall back to literal "id" when a
+// struct had neither a @"db:pk" tag nor a field named `id`.  update_in
+// then called getfield(v, "id"), which returns a zero `any` whose
+// type-atom is garbage; value_of crashed on the unknown atom and the
+// process aborted silently.  The fix is to return "" from the pk
+// helpers and short-circuit each *_in callsite on the empty PK.
+struct no_pk =
+  name string @"db:name"
+  body string @"db:body"
+
+// Reserved SQL keywords as table or column names used to silently
+// fail: db_insert_row interpolated the identifier unquoted, sqlite
+// rejected the statement, and the driver returned -1.  Quoting
+// table/pk/cols via "..." (with embedded " -> "") makes reserved
+// words round-trip cleanly.  Same for column names with unusual
+// chars from a struct tag (e.g. dashes).
+struct order =
+  id    i64    @"db:id,pk"
+  group string @"db:group"
+
+test "db handles reserved SQL keywords as struct + column names" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS \"order\"", [])
+  let _ct i64 = c.exec("CREATE TABLE \"order\" (id INTEGER, \"group\" TEXT)", [])
+  let n  i64 = db::insert[order](c, order{id: 1, group: "alpha"})
+  assert::equals(1 as i64, n)
+  match db::find_by_id[order](c, 1):
+    case Ok(o):
+      assert::equals(1 as i64, o.id)
+      assert::equals("alpha", o.group)
+    case Err(_): assert::ok(false)
+  let _ = c.exec("DROP TABLE \"order\"", [])
+  c.close()
+
+test "db id-based ops short-circuit on structs with no resolvable PK" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS no_pk", [])
+  let _ct i64 = c.exec("CREATE TABLE no_pk (name TEXT, body TEXT)", [])
+  // insert is OK without a PK -- the row is still well-formed.
+  let _i i64 = db::insert_into[no_pk](c, "no_pk", no_pk{name: "a", body: "b"})
+  // update / delete need pk to build WHERE; -1 sentinel rather than
+  // crashing through getfield on a missing "id" field.
+  let u  i64 = db::update_in[no_pk](c, "no_pk", no_pk{name: "a", body: "b2"})
+  assert::equals(-1 as i64, u)
+  let dl i64 = db::delete_in[no_pk](c, "no_pk", 1)
+  assert::equals(-1 as i64, dl)
+  // find_by_id_in / all_in surface Err with a diagnostic message
+  // rather than running a malformed SELECT.
+  match db::find_by_id_in[no_pk](c, "no_pk", 1):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  match db::all_in[no_pk](c, "no_pk"):
+    case Ok(_):  assert::ok(false)
+    case Err(_): assert::ok(true)
+  c.close()
+
+test "db update is safe when a non-PK field aliases the PK column" =
+  let c = open_test()
+  let _d  i64 = c.exec("DROP TABLE IF EXISTS dupcol", [])
+  let _ct i64 = c.exec("CREATE TABLE dupcol (id INTEGER, label TEXT)", [])
+  let _i  i64 = db::insert[dupcol](c, dupcol{id: 1, shadow: "ignored", label: "before"})
+  let _u  i64 = db::update[dupcol](c, dupcol{id: 1, shadow: "x", label: "after"})
+  match db::find_by_id[dupcol](c, 1):
+    case Ok(d):
+      assert::equals(1 as i64, d.id)        // PK preserved
+      assert::equals("after", d.label)      // non-aliasing field updates
+    case Err(_): assert::ok(false)
+  c.close()

@@ -1,0 +1,42 @@
+// bench/sqlite/tin_inserts_stmt - low-level API: prepare once, then
+// stmt.exec_is per row.  Skips the per-call stmt cache lookup that
+// the high-level db.exec_is path does, at the cost of explicit
+// prepare/close + Stmt holding.
+//
+// Usage: ./tin_inserts_stmt N
+
+use sqlite
+use strings
+use measure
+
+const DB_PATH = "/tmp/tin_sqlite_bench_stmt.db"
+
+fn main(args [string]) =
+  if len(args) < 2:
+    echo("usage: tin_inserts_stmt N")
+    return
+
+  let total i64 = strings::atol(args[1])
+
+  let db = sqlite::open(DB_PATH).unwrap()
+  let _w  i64 = db.exec("PRAGMA journal_mode=WAL", [])
+  let _s  i64 = db.exec("PRAGMA synchronous=NORMAL", [])
+  let _d  i64 = db.exec("DROP TABLE IF EXISTS bench", [])
+  let _c  i64 = db.exec("CREATE TABLE bench (i INTEGER, name TEXT)", [])
+  let _b  i64 = db.exec("BEGIN", [])
+
+  let stmt = db.prepare("INSERT INTO bench (i, name) VALUES (?, ?)").unwrap()
+
+  let t0 i64 = measure::now_us()
+  for let i i64 = 0; i < total; i = i + 1:
+    let _n i64 = stmt.exec_is(i, "row")
+  let t1 i64 = measure::now_us()
+
+  stmt.close()
+  let _co i64 = db.exec("COMMIT", [])
+
+  let elapsed_us i64 = t1 - t0
+  let ops_per_sec i64 = total * 1000000 / elapsed_us
+  echo("n={total} elapsed_us={elapsed_us} ops_per_sec={ops_per_sec}")
+
+  db.close()

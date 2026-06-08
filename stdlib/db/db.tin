@@ -1,0 +1,492 @@
+// stdlib/db - typed CRUD over any SQL driver.
+//
+// Drivers expose:
+//   trait Conn  - exec (no-row) and query (rows)
+//   struct RowSet - concrete per-row accessor, drivers build via to_rowset
+//
+// CRUD generics use compile-time reflection (fieldnames / fieldtypes /
+// fieldtag / getfield / setfield) to translate any struct T into SQL:
+//
+//   db::insert[T](c, value)
+//   db::find_by_id[T](c, id)
+//   db::all[T](c)
+//   db::update[T](c, value)
+//   db::delete[T](c, id)
+//
+// Default table name = struct name (typeof(v) as string).  The
+// `*_in` variants take an explicit table name if you want to override.
+//
+// Field tags follow the json package's convention:
+//   @"db:column"  - rename the column     (default: field name)
+//   @"db:-"       - skip the field
+//
+// The PK is the field named `id` (after tag remapping).  find_by_id /
+// update / delete all WHERE on it.  Multi-column PKs, joins, and
+// transactions are deliberately out of scope for v1.
+
+use rc
+use str
+use errors
+use result
+use { Result } from result
+
+// Value: driver-agnostic param.  data-ADT with implicit lifts so call
+// sites can pass bare primitives:  `c.exec("...", [id, name])`.
+// Variants are prefixed (IntVal etc) so they don't collide with
+// driver-side variants of the same shape (e.g. sqlite's SqlValue.Int).
+data Value (implicit[i64], implicit[f64], implicit[string]) =
+  IntVal(v i64)
+  RealVal(v f64)
+  TextVal(v string)
+  NullVal
+
+  static fn ::implicit(v i64) Value    = return IntVal(v)
+  static fn ::implicit(v f64) Value    = return RealVal(v)
+  static fn ::implicit(s string) Value = return TextVal(s)
+
+// RowSet: materialised SELECT result, indexed by (row, col).  Drivers
+// pick the layout; the trait only mandates random access.
+trait RowSet =
+  fn count(this RowSet) i64                              = virtual
+  fn cols(this RowSet) i64                               = virtual
+  fn get_i64(this RowSet, row i64, col i64) i64          = virtual
+  fn get_f64(this RowSet, row i64, col i64) f64          = virtual
+  fn get_string(this RowSet, row i64, col i64) string    = virtual
+  fn is_null(this RowSet, row i64, col i64) bool         = virtual
+
+// Conn: driver connection.  Two layers:
+//
+//   * SQL escape hatch (exec / query) -- usable directly when the
+//     driver speaks SQL; KV drivers can implement these by panicking
+//     or returning Err.
+//   * Row-level CRUD primitives (db_insert_row / db_find_row / ...)
+//     -- the CRUD generics dispatch through these so drivers without
+//     SQL (Redis, future in-memory stores, ...) can implement the
+//     same `db::insert[T]` / `db::find_by_id[T]` surface natively
+//     (HSET / HGETALL / etc).  SQL drivers build the matching SQL
+//     internally; KV drivers translate to their command vocabulary.
+trait Conn =
+  fn exec(this *Conn, sql string, params [Value]) i64                            = virtual
+  fn query(this *Conn, sql string, params [Value]) Result[RowSet, errors::Err]   = virtual
+
+  fn db_insert_row(this *Conn, table string, pk_col string, cols [string], vals [Value]) i64                                                                = virtual
+  fn db_find_row(this *Conn, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err]                                     = virtual
+  fn db_all_rows(this *Conn, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err]                                                   = virtual
+  fn db_update_row(this *Conn, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64                                                  = virtual
+  fn db_delete_row(this *Conn, table string, pk_col string, pk_val Value) i64                                                                               = virtual
+
+// db_column maps a struct field to its SQL column.  Tag grammar:
+//
+//   (no tag)              - column = field name, not PK
+//   @"db:-"               - skip the field entirely
+//   @"db:pk"              - column = field name, PK
+//   @"db:colname"         - column = colname, not PK
+//   @"db:colname,pk"      - column = colname, PK
+//
+// Returns the SQL column name, or "" when the field should be skipped.
+// `db_is_pk` parses the same tag for the ,pk marker.
+fn db_column(field_name string, tag string) string =
+  if len(tag) == 0:
+    return field_name
+  if len(tag) <= 3 || str::strncmp(tag, "db:", 3) != 0:
+    return field_name
+  if len(tag) == 4 && tag[3] == @'-':
+    return ""
+  // Body starts at index 3.  A bare "pk" body means "column is the
+  // field name, this is the PK" - extract no column, fall back to the
+  // field's own name.  A "name,pk" body means "column is `name`, PK"
+  // - extract everything up to (but not including) the comma.
+  let body_start i64 = 3
+  let body_len   i64 = len(tag) - body_start
+  if body_len == 2 && tag[body_start] == @'p' && tag[body_start + 1] == @'k':
+    return field_name
+  let key = ""
+  let i i64 = body_start
+  for i < len(tag):
+    if tag[i] == @',':
+      break
+    key = key ++ tag[i]
+    i = i + 1
+  if len(key) == 0:
+    return field_name
+  return key
+
+// db_is_pk returns true when the tag body ends with the `,pk` marker
+// (or is exactly `pk`).  Used by `pk_col[T]` to find the PK field.
+fn db_is_pk(tag string) bool =
+  if len(tag) <= 3 || str::strncmp(tag, "db:", 3) != 0:
+    return false
+  let body_start i64 = 3
+  let n          i64 = len(tag)
+  // bare "pk" body.
+  if n - body_start == 2 && tag[body_start] == @'p' && tag[body_start + 1] == @'k':
+    return true
+  // "...,pk" suffix.
+  if n >= 6 && tag[n - 3] == @',' && tag[n - 2] == @'p' && tag[n - 1] == @'k':
+    return true
+  return false
+
+// value_to_string stringifies a Value for drivers that store
+// records as flat strings (e.g. Redis hashes).  Mirrors `value_of`'s
+// width-classed variant choices: integers / floats / strings keep
+// their printable form; Null lands as an empty string (driver must
+// track null-ness separately, since "" is a valid stored value).
+fn value_to_string(v Value) string =
+  match v:
+    case IntVal(n):  return "{n}"
+    case RealVal(x): return f64_round_trip(x)
+    case TextVal(s): return s
+    case NullVal:    return ""
+
+// f64_round_trip formats x with %.17g so strtod() rebuilds the exact
+// same bit-pattern.  Plain "{x}" interpolation uses %g (6 sig digits)
+// which would silently lose precision on hash-backed drivers (Redis).
+fn f64_round_trip(x f64) string =
+  let cstr *char = _tin_f64_to_cstr_round_trip(x)
+  return str::strdup(cstr) as string
+
+fn _tin_f64_to_cstr_round_trip(v f64) *char = extern("_tin_f64_to_cstr_round_trip")
+
+// is_null returns true when v is the NullVal variant.  Drivers that
+// distinguish "stored as empty string" from "absent" (e.g. Redis
+// hashes, which can't carry a real NULL) use this to skip null
+// columns at insert/update time and rely on field-absence to round-
+// trip the null on read.
+fn is_null(v Value) bool =
+  match v:
+    case NullVal: return true
+    default:      return false
+
+// value_of promotes a getfield-returned `any` to a Value.  Width-
+// classed integers (signed and unsigned) land in Int; floats in Real;
+// strings in Text; bool widens to Int(0/1) so drivers that don't have
+// a native bool slot (sqlite, redis) still round-trip; the unit/none
+// type maps to SQL NULL.
+//
+// KNOWN LIMITATION: Tin's `any` boxing currently sign-extends every
+// integer into the i64 payload and the type-atom collapses unsigned
+// widths to their signed name (u8/u16/u32/u64 all report as i8/i16/
+// i32/i64).  A field holding u8(200) lands here as 'i8 with the
+// SEXT'd i64 value -56, and that wrong-but-bit-preserving value gets
+// persisted into the column.  Tin-side round-trip masks the corruption
+// (setfield narrows back to u8(200)), but any external reader sees a
+// negative number.  The proper fix is in codegen/helpers_print.go
+// boxToAny (an unsigned hint that switches sext→zext) plus codegen/
+// reflect.go buildTypeIDToNameTable (distinct unsigned atoms).  Tracked
+// as a follow-up; for now: small-positive unsigned values round-trip
+// fine, but unsigned values with the high bit set are corrupted on
+// disk and should be modelled as i64 in the struct if cross-tool
+// fidelity matters.
+fn value_of(v any) Value =
+  let t = typeof(v)
+  if t == 'i64 || t == 'i32 || t == 'i16 || t == 'i8 || t == 'isize:
+    return IntVal(v as i64)
+  if t == 'u64 || t == 'u32 || t == 'u16 || t == 'u8 || t == 'usize || t == 'byte || t == 'char:
+    return IntVal(v as i64)
+  if t == 'bool:
+    if v as bool:
+      return IntVal(1)
+    return IntVal(0)
+  if t == 'f64 || t == 'f32:
+    return RealVal(v as f64)
+  if t == 'string:
+    return TextVal(v as string)
+  if t == 'none:
+    return NullVal
+  // Unsupported field type (struct, tuple, fat array, fn-ptr,
+  // user-defined data ADT...).  Previously fell through to NullVal,
+  // which silently dropped the field from INSERT/UPDATE -- the
+  // struct's data was never persisted and the corruption was
+  // invisible until someone read the DB with an external tool.
+  // Aborting at insert time surfaces the modelling bug.
+  // {atom} interpolation currently prints the raw u32 typeID rather
+  // than the atom name -- cast via `as string` to get the printable
+  // form ("Foo" for 'Foo).
+  let tname string = t as string
+  _tin_db_abort("db::value_of: unsupported field type: " ++ tname ++ "; only width-classed integers, bool, f32/f64, string, and none are persistable")
+  return NullVal
+
+fn _tin_db_abort(msg string) = extern("_tin_assert_abort")
+
+// table_for returns the default table name for T = the struct name.
+fn table_for[T](v T) string = return typeof(v) as string
+
+// row_into[T] materialises row `r` of `rows` into a fresh T using
+// fieldtypes-driven dispatch.  Skipped (@"db:-") fields stay at zero.
+// Column order matches the SELECT order built by build_select_cols.
+fn row_into[T](rows RowSet, r i64, col_field_names [string], col_field_types [atom]) T =
+  let out T
+  let nf i64 = len(col_field_names)
+  let c i64 = 0
+  for c < nf:
+    let fname string = col_field_names[c]
+    let ft    atom   = col_field_types[c]
+    if !rows.is_null(r, c):
+      if ft == 'i64 || ft == 'i32 || ft == 'i16 || ft == 'i8 || ft == 'isize:
+        setfield(out, fname, rows.get_i64(r, c))
+      else if ft == 'u64 || ft == 'u32 || ft == 'u16 || ft == 'u8 || ft == 'usize || ft == 'byte || ft == 'char:
+        setfield(out, fname, rows.get_i64(r, c))
+      else if ft == 'bool:
+        setfield(out, fname, rows.get_i64(r, c) != 0)
+      else if ft == 'f64 || ft == 'f32:
+        setfield(out, fname, rows.get_f64(r, c))
+      else if ft == 'string:
+        setfield(out, fname, rows.get_string(r, c))
+    c = c + 1
+  return out
+
+// build_select_cols walks fieldnames once, returns three parallel
+// arrays:
+//   sql_cols    - DB column names (after @"db:..." rename) -- the
+//                 driver uses these to SELECT / project records
+//   field_names - matching Tin field names for row_into setfield
+//                 dispatch; positionally aligned with sql_cols
+//   field_types - the field's atom-encoded type, also positional
+fn build_select_cols[T](v T) ([string], [string], [atom]) =
+  let fields = fieldnames(v)
+  let ftypes = fieldtypes(v)
+  let nf = len(fields)
+  let sql_cols    [string] = []
+  let field_names [string] = []
+  let field_types [atom]   = []
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i] as string
+    let col = db_column(fname, fieldtag(v, fname))
+    if len(col) > 0:
+      sql_cols    ++= [col]
+      field_names ++= [fname]
+      field_types ++= [ftypes[i]]
+    i = i + 1
+  return (sql_cols, field_names, field_types)
+
+// pk_col returns the SQL column name of the primary key.
+//
+// Resolution order:
+//   1. First field tagged `@"db:pk"` or `@"db:colname,pk"` wins.
+//   2. If no field is tagged, fall back to the field literally named
+//      `id` (honouring its `@"db:..."` column rename, if any).
+//   3. If no candidate is found, return "" - the *_in callers short-
+//      circuit on empty PK rather than letting update_in's getfield
+//      on a non-existent "id" field crash on a garbage `any` value.
+fn pk_col[T](v T) string =
+  let fields = fieldnames(v)
+  let i i64 = 0
+  for i < len(fields):
+    let fname string = fields[i] as string
+    let tag   string = fieldtag(v, fname)
+    if db_is_pk(tag):
+      return db_column(fname, tag)
+    i = i + 1
+  // Fallback: literal `id` field.
+  let j i64 = 0
+  for j < len(fields):
+    let fname_pk string = fields[j] as string
+    if str::strcmp(fname_pk, "id") == 0:
+      let col = db_column("id", fieldtag(v, "id"))
+      if len(col) > 0:
+        return col
+      return "id"
+    j = j + 1
+  return ""
+
+// pk_field_name is the Tin field name of the PK (needed by update_in
+// to read the WHERE value via getfield).  Same resolution as pk_col.
+// Returns "" when no PK is resolvable; callers must check before
+// calling getfield (a missing-field getfield returns a zero `any`
+// whose type-atom is garbage, and value_of crashes on the unknown
+// atom).
+fn pk_field_name[T](v T) string =
+  let fields = fieldnames(v)
+  let i i64 = 0
+  for i < len(fields):
+    let fname string = fields[i] as string
+    if db_is_pk(fieldtag(v, fname)):
+      return fname
+    i = i + 1
+  let j i64 = 0
+  for j < len(fields):
+    let fname_pk string = fields[j] as string
+    if str::strcmp(fname_pk, "id") == 0:
+      return "id"
+    j = j + 1
+  return ""
+
+// build_insert_pairs gathers (column, value) for each non-skipped
+// field of v.  Returned as parallel arrays so the row-level CRUD
+// primitives stay free of struct-reflection details (each driver
+// just sees a list of columns and values).
+fn build_insert_pairs[T](v T) ([string], [Value]) =
+  let fields = fieldnames(v)
+  let nf = len(fields)
+  let cols [string] = []
+  let vals [Value]  = []
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i] as string
+    let col = db_column(fname, fieldtag(v, fname))
+    if len(col) > 0:
+      cols ++= [col]
+      vals ++= [value_of(getfield(v, fname))]
+    i = i + 1
+  return (cols, vals)
+
+// build_update_pairs is build_insert_pairs minus the PK column.
+// Filtering on both field name AND column name lets us pick the PK
+// field exactly (the field-name check is unambiguous) and also drop
+// any non-PK field that aliases the PK column (the column-name check
+// stops it from corrupting the primary key via the UPDATE SET).  A
+// struct with two fields tagged onto the same column is itself a
+// modelling bug, but silent over-write of the PK is the worst outcome.
+fn build_update_pairs[T](v T, pk_col string, pk_field string) ([string], [Value]) =
+  let fields = fieldnames(v)
+  let nf = len(fields)
+  let cols [string] = []
+  let vals [Value]  = []
+  let i i64 = 0
+  for i < nf:
+    let fname string = fields[i] as string
+    let col = db_column(fname, fieldtag(v, fname))
+    if len(col) > 0 && str::strcmp(fname, pk_field) != 0 && str::strcmp(col, pk_col) != 0:
+      cols ++= [col]
+      vals ++= [value_of(getfield(v, fname))]
+    i = i + 1
+  return (cols, vals)
+
+// valid_sql_identifier accepts plain SQL identifier shapes
+// ([A-Za-z_][A-Za-z0-9_]*) optionally split once by a dot (so
+// `schema.table` works for SQLite ATTACH'd databases).  This is the
+// trust boundary for the *_in CRUD entry points: drivers interpolate
+// `table` directly into SQL, so an unchecked user-controlled string
+// becomes an injection.  Rejected names short-circuit before reaching
+// the driver (Err for Result-returning entry points, -1 for the int
+// ones).  Callers needing exotic identifiers should drop down to the
+// raw exec/query escape hatch with parameterized SQL.
+fn valid_sql_identifier(s string) bool =
+  let n = len(s)
+  if n == 0 || n > 128: return false
+  let i i64 = 0
+  let seen_dot bool = false
+  let prev_was_dot bool = true   // start of string acts like post-separator
+  for i < n:
+    let c = s[i]
+    let is_alpha = (c >= @'a' && c <= @'z') || (c >= @'A' && c <= @'Z') || c == @'_'
+    let is_digit = c >= @'0' && c <= @'9'
+    if c == @'.':
+      if seen_dot:        return false   // only one dot allowed
+      if prev_was_dot:    return false   // can't start with a dot or have ".."
+      if i == n - 1:      return false   // can't end with a dot
+      seen_dot = true
+      prev_was_dot = true
+    else:
+      if prev_was_dot:
+        if !is_alpha:     return false   // identifier must start with alpha/_
+        prev_was_dot = false
+      else:
+        if !is_alpha && !is_digit: return false
+    i = i + 1
+  return true
+
+// insert_into delegates to the driver's db_insert_row primitive.
+// SQL drivers build INSERT statements internally; KV drivers map
+// the column list to a hash / equivalent record shape.
+fn insert_into[T](c Conn, table string, v T) i64 =
+  if !valid_sql_identifier(table): return -1
+  let probe T
+  let pk = pk_col[T](probe)
+  let cv = build_insert_pairs[T](v)
+  return c.db_insert_row(table, pk, cv.a, cv.b)
+
+// insert uses table_for[T] (the struct name) as the table.
+fn insert[T](c Conn, v T) i64 = return insert_into[T](c, table_for[T](v), v)
+
+// find_by_id_in fetches the row by PK via the driver's db_find_row
+// primitive, then materializes it into a T using the reflected field
+// order.  Returns Err on driver error or "not found".
+fn find_by_id_in[T](c Conn, table string, id i64) Result[T, errors::Err] =
+  if !valid_sql_identifier(table):
+    return Err(errors::new("db: invalid table name: " ++ table))
+  let probe T
+  let cf = build_select_cols[T](probe)
+  let sql_cols    = cf.a
+  let field_names = cf.b
+  let field_types = cf.c
+  let pk = pk_col[T](probe)
+  if len(pk) == 0:
+    return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
+  let rows = try c.db_find_row(table, pk, IntVal(id), sql_cols)
+  if rows.count() == 0:
+    return Err(errors::new("db: not found"))
+  return Ok(row_into[T](rows, 0, field_names, field_types))
+
+// find_by_id resolves the table from the struct name.
+fn find_by_id[T](c Conn, id i64) Result[T, errors::Err] =
+  let probe T
+  return find_by_id_in[T](c, table_for[T](probe), id)
+
+// all_in returns every row of the table, in driver order.
+fn all_in[T](c Conn, table string) Result[[T], errors::Err] =
+  if !valid_sql_identifier(table):
+    return Err(errors::new("db: invalid table name: " ++ table))
+  let probe T
+  let cf = build_select_cols[T](probe)
+  let sql_cols    = cf.a
+  let field_names = cf.b
+  let field_types = cf.c
+  let pk = pk_col[T](probe)
+  if len(pk) == 0:
+    return Err(errors::new("db: no primary key resolvable on T (tag a field @\"db:pk\" or @\"db:colname,pk\", or name one `id`)"))
+  let rows = try c.db_all_rows(table, pk, sql_cols)
+  let n = rows.count()
+  let out [T] = []
+  let r i64 = 0
+  for r < n:
+    out ++= [row_into[T](rows, r, field_names, field_types)]
+    r = r + 1
+  return Ok(out)
+
+// all uses table_for[T].
+fn all[T](c Conn) Result[[T], errors::Err] =
+  let probe T
+  return all_in[T](c, table_for[T](probe))
+
+// update_in delegates to the driver's db_update_row primitive.  The
+// PK column is excluded from the SET list and threaded separately
+// as the WHERE bind.
+fn update_in[T](c Conn, table string, v T) i64 =
+  if !valid_sql_identifier(table): return -1
+  let pk        string = pk_col[T](v)
+  let pk_fname  string = pk_field_name[T](v)
+  // Both must be present and non-empty - getfield on a missing field
+  // hands back a zero `any` whose type-atom is garbage, and value_of
+  // would crash on the unknown atom.
+  if len(pk) == 0 || len(pk_fname) == 0: return -1
+  let pk_val Value     = value_of(getfield(v, pk_fname))
+  let cv = build_update_pairs[T](v, pk, pk_fname)
+  return c.db_update_row(table, pk, pk_val, cv.a, cv.b)
+
+// update uses table_for[T].
+fn update[T](c Conn, v T) i64 = return update_in[T](c, table_for[T](v), v)
+
+// delete_in deletes by PK via the driver's db_delete_row primitive.
+fn delete_in[T](c Conn, table string, id i64) i64 =
+  if !valid_sql_identifier(table): return -1
+  let probe T
+  let pk = pk_col[T](probe)
+  if len(pk) == 0: return -1
+  return c.db_delete_row(table, pk, IntVal(id))
+
+// delete uses table_for[T].
+fn delete[T](c Conn, id i64) i64 =
+  let probe T
+  return delete_in[T](c, table_for[T](probe), id)
+
+export {
+  Value, RowSet, Conn,
+  db_column, db_is_pk, value_of, value_to_string, is_null, table_for,
+  insert, insert_into,
+  find_by_id, find_by_id_in,
+  all, all_in,
+  update, update_in,
+  delete, delete_in,
+} as db

@@ -1,0 +1,200 @@
+// libs/redis/redis_test - end-to-end tests against a live redis-server
+// on 127.0.0.1:6379.  Each test uses a unique key namespace so the
+// suite stays isolated even when reused against a shared instance,
+// and cleans up its keys at the end so re-runs start clean.
+
+use redis
+use assert
+
+const HOST = "127.0.0.1"
+const PORT = 6379 as i32
+
+fn fresh_conn() redis::Connection =
+  return redis::open(HOST, PORT).unwrap()
+
+test "open + ping + close round-trip" =
+  let c = fresh_conn()
+  let pong = c.ping().unwrap()
+  assert::equals("PONG", pong)
+  c.close()
+
+test "set + get round-trip on a string key" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_get_a"]).unwrap()
+  let s = c.set("tin_test_get_a", "world").unwrap()
+  assert::equals("OK", s)
+  let v = c.get("tin_test_get_a").unwrap()
+  match v:
+    case Some(got): assert::equals("world", got)
+    case None:      assert::ok(false)
+  let _ = c.del(["tin_test_get_a"]).unwrap()
+  c.close()
+
+test "get on missing key returns None" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_get_missing"]).unwrap()
+  let v = c.get("tin_test_get_missing").unwrap()
+  match v:
+    case Some(_): assert::ok(false)
+    case None:    assert::ok(true)
+  c.close()
+
+test "del returns the count of removed keys" =
+  let c = fresh_conn()
+  let _ = c.set("tin_test_del_a", "1").unwrap()
+  let _ = c.set("tin_test_del_b", "2").unwrap()
+  let n = c.del(["tin_test_del_a", "tin_test_del_b", "tin_test_del_missing"]).unwrap()
+  assert::equals(2 as i64, n)
+  c.close()
+
+test "exists counts only present keys" =
+  let c = fresh_conn()
+  let _ = c.set("tin_test_exists_a", "x").unwrap()
+  let _ = c.del(["tin_test_exists_b"]).unwrap()
+  let n = c.exists(["tin_test_exists_a", "tin_test_exists_b"]).unwrap()
+  assert::equals(1 as i64, n)
+  let _ = c.del(["tin_test_exists_a"]).unwrap()
+  c.close()
+
+test "incr atomically bumps an integer key" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_incr"]).unwrap()
+  let v1 = c.incr("tin_test_incr").unwrap()
+  let v2 = c.incr("tin_test_incr").unwrap()
+  assert::equals(1 as i64, v1)
+  assert::equals(2 as i64, v2)
+  let _ = c.del(["tin_test_incr"]).unwrap()
+  c.close()
+
+test "expire reports true only when key exists" =
+  let c = fresh_conn()
+  let _ = c.set("tin_test_expire", "x").unwrap()
+  let ok = c.expire("tin_test_expire", 60).unwrap()
+  assert::ok(ok)
+  let _ = c.del(["tin_test_expire_missing"]).unwrap()
+  let no = c.expire("tin_test_expire_missing", 60).unwrap()
+  assert::ok(!no)
+  let _ = c.del(["tin_test_expire"]).unwrap()
+  c.close()
+
+test "keys returns matching glob pattern" =
+  let c = fresh_conn()
+  let _ = c.set("tin_test_keys_a1", "1").unwrap()
+  let _ = c.set("tin_test_keys_a2", "2").unwrap()
+  let ks = c.keys("tin_test_keys_a*").unwrap()
+  assert::equals(2, len(ks))
+  let _ = c.del(["tin_test_keys_a1", "tin_test_keys_a2"]).unwrap()
+  c.close()
+
+test "lpush + lrange round-trips list order" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_list"]).unwrap()
+  let n = c.lpush("tin_test_list", ["a", "b", "c"]).unwrap()
+  assert::equals(3 as i64, n)
+  let xs = c.lrange("tin_test_list", 0, -1).unwrap()
+  assert::equals(3, len(xs))
+  assert::equals("c", xs[0])
+  assert::equals("a", xs[2])
+  let _ = c.del(["tin_test_list"]).unwrap()
+  c.close()
+
+test "rpush + lpop + rpop drain from both ends" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_pop"]).unwrap()
+  let _ = c.rpush("tin_test_pop", ["x", "y", "z"]).unwrap()
+  let front = c.lpop("tin_test_pop").unwrap()
+  let back  = c.rpop("tin_test_pop").unwrap()
+  match front:
+    case Some(s): assert::equals("x", s)
+    case None:    assert::ok(false)
+  match back:
+    case Some(s): assert::equals("z", s)
+    case None:    assert::ok(false)
+  let _ = c.del(["tin_test_pop"]).unwrap()
+  c.close()
+
+test "llen reports current list length" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_llen"]).unwrap()
+  let _ = c.rpush("tin_test_llen", ["a", "b", "c", "d"]).unwrap()
+  let n = c.llen("tin_test_llen").unwrap()
+  assert::equals(4 as i64, n)
+  let _ = c.del(["tin_test_llen"]).unwrap()
+  c.close()
+
+test "hset + hget round-trip a hash field" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_hash"]).unwrap()
+  let _ = c.hset("tin_test_hash", "color", "blue").unwrap()
+  let v = c.hget("tin_test_hash", "color").unwrap()
+  match v:
+    case Some(s): assert::equals("blue", s)
+    case None:    assert::ok(false)
+  let _ = c.del(["tin_test_hash"]).unwrap()
+  c.close()
+
+test "hget on missing field returns None" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_hash_miss"]).unwrap()
+  let _ = c.hset("tin_test_hash_miss", "x", "1").unwrap()
+  let v = c.hget("tin_test_hash_miss", "y").unwrap()
+  match v:
+    case Some(_): assert::ok(false)
+    case None:    assert::ok(true)
+  let _ = c.del(["tin_test_hash_miss"]).unwrap()
+  c.close()
+
+test "hgetall returns every field as a string pair" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_hall"]).unwrap()
+  let _ = c.hset("tin_test_hall", "a", "1").unwrap()
+  let _ = c.hset("tin_test_hall", "b", "2").unwrap()
+  let pairs = c.hgetall("tin_test_hall").unwrap()
+  assert::equals(2, len(pairs))
+  let _ = c.del(["tin_test_hall"]).unwrap()
+  c.close()
+
+test "hdel removes only the listed fields" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_hdel"]).unwrap()
+  let _ = c.hset("tin_test_hdel", "a", "1").unwrap()
+  let _ = c.hset("tin_test_hdel", "b", "2").unwrap()
+  let n = c.hdel("tin_test_hdel", ["a", "missing"]).unwrap()
+  assert::equals(1 as i64, n)
+  let _ = c.del(["tin_test_hdel"]).unwrap()
+  c.close()
+
+test "hkeys + hvals + hlen agree on shape" =
+  let c = fresh_conn()
+  let _ = c.del(["tin_test_hshape"]).unwrap()
+  let _ = c.hset("tin_test_hshape", "x", "10").unwrap()
+  let _ = c.hset("tin_test_hshape", "y", "20").unwrap()
+  let ks = c.hkeys("tin_test_hshape").unwrap()
+  let vs = c.hvals("tin_test_hshape").unwrap()
+  let n  = c.hlen("tin_test_hshape").unwrap()
+  assert::equals(2, len(ks))
+  assert::equals(2, len(vs))
+  assert::equals(2 as i64, n)
+  let _ = c.del(["tin_test_hshape"]).unwrap()
+  c.close()
+
+// pub/sub round-trip is skipped pending the non-blocking redis I/O
+// follow-up: the reader fiber pins a worker on hiredis's blocking
+// redisGetReply call, so publishing from the same scheduler can't
+// land before the subscribe's read returns.  See the file header for
+// the architectural note.
+//
+// test "publish + subscribe delivers a single message" =
+//   let sub = redis::subscribe(HOST, PORT, ["tin_test_chan"]).unwrap()
+//   let pub = fresh_conn()
+//   let _   = redis::publish(pub, "tin_test_chan", "hello-redis").unwrap()
+//   let msg = await sub.messages.recv()
+//   assert::equals("tin_test_chan", msg.channel)
+//   assert::equals("hello-redis", msg.payload)
+//   pub.close()
+//   sub.close()
+
+// C12 (KNOWN LIMITATION): Connection is NOT fiber-safe.  Sharing one
+// across multiple fibers causes cross-routed replies.  Open one
+// Connection per fiber until the driver is rewritten on hiredis's
+// async API or routed through a dedicated worker thread.

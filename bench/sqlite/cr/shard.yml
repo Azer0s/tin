@@ -1,0 +1,9 @@
+name: cr_inserts
+version: 0.1.0
+targets:
+  cr_inserts:
+    main: inserts.cr
+dependencies:
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: ~> 0.20

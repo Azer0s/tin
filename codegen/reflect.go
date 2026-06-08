@@ -326,12 +326,27 @@ func (cg *CodeGen) buildTypeIDToFieldsTable() map[int32][]string {
 }
 
 // buildTypeIDToFieldTypesTable builds type_id -> []field type name atom strings table.
+// Uses the AST-declared type per field (structFieldTinTypes) when available so
+// unsigned widths (u8/u16/u32/u64/usize/byte/char) round-trip as their own
+// atom name instead of collapsing to the signed sibling -- LLVM has no signed/
+// unsigned distinction so the LLVM-type path loses the information.
 func (cg *CodeGen) buildTypeIDToFieldTypesTable() map[int32][]string {
 	table := make(map[int32][]string)
 
 	for sn, id := range cg.structTypeIDs {
 		var atoms []string
-		for _, ft := range cg.structFieldLLVMTypes[sn] {
+
+		astTypes, hasAST := cg.structFieldTinTypes[sn]
+
+		for i, ft := range cg.structFieldLLVMTypes[sn] {
+			if hasAST && i < len(astTypes) {
+				if st, ok := astTypes[i].(*ast.SimpleType); ok && st.Name != "" {
+					atoms = append(atoms, "'"+st.Name)
+
+					continue
+				}
+			}
+
 			atoms = append(atoms, "'"+cg.displayStructName(primitiveTypeName(ft)))
 		}
 
@@ -777,7 +792,23 @@ func (cg *CodeGen) genGetfieldForStruct(block *ir.Block, sn string, val value.Va
 		}
 
 		fieldVal := block.NewLoad(fieldTypes[i], fieldGep)
-		boxed := cg.boxToAny(block, fieldVal)
+		// For unsigned struct fields (u8/u16/u32/u64/usize/byte/char)
+		// zero-extend the value to i64 before boxing so the any-tagged
+		// integer preserves the bit pattern.  Without this, boxToAny
+		// goes through cg.coerce which sign-extends, so u8(200) lands
+		// as IntVal(-56) and any external reader sees a negative value
+		// (D8).  The AST source type lives in structFieldTinTypes.
+		var boxVal value.Value = fieldVal
+
+		if astTypes, ok := cg.structFieldTinTypes[sn]; ok && i < len(astTypes) {
+			if isUnsignedTinType(astTypes[i]) {
+				if it, isInt := fieldVal.Type().(*irtypes.IntType); isInt && it.BitSize < 64 {
+					boxVal = block.NewZExt(fieldVal, irtypes.I64)
+				}
+			}
+		}
+
+		boxed := cg.boxToAny(block, boxVal)
 		boxes = append(boxes, boxed)
 
 		current := block.NewLoad(anyType, resultAlloca)
@@ -972,6 +1003,17 @@ func (cg *CodeGen) genSetfield(block *ir.Block, e *ast.SetfieldExpr) (value.Valu
 			cg.emitRetain(block, selected)
 			cg.emitRelease(block, currentField)
 		}
+	}
+
+	// When `newVal` came from a temporary expression (inline call, literal,
+	// arithmetic result) the caller has handed us a fresh +1 reference that
+	// the per-field retain/store path does not consume.  Drop that extra
+	// reference here so a hot loop like `setfield(out, fname, get_string(
+	// row, col))` doesn't leak one string per call.  isCopyExpr returns
+	// true for borrows (Identifier / FieldAccess / IndexExpr) whose
+	// original scope owns the rc -- skip the release in those cases.
+	if isRCTrackedType(newVal.Type()) && !isCopyExpr(e.Val) {
+		cg.emitRelease(block, newVal)
 	}
 
 	return nil, nil

@@ -1,0 +1,636 @@
+//!+redis.c [linux]  -- -lhiredis
+//!+redis.c [darwin] -- -I/opt/homebrew/opt/hiredis/include -L/opt/homebrew/opt/hiredis/lib -lhiredis
+
+// libs/redis - blocking Redis client built on hiredis's synchronous
+// API.  Both connect and each command roundtrip block the worker
+// thread; mirrors libs/sqlite's design.  Per-fiber non-blocking I/O
+// is a planned follow-up that needs a C->Tin yield point we don't
+// yet have.
+//
+//   let r = redis::open("127.0.0.1", 6379 as i32).unwrap()
+//   r.set("hello", "world")
+//   let v = r.get("hello").unwrap()    // Some("world")
+//   r.lpush("q", ["a", "b", "c"])
+//   let head = r.lrange("q", 0, -1)    // ["c", "b", "a"]
+//   r.close()
+//
+// Pub/sub is a separate Subscription handle that owns its own
+// dedicated connection (Redis forbids non-subscription commands on
+// a subscribed connection):
+//
+//   let sub = redis::subscribe("127.0.0.1", 6379 as i32, ["news"]).unwrap()
+//   await spawn do:
+//     for true:
+//       let msg = await sub.messages.recv()
+//       echo "{msg.channel}: {msg.payload}"
+//   redis::publish(r, "news", "hello world")
+//   sub.close()
+
+use rc
+use sync
+use { Option } from option
+use errors
+use { Result } from result
+use db
+use str
+
+// Reply: parsed Redis reply, mirroring REDIS_REPLY_* on the C side
+
+// REDIS_REPLY_ERROR (kind=2 on the C side) is never represented in
+// Reply; command() lifts it straight into Result::Err(ServerError)
+// so the caller can `try c.command(...)` without re-matching for
+// the inner error case.
+data Reply =
+  Nil
+  Status(s string)
+  Int(v i64)
+  Str(s string)
+  List(items [Reply])
+
+  // get[T] projects this Reply into the call-site's expected T.
+  // T is inferred from the surrounding context: the let-binding's
+  // declared type (`let n i64 = v.get()`) or the outer .map's expected
+  // success type (`r.map(Reply::get)` in a fn returning Result[T, _]).
+  // One overload per shape; the compiler picks the body whose
+  // `where T is X` matches the inferred T.  Mismatched variants (e.g.
+  // asking a List as i64) fall through to T's zero value -- callers
+  // that need the raw Reply bypass `get` and pattern-match the variant
+  // directly.
+  fn get[T](this Reply) T where T is i64 =
+    match this:
+      case Int(n): return n
+      default:     return 0
+
+  fn get[T](this Reply) T where T is bool =
+    // Truthy semantics: any non-zero integer reply is true.  Matches
+    // EXISTS / SISMEMBER / EXPIRE (0 or 1) and arbitrary-count replies
+    // like OBJECT FREQ -- the latter would silently collapse to false
+    // under a strict `== 1` check.
+    return this.get[i64]() != 0
+
+  fn get[T](this Reply) T where T is string =
+    match this:
+      case Str(s):    return s
+      case Status(s): return s
+      default:        return ""
+
+  fn get[T](this Reply) T where T is Option[string] =
+    match this:
+      case Str(s):    return Option[string]::Some(s)
+      case Status(s): return Option[string]::Some(s)
+      default:        return Option[string]::None
+
+  fn get[T](this Reply) T where T is [string] =
+    match this:
+      case List(items):
+        let out [string] = []
+        for x in items:
+          out ++= [x.get[string]()]
+        return out
+      default: return []
+
+  fn get[T](this Reply) T where T is [(string, string)] =
+    let flat = this.get[[string]]()
+    let out [(string, string)] = []
+    let i i64 = 0
+    for i + 1 < len(flat):
+      out ++= [(flat[i], flat[i + 1])]
+      i = i + 2
+    return out
+
+// Errors
+
+data RedisError(errors::Err, print) =
+  ConnectFailed(host string, port i32)
+  IoError(code i32, msg string)
+  ServerError(msg string)
+  TypeMismatch(want string, got string)
+
+  fn errors::Err::message(this RedisError) string =
+    match this:
+      case ConnectFailed(h, p):    return "redis: connect failed: {h}:{p}"
+      case IoError(c, m):          return "redis: I/O error (code {c}): {m}"
+      case ServerError(m):         return "redis: server error: {m}"
+      case TypeMismatch(want, got): return "redis: type mismatch: wanted {want}, got {got}"
+
+  fn ::print(this RedisError) string = return this.message()
+
+// C externs (libs/redis/redis.c)
+
+fn c_redis_connect(host string, port i32) *void                                            = extern("_tin_redis_connect")
+fn c_redis_close(ctx *void)                                                                 = extern("_tin_redis_close")
+fn c_redis_shutdown(ctx *void)                                                              = extern("_tin_redis_shutdown")
+fn c_redis_errstr(ctx *void) string                                                         = extern("_tin_redis_errstr")
+fn c_redis_command(ctx *void, argc i32, argv [volatile *char], arglens [i64], out_err *i64) *void   = extern("_tin_redis_command")
+fn c_redis_reply_free(p *void)                                                              = extern("_tin_redis_reply_free")
+fn c_redis_reply_kind(p *void) i32                                                          = extern("_tin_redis_reply_kind")
+fn c_redis_reply_int(p *void)  i64                                                          = extern("_tin_redis_reply_int")
+fn c_redis_reply_count(p *void) i64                                                         = extern("_tin_redis_reply_count")
+fn c_redis_reply_str(p *void, out *string)                                                  = extern("_tin_redis_reply_str")
+fn c_redis_reply_child(p *void, i i64) *void                                                = extern("_tin_redis_reply_child")
+
+fn c_str_data(s string) volatile *char = extern("_tin_string_data")
+
+// Reply -> Tin Reply conversion
+
+// translate_reply walks the C-side reply tree and constructs a
+// Tin Reply ADT.  REDIS_REPLY_ERROR (kind=2) is the one case that
+// does NOT round-trip: it surfaces as Result::Err out of command()
+// rather than as a Reply variant.  Caller is responsible for
+// releasing the C-side reply (the wrapping rc::Cell does this via
+// c_redis_reply_free).
+//
+// KNOWN LIMITATION (N2): when the resulting Reply is a List(items),
+// the Str(s) variants nested inside items leak their string buffers
+// when the outer List is dropped (~32 B per element).  The Reply
+// ADT's data_release_val walker doesn't recurse into the inner
+// Reply elements' Str payloads at the right depth.  The C-side
+// _tin_redis_reply_free correctly frees its own per-child sval
+// buffers, but the SEPARATE copies the Tin side took via
+// _tin_string_from_bytes during translate_reply are owned by the
+// Tin Reply tree and need the recursive release helper to walk
+// them.  Pure-Tin recursive data ADTs don't show the same shape so
+// the bug is specific to how List(items: [Reply]) lowers its
+// per-element release.  Tracked as a follow-up.
+fn translate_reply(p *void) Result[Reply, errors::Err] =
+  let k = c_redis_reply_kind(p)
+  if k == 0 as i32:
+    return Ok(Nil)
+  if k == 1 as i32:
+    let s string = ""
+    c_redis_reply_str(p, &s)
+    return Ok(Status(s))
+  if k == 2 as i32:
+    let s string = ""
+    c_redis_reply_str(p, &s)
+    return Err(ServerError(s))
+  if k == 3 as i32:
+    return Ok(Int(c_redis_reply_int(p)))
+  if k == 4 as i32:
+    let s string = ""
+    c_redis_reply_str(p, &s)
+    return Ok(Str(s))
+  // List (kind == 5).  Any nested error reply inside a multi-bulk
+  // (e.g. EXEC partials) is also lifted to a top-level Err -- this
+  // matches what most RESP clients do.
+  let n = c_redis_reply_count(p)
+  let items [Reply] = []
+  let i i64 = 0
+  for i < n:
+    let child *void = c_redis_reply_child(p, i)
+    let v = try translate_reply(child)
+    items ++= [v]
+    i = i + 1
+  return Ok(List(items))
+
+// RedisRowSet implements db::RowSet over a hash-per-record layout.
+// Each `rows[r]` holds the column values in `col_names` order, with
+// `null_flags[r][c] == true` when the underlying hash field was
+// absent (HGETALL omits unset fields, so we distinguish "stored as
+// empty string" from "never set").  All redis hash values are
+// strings on the wire; get_i64 / get_f64 parse them on demand.
+struct RedisRowSet (db::RowSet) =
+  rows       [[string]]
+  null_flags [[bool]]
+  ncols      i64
+  col_names  [string]
+
+  fn db::RowSet::count(this RedisRowSet) i64 = return len(this.rows)
+
+  fn db::RowSet::cols(this RedisRowSet) i64 = return this.ncols
+
+  fn db::RowSet::get_i64(this RedisRowSet, row i64, col i64) i64 =
+    return str::atol(this.rows[row][col])
+
+  fn db::RowSet::get_f64(this RedisRowSet, row i64, col i64) f64 =
+    return str::atof(this.rows[row][col])
+
+  fn db::RowSet::get_string(this RedisRowSet, row i64, col i64) string =
+    return this.rows[row][col]
+
+  fn db::RowSet::is_null(this RedisRowSet, row i64, col i64) bool =
+    return this.null_flags[row][col]
+
+// Connection
+
+struct Connection (io::Closeable, db::Conn) =
+  cell *rc::Cell[*void]
+
+  // command runs a Redis command described by an argv array of
+  // already-stringified parts.  Returns the parsed Reply or a
+  // structured RedisError.  Most callers should use the typed
+  // helpers (get/set/lpush/...) which build the argv internally.
+  //
+  // KNOWN LIMITATION (C12): NOT fiber-safe -- four fibers sharing a
+  // single Connection see ~100% cross-routed replies because hiredis
+  // synchronous API requires single-threaded access to its
+  // redisContext.  A first attempt at a try-spin mutex didn't fix it
+  // (the SET completes but the immediate GET in the same fiber reads
+  // the wrong fiber's response) suggesting the actual race is in the
+  // socket read order rather than just call serialisation.  Until the
+  // driver is rewritten on top of hiredis's async API or its commands
+  // are routed through a dedicated worker thread, callers MUST open
+  // one Connection per fiber.  Documented separately as a TODO.
+  fn command(this Connection, args [string]) Result[Reply, errors::Err] =
+    let argc i32 = len(args) as i32
+    let slots i64 = if_zero_use_one(argc as i64)
+    let argv    [volatile *char] = [nil as volatile *char] * slots
+    let arglens [i64]   = [0] * slots
+    let keep    [string] = [""] * slots
+    let i i64 = 0
+    for i < argc as i64:
+      keep[i]    = args[i]
+      argv[i]    = c_str_data(args[i])
+      arglens[i] = len(args[i])
+      i = i + 1
+    let err i64 = 0
+    let raw *void = c_redis_command(this.cell.payload(), argc, argv, arglens, &err)
+    if raw == nil:
+      let es string = c_redis_errstr(this.cell.payload())
+      return Err(IoError(err as i32, es))
+    let r = translate_reply(raw)
+    c_redis_reply_free(raw)
+    return r
+
+  fn io::Closeable::close(this Connection) =
+    c_redis_close(this.cell.payload())
+    this.cell.set(nil)
+
+// db::Conn impl
+//
+// Records map onto Redis hashes: `<table>:<pk>` is the hash key,
+// each non-skipped struct field becomes a hash field (string-typed).
+// db::insert / find_by_id / all / update / delete dispatch through
+// these primitives, so the SAME db::insert[T] generic that targets
+// libs/sqlite now also targets libs/redis.
+//
+// The SQL escape hatches (exec / query) are not meaningful for
+// Redis -- raw command access lives on `Connection.command(args)`.
+// We return Err / -1 from them to honour the trait without faking
+// SQL semantics.
+
+  fn db::Conn::exec(this Connection, sql string, params [db::Value]) i64 =
+    return 0 - 1
+
+  fn db::Conn::query(this Connection, sql string, params [db::Value]) Result[RowSet, errors::Err] =
+    return Err(IoError(0 as i32, "redis: SQL escape hatch (exec/query) is not supported; use Connection.command(args) for raw commands"))
+
+  fn db::Conn::db_insert_row(this Connection, table string, pk_col string, cols [string], vals [db::Value]) i64 =
+    if len(cols) == 0:
+      return 0
+    let pk = pk_value_for_col(pk_col, cols, vals)
+    if len(pk) == 0:
+      return 0 - 1
+    let key = table ++ ":" ++ pk
+    let args [string] = ["HSET", key]
+    let i i64 = 0
+    let written i64 = 0
+    for i < len(cols):
+      // Skip NullVal entirely: HGETALL will then omit the field, and
+      // pairs_to_row's default `nulls[i]=true` flags it as null on
+      // read.  Storing "" would collide with the legitimate empty-
+      // string value and erase the null/empty distinction the rest of
+      // the db layer relies on (row_into checks is_null before
+      // setfield).
+      if !is_null_value(vals[i]):
+        args ++= [cols[i]]
+        args ++= [db_value_to_string(vals[i])]
+        written = written + 1
+      i = i + 1
+    if written == 0:
+      return 0
+    match this.command(args):
+      case Ok(_):  return 1
+      case Err(_): return 0 - 1
+
+  fn db::Conn::db_find_row(this Connection, table string, pk_col string, pk_val db::Value, want_cols [string]) Result[RowSet, errors::Err] =
+    let key = table ++ ":" ++ db_value_to_string(pk_val)
+    // The EXISTS shortcut would race with HGETALL on a key the caller
+    // is concurrently rewriting; HGETALL of a missing hash already
+    // returns an empty list, so just rely on that and skip the round-
+    // trip.  Avoids the also-painful ARC corner where the EXISTS
+    // args-array's scope-exit release deep-released `key`'s buffer
+    // while later HGETALL still aliased it (the array-element-retain
+    // path doesn't fire for string elements of a fresh literal array).
+    let pairs_reply = try this.command(["HGETALL", key])
+    let pairs = pairs_reply.get[[(string, string)]]()
+    if len(pairs) == 0:
+      return Ok(RedisRowSet{rows: [], null_flags: [], ncols: len(want_cols), col_names: want_cols} as RowSet)
+    let row = pairs_to_row(pairs, want_cols)
+    return Ok(RedisRowSet{rows: [row.a], null_flags: [row.b], ncols: len(want_cols), col_names: want_cols} as RowSet)
+
+  fn db::Conn::db_all_rows(this Connection, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err] =
+    let pat = glob_escape(table) ++ ":*"
+    let keys_reply = try this.command(["KEYS", pat])
+    let ks [string] = keys_reply.get()
+    let rows       [[string]] = []
+    let null_flags [[bool]]   = []
+    let i i64 = 0
+    for i < len(ks):
+      let pairs_reply = try this.command(["HGETALL", ks[i]])
+      let pairs [(string, string)] = pairs_reply.get()
+      let row = pairs_to_row(pairs, want_cols)
+      rows ++= [row.a]
+      null_flags ++= [row.b]
+      i = i + 1
+    return Ok(RedisRowSet{rows: rows, null_flags: null_flags, ncols: len(want_cols), col_names: want_cols} as RowSet)
+
+  fn db::Conn::db_update_row(this Connection, table string, pk_col string, pk_val db::Value, cols [string], vals [db::Value]) i64 =
+    let key = table ++ ":" ++ db_value_to_string(pk_val)
+    if len(cols) == 0:
+      return 0
+    let args [string] = ["HSET", key]
+    let i i64 = 0
+    let written i64 = 0
+    // Skip NullVal columns from the SET so HGETALL keeps reporting
+    // them as absent (null) -- mirrors db_insert_row's null
+    // distinction.  A field that was previously set and is now Null
+    // would need an explicit HDEL to remove; this is a deliberate
+    // trade-off matching SQL UPDATE's "leave-unmentioned-columns-
+    // alone" semantics.
+    for i < len(cols):
+      if !is_null_value(vals[i]):
+        args ++= [cols[i]]
+        args ++= [db_value_to_string(vals[i])]
+        written = written + 1
+      i = i + 1
+    if written == 0:
+      return 0
+    // KNOWN ISSUE (R4-A): HSET on a missing key creates the hash, so
+    // db::update_in for a non-existent PK silently inserts a phantom
+    // record (sqlite returns 0 rows-affected in the same case).  The
+    // obvious EXISTS-then-HSET precondition triggers a separate
+    // codegen bug: building two [string] array literals from the same
+    // let-bound `key` variable in one function produces IR that calls
+    // _tin_release_fat_elem_array on the first array *right after*
+    // the command call (treating the let-bound array as an arg-temp)
+    // even though the let is still in scope, leading to a use-after-
+    // free of the second array's key element when the second command
+    // fires.  Verified via LLVM IR dump + `redis-cli MONITOR` showing
+    // a garbage key on the second HSET.  Proper fix needs the call-
+    // site arg ARC bookkeeping to recognise let-bound array sources
+    // as non-temp -- out of scope for this commit; tracked separately.
+    // A robust correctness fix would also use a Lua script to keep
+    // the EXISTS+HSET atomic against a concurrent DEL.
+    match this.command(args):
+      case Ok(_):  return 1
+      case Err(_): return 0 - 1
+
+  fn db::Conn::db_delete_row(this Connection, table string, pk_col string, pk_val db::Value) i64 =
+    let key = table ++ ":" ++ db_value_to_string(pk_val)
+    match this.command(["DEL", key]):
+      case Ok(r):
+        let n i64 = r.get()
+        return n
+      case Err(_): return 0 - 1
+
+// Key/value commands
+
+  // ping returns the PONG status (or whatever the server replies);
+  // typically used as a connectivity smoke test.
+  fn ping(this Connection) Result[string, errors::Err] =
+    return this.command(["PING"]).map(Reply::get)
+
+  // get returns Some(value) for a string key or None when the key
+  // does not exist.
+  fn get(this Connection, key string) Result[Option[string], errors::Err] =
+    return this.command(["GET", key]).map(Reply::get)
+
+  // set writes value at key, returning the OK status string.
+  fn set(this Connection, key string, value string) Result[string, errors::Err] =
+    return this.command(["SET", key, value]).map(Reply::get)
+
+  // del removes the listed keys and returns the count that existed.
+  fn del(this Connection, keys [string]) Result[i64, errors::Err] =
+    return this.command(["DEL"] ++ keys).map(Reply::get)
+
+  // exists returns the number of supplied keys that currently exist.
+  fn exists(this Connection, keys [string]) Result[i64, errors::Err] =
+    return this.command(["EXISTS"] ++ keys).map(Reply::get)
+
+  // incr atomically increments an integer key and returns the new value.
+  fn incr(this Connection, key string) Result[i64, errors::Err] =
+    return this.command(["INCR", key]).map(Reply::get)
+
+  // expire sets a TTL in seconds; returns true if the key existed.
+  fn expire(this Connection, key string, seconds i64) Result[bool, errors::Err] =
+    return this.command(["EXPIRE", key, "{seconds}"]).map(Reply::get)
+
+  // keys returns all keys matching the glob-style pattern.  In
+  // production, prefer SCAN (not yet exposed) on large keyspaces -
+  // KEYS blocks the server.
+  fn keys(this Connection, pattern string) Result[[string], errors::Err] =
+    return this.command(["KEYS", pattern]).map(Reply::get)
+
+// List commands
+
+  fn lpush(this Connection, key string, values [string]) Result[i64, errors::Err] =
+    return this.command(["LPUSH", key] ++ values).map(Reply::get)
+
+  fn rpush(this Connection, key string, values [string]) Result[i64, errors::Err] =
+    return this.command(["RPUSH", key] ++ values).map(Reply::get)
+
+  fn lpop(this Connection, key string) Result[Option[string], errors::Err] =
+    return this.command(["LPOP", key]).map(Reply::get)
+
+  fn rpop(this Connection, key string) Result[Option[string], errors::Err] =
+    return this.command(["RPOP", key]).map(Reply::get)
+
+  fn lrange(this Connection, key string, start i64, stop i64) Result[[string], errors::Err] =
+    return this.command(["LRANGE", key, "{start}", "{stop}"]).map(Reply::get)
+
+  fn llen(this Connection, key string) Result[i64, errors::Err] =
+    return this.command(["LLEN", key]).map(Reply::get)
+
+// Hash commands
+
+  fn hset(this Connection, key string, field string, value string) Result[i64, errors::Err] =
+    return this.command(["HSET", key, field, value]).map(Reply::get)
+
+  fn hget(this Connection, key string, field string) Result[Option[string], errors::Err] =
+    return this.command(["HGET", key, field]).map(Reply::get)
+
+  // hgetall returns the field/value list as alternating pairs in
+  // the same order Redis sends them.
+  fn hgetall(this Connection, key string) Result[[(string, string)], errors::Err] =
+    return this.command(["HGETALL", key]).map(Reply::get)
+
+  fn hdel(this Connection, key string, fields [string]) Result[i64, errors::Err] =
+    return this.command(["HDEL", key] ++ fields).map(Reply::get)
+
+  fn hkeys(this Connection, key string) Result[[string], errors::Err] =
+    return this.command(["HKEYS", key]).map(Reply::get)
+
+  fn hvals(this Connection, key string) Result[[string], errors::Err] =
+    return this.command(["HVALS", key]).map(Reply::get)
+
+  fn hlen(this Connection, key string) Result[i64, errors::Err] =
+    return this.command(["HLEN", key]).map(Reply::get)
+
+// pk_value_for_col scans cols for the entry matching pk_col_name and
+// returns the parallel value, stringified.  Returns "" when the named
+// column isn't in `cols` (or when pk_col_name itself is empty) -- the
+// caller treats empty as "no usable PK" and surfaces -1 / Err rather
+// than silently picking a wrong key.  The previous fallback to vals[0]
+// silently collided two records whose first non-PK column happened to
+// coincide (e.g. structs without a tagged PK), making one HSET
+// overwrite the other under key `<table>:<first-col-value>`.
+fn pk_value_for_col(pk_col_name string, cols [string], vals [db::Value]) string =
+  if len(cols) == 0 || len(pk_col_name) == 0:
+    return ""
+  let i i64 = 0
+  for i < len(cols):
+    if str::strcmp(cols[i], pk_col_name) == 0:
+      return db_value_to_string(vals[i])
+    i = i + 1
+  return ""
+
+// glob_escape backslash-escapes the four pattern metacharacters Redis
+// honours in KEYS/SCAN patterns (*, ?, [, \).  Without escaping, a
+// table name containing one of these would silently match additional
+// keys via glob expansion.
+fn glob_escape(s string) string =
+  let out = ""
+  let i i64 = 0
+  for i < len(s):
+    let c = s[i]
+    if c == @'*' || c == @'?' || c == @'[' || c == @'\\':
+      out = out ++ "\\"
+    out = out ++ c
+    i = i + 1
+  return out
+
+// db_value_to_string defers to db::value_to_string (the stringifier
+// lives in stdlib/db so the variant match resolves against db::Value
+// without colliding with redis::Reply's own variants here).
+fn db_value_to_string(v db::Value) string = return db::value_to_string(v)
+
+// is_null_value defers to db::is_null for the same scope reason.
+fn is_null_value(v db::Value) bool = return db::is_null(v)
+
+// pairs_to_row projects an [(field, value)] pair list (HGETALL's
+// shape) onto the (row_values, null_flags) layout positioned by
+// `want_cols` order.  Missing fields land as ("", true).
+fn pairs_to_row(pairs [(string, string)], want_cols [string]) ([string], [bool]) =
+  let n = len(want_cols)
+  let vals  [string] = [""] * n
+  let nulls [bool]   = [true] * n
+  let i i64 = 0
+  for i < n:
+    let target = want_cols[i]
+    let j i64 = 0
+    for j < len(pairs):
+      let p = pairs[j]
+      if str::strcmp(p.a, target) == 0:
+        vals[i]  = p.b
+        nulls[i] = false
+        break
+      j = j + 1
+    i = i + 1
+  return (vals, nulls)
+
+// open opens a TCP connection to a Redis server at host:port.
+fn open(host string, port i32) Result[Connection, errors::Err] =
+  let p *void = c_redis_connect(host, port)
+  if p == nil:
+    return Err(ConnectFailed(host, port))
+  return Ok(Connection{cell: rc::Cell[*void].new(p, c_redis_close)})
+
+// Pub/sub
+
+// Message carries a single SUBSCRIBE delivery: the channel the
+// message arrived on and the published payload.
+struct Message =
+  channel string
+  payload string
+
+// Subscription owns a dedicated Redis connection in subscribe mode
+// plus a reader fiber that forwards incoming messages to a Tin
+// channel.  Always Closeable: close() stops the reader and frees
+// the connection.
+struct Subscription (io::Closeable) =
+  conn     Connection
+  messages sync::Channel[Message]
+
+  fn io::Closeable::close(this Subscription) =
+    // The reader_loop fiber is blocked inside hiredis's synchronous
+    // redisGetReply.  shutdown(2) the underlying socket so the
+    // in-flight read returns EOF/EPIPE -- hiredis surfaces that as
+    // an error, reader_loop's Err branch closes the messages channel
+    // and returns.  Then it's safe to redisFree the context via
+    // close().  Without the shutdown, redisFree races with the
+    // in-flight read and the worker thread stays pinned on a freed
+    // context.
+    c_redis_shutdown(this.conn.cell.payload())
+    this.conn.close()
+
+// reader_loop is the per-Subscription fiber that drains incoming
+// messages.  Each SUBSCRIBE delivery arrives as a 3-element List:
+// ["message", channel, payload] for plain channels.  We forward
+// only message-type pushes to the Tin channel; subscribe/unsubscribe
+// acknowledgements are swallowed.
+fn{#async} reader_loop(conn Connection, out sync::Channel[Message]) =
+  for true:
+    // Empty argv reads the next pending push reply on the
+    // connection.  hiredis's redisGetReply works on subscribed
+    // connections too, so the same buffer-drain path the typed
+    // commands use forwards SUBSCRIBE pushes as plain List replies.
+    match conn.command([]):
+      case Ok(reply):
+        match decode_push_message(reply):
+          case Some(m):
+            await out.send(m)
+          case None:
+            pass
+      case Err(_):
+        // Connection died (close() racing us, or a transport error).
+        // Close the outbound channel so the consumer's blocked recv()
+        // wakes up -- on a closed+drained sync::Channel recv() panics
+        // (channel.tin), and that panic propagates back through the
+        // consumer fiber's mailbox.  Better than hanging forever; the
+        // consumer should guard recv with is_closed_empty() when it
+        // wants graceful shutdown.
+        out.close()
+        return
+
+// decode_push_message turns a raw SUBSCRIBE push reply
+// (["message", channel, payload]) into a Message, or None for the
+// SUBSCRIBE / UNSUBSCRIBE acknowledgements we don't forward.
+fn decode_push_message(reply Reply) Option[Message] =
+  match reply:
+    case List(items):
+      if len(items) < 3: return Option[Message]::None
+      let kind = items[0].get[string]()
+      if kind != "message": return Option[Message]::None
+      let chan = items[1].get[string]()
+      let body = items[2].get[string]()
+      return Option[Message]::Some(Message{channel: chan, payload: body})
+    default:
+      return Option[Message]::None
+
+// subscribe opens a fresh dedicated connection, sends SUBSCRIBE for
+// each channel, and returns a Subscription whose .messages channel
+// receives every incoming push.
+fn subscribe(host string, port i32, channels [string]) Result[Subscription, errors::Err] =
+  let conn = try open(host, port)
+  let argv [string] = ["SUBSCRIBE"] ++ channels
+  let _    = try conn.command(argv)
+  let msgs = sync::Channel[Message].make(64)
+  spawn reader_loop(conn, msgs)
+  return Ok(Subscription{conn: conn, messages: msgs})
+
+// publish sends a message on the channel using the given Connection.
+// Returns the number of subscribers the server delivered to.
+fn publish(c Connection, channel string, msg string) Result[i64, errors::Err] =
+  return c.command(["PUBLISH", channel, msg]).map(Reply::get)
+
+fn if_zero_use_one(n i64) i64 =
+  if n > 0:
+    return n
+  return 1
+
+export {
+  Reply, RedisError,
+  Connection, Message, Subscription,
+  open, subscribe, publish,
+} as redis

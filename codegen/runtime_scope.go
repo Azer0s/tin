@@ -36,6 +36,23 @@ func (cg *CodeGen) emitScopeRelease(block *ir.Block, s *scope) {
 		// arguments). Load and release; no struct walk needed.
 		if entry.releaseRawPtr {
 			loadedPtr := block.NewLoad(ptrType.ElemType, entry.val)
+			// Typed release path: when coerceToTrait's value-source heap-
+			// copied a struct that owns RC-managed fields, the per-struct
+			// release helper must run instead of a plain `_tin_release`,
+			// or the fields leak (and the matching retain we added on the
+			// heap copy turns into a double-ref-and-never-release leak,
+			// which manifests as a use-after-free when another path frees
+			// the underlying refcounted block first).
+			if entry.releaseAsStructPtr != "" && entry.releaseAsStructPtrType != nil {
+				typedPtr := block.NewBitCast(loadedPtr,
+					irtypes.NewPointer(entry.releaseAsStructPtrType))
+				relFn := cg.ensureStructPtrReleaseFn(entry.releaseAsStructPtr,
+					entry.releaseAsStructPtrType)
+				block.NewCall(relFn, typedPtr)
+
+				return
+			}
+
 			block.NewCall(cg.ensureRelease(), loadedPtr)
 
 			return

@@ -614,11 +614,24 @@ func canonNameToTypeExpr(canon string) ast.TypeExpr {
 
 // canonToBracketed converts a canonical-form generic name to its bracketed
 // equivalent: `Box__i64` -> `Box[i64]`, `HashMap__string__i64` ->
-// `HashMap[string, i64]`.  Plain names (no `__`) and shapes already in
-// non-generic form (`*i64`, `[]i64`) pass through unchanged.
+// `HashMap[string, i64]`.  Pointer / array wrappers strip their prefix,
+// convert the element recursively, and re-wrap so a concrete like
+// `[Tuple__string__string]` lands as `[Tuple[string, string]]` -- the
+// shape parseTypeParamStr / the constraint checker need to recognize the
+// inner generic as a `Tuple[string, string]` rather than a raw SimpleType
+// whose name happens to be `Tuple__string__string`.  Plain names with no
+// `__` pass through.
 func canonToBracketed(canon string) string {
-	if strings.HasPrefix(canon, "*") || strings.HasPrefix(canon, "[") {
-		return canon
+	if strings.HasPrefix(canon, "*") {
+		return "*" + canonToBracketed(canon[1:])
+	}
+
+	if strings.HasPrefix(canon, "[]") {
+		return "[]" + canonToBracketed(canon[2:])
+	}
+
+	if strings.HasPrefix(canon, "[") && strings.HasSuffix(canon, "]") {
+		return "[" + canonToBracketed(canon[1:len(canon)-1]) + "]"
 	}
 
 	idx := strings.Index(canon, "__")

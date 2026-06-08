@@ -56,3 +56,29 @@ test "int->ptr cast over freshly-malloc'd buffer stores cleanly" =
     j = j + 1
 
   mem::free(arr as *void)
+
+// Regression for the [volatile *char] element-array release path.
+// Storing borrowed raw pointers (e.g. `c_str_data(args[i])` style)
+// into a `[volatile *char]` must not retain on assignment, AND the
+// outer array's scope-exit release must drop only the buffer's rc
+// without walking elements through `_tin_release`.  Walking would
+// decrement the rc of whatever owning string each slot aliases into,
+// producing a use-after-free at the original owner's next access.
+fn fill_argv(args [string]) i64 =
+  let n = len(args)
+  let argv [volatile *char] = [nil as volatile *char] * n
+  do{#unsafe}:
+    let i i64 = 0
+    for i < n:
+      argv[i] = addr(args[i][0])
+      i = i + 1
+  return n
+
+test "borrowed *char into [volatile *char] preserves owner string" =
+  let id i64 = 42
+  let k = "vol-elem:{id}"
+  let _ = fill_argv(["A", k, "B"])
+  // If element-walk had decremented k's rc, the bytes would be freed
+  // and overwritten by the allocator's free-list metadata.
+  assert::equals(len(k), 11)
+  assert::equals(k, "vol-elem:42")

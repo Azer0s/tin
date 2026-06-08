@@ -499,7 +499,16 @@ func buildMacroSource(m *ast.MacroDecl, args []ast.Node, allMacros map[string]*a
 	var sb strings.Builder
 
 	// Emit use declarations so the macro body can call stdlib functions.
+	// Skip `file:...` dedup keys: those are transitively loaded runtime
+	// internals (awaitable.tin, mutex.tin, etc.) recorded with their
+	// absolute path as the key, and `use file:/abs/path` is not valid
+	// Tin syntax.  The macro body that needs them will pull them in
+	// transitively through the named-package imports we DO emit.
 	for pkg := range importedPkgs {
+		if strings.HasPrefix(pkg, "file:") {
+			continue
+		}
+
 		sb.WriteString("use " + pkg + "\n")
 	}
 

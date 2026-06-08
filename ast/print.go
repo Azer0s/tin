@@ -27,7 +27,15 @@ func printNode(n Node, depth int) string {
 	case *FloatLit:
 		return fmt.Sprintf("%g", v.Value)
 	case *StringLit:
-		return fmt.Sprintf("%q", v.Value)
+		// %q handles standard string escapes; brace escapes (\{, \})
+		// are Tin-specific so the round-trip from PrintExpr back through
+		// parseStringInterp doesn't accidentally fire interpolation on
+		// literal braces that came in via a raw-suffix string.
+		q := fmt.Sprintf("%q", v.Value)
+		q = strings.ReplaceAll(q, "{", "\\{")
+		q = strings.ReplaceAll(q, "}", "\\}")
+
+		return q
 	case *BacktickLit:
 		return "`" + v.Content + "`"
 	case *BoolLit:

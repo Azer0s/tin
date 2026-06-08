@@ -220,6 +220,16 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if monoOK {
 		thisArg := errBlock.NewLoad(srcType, tempStorage)
 		rewrapped := errBlock.NewCall(monoFn, thisArg)
+		// No extra retain here: the wildcard-mono wrapper's origFn
+		// does data_retain_val(this) at its entry, and rewrapTryable
+		// extracts + wrapDataVariant-wraps the payload into the fresh
+		// target type without releasing.  The composed call returns
+		// a value with rc bumped by 1 on the payload, and the caller-
+		// side emitTempRelease drops the temp's bitcopy back to the
+		// entry rc.  Adding a second retain here leaks one ref per
+		// propagation -- see iface_arc_regressions test 3 (try
+		// propagating an Err iface through wildcard-mono cross-T
+		// rewrap).
 		emitPropagatingReturn(errBlock, rewrapped)
 	} else {
 		_, errVal, err := callMethod(errBlock, "err_value")
@@ -240,7 +250,16 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 				"`try`: cannot propagate %s through a function returning %s. The impl of tryable on %s did not declare a wildcard slot in its trait bound, so the success type cannot be re-bound at this call site. Add the wildcard (e.g. change the trait bound to `tryable[V, %s[_, ...]]`) or convert the value explicitly with .map / .map_err.",
 				cg.fmtArgType(errVal.Type()), cg.fmtArgType(monoTarget), pretty, pretty)
 		}
-
+		// No extra retain here: err_value's IR does a
+		// data_retain_val(this) at entry and returns the value
+		// without a balancing release on the Err return path. That
+		// retain stays "above" the entry rc; the caller-side
+		// emitTempRelease drops the temp's bitcopy back to 0,
+		// leaving the propagated Err at rc=1 for the caller.  Adding
+		// a second retain here leaks one ref per propagation -- see
+		// iface_arc_regressions tests 6+7 (try propagating an Err
+		// iface fat-ptr / string-bearing struct payload through the
+		// direct err_value path).
 		emitPropagatingReturn(errBlock, errVal)
 	}
 
@@ -249,12 +268,61 @@ func (cg *CodeGen) genTryExpr(block *ir.Block, e *ast.TryExpr) (value.Value, err
 	if err != nil {
 		return nil, err
 	}
+	// ok_value's generated IR is shape-asymmetric.  Retain here only
+	// for the payload shapes whose match-bind path leaves the extracted
+	// value at rc==0 above the source (string, iface fat-ptr, any, fn
+	// closure).  Without the bump, emitTempRelease below would free the
+	// payload's buffer while the caller still aliases it (the original
+	// C11 UAF).
+	//
+	// Two shapes already self-balance and MUST be skipped:
+	//   - fat-array: arm runs retain_ptr on the buffer (data_retain_val
+	//     + extract retain_ptr - local data_release_val = net +1).
+	//     Doubling up here leaks one buffer reference per call.
+	//   - ADT: arm runs data_retain_val on the extracted variant value,
+	//     deep-retaining every inner pointer.  Doubling up used to mask
+	//     a latent under-retain in array-literal codegen (`[v]` for ADT
+	//     v didn't retain v's variant payload, see
+	//     exprs_arraylit.go's storeField).  Both fixed in tandem: the
+	//     deep retain transfers through `let v = try ...; items ++= [v]`
+	//     cleanly with the array-lit fix.
+	if okVal != nil && cg.payloadNeedsRetainOnExtract(okVal.Type()) {
+		if !isFatArrayPtr(okVal.Type()) && !cg.isDataType(okVal.Type()) {
+			cg.emitRetain(okBlock, okVal)
+		}
+	}
 
 	emitTempRelease(okBlock)
 
 	cg.curBlock = okBlock
 
 	return okVal, nil
+}
+
+// payloadNeedsRetainOnExtract reports whether values of type t have
+// internal RC-tracked content (strings, fat arrays, ADT variants holding
+// such) that would be co-released by a sibling release of the source
+// container.  Used by `try` to decide whether to retain the extracted Ok
+// value before the temp container's release fires.  Conservative: returns
+// true for ADT types and for the obvious fat shapes; primitives skip.
+func (cg *CodeGen) payloadNeedsRetainOnExtract(t irtypes.Type) bool {
+	if t == nil {
+		return false
+	}
+
+	if cg.isDataType(t) {
+		return true
+	}
+
+	if isStringType(t) || isFatArrayPtr(t) || isAnyType(t) || isFatFnPtr(t) {
+		return true
+	}
+
+	if st, ok := t.(*irtypes.StructType); ok && isTraitFatPtrShape(st) {
+		return true
+	}
+
+	return false
 }
 
 // blockOwner returns the function a block belongs to.

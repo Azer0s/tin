@@ -1,0 +1,483 @@
+//!+sqlite.c -- -lsqlite3
+// libs/sqlite - blocking SQLite bindings.
+//
+// All operations run synchronously on the caller's thread.  A per-
+// connection mutex serializes the sqlite3 handle + prepared-stmt
+// cache so a Connection is safe to share across Tin fibers.
+//
+// Two API tiers, both blocking, both share the same per-conn
+// prepared-stmt cache:
+//
+// High level:
+//   let db = sqlite::open("test.db").unwrap()
+//   db.exec("CREATE TABLE u (id INTEGER, name TEXT)")
+//   db.exec_is("INSERT INTO u VALUES (?, ?)", 1, "alice")
+//   let rows = db.query("SELECT id, name FROM u").unwrap()
+//   for let i i64 = 0; i < rows.count(); i = i + 1:
+//     echo(rows.get_i64(i, 0), rows.get_string(i, 1))
+//
+// Low level (when you want maximum throughput on a hot loop):
+//   let stmt = db.prepare("INSERT INTO u VALUES (?, ?)").unwrap()
+//   for ...:
+//     stmt.exec_is(i, "row")
+//   stmt.close()
+
+use rc
+use db
+use { RowSet, Conn, Value } from db
+use errors
+use result
+use { Result } from result
+
+// ---------------------------------------------------------------------------
+// SqlValue: tagged parameter value.
+// ---------------------------------------------------------------------------
+
+data SqlValue (implicit[i64], implicit[f64], implicit[string]) =
+  Int(v i64)
+  Real(v f64)
+  Text(v string)
+  Null
+
+  // implicit lets call sites pass bare primitives in the params
+  // array: `db.exec("...", [id, name, score])` instead of
+  // `[Int(id), Text(name), Real(score)]`.
+  static fn ::implicit(v i64) SqlValue    = return Int(v)
+  static fn ::implicit(v f64) SqlValue    = return Real(v)
+  static fn ::implicit(s string) SqlValue = return Text(s)
+
+// SqlQuery bundles a parameterised SQL statement and its bound
+// values.  Produced by the `_sql` suffix macro and consumed by
+// Connection.run / Connection.fetch.
+struct SqlQuery =
+  sql    string
+  params [SqlValue]
+
+// `_sql_query` rewrites `"... {ident} ..."_sql_query` at compile time
+// into `SqlQuery{sql: "... ? ...", params: [ident, ...]}`.  Each
+// `{name}` becomes a `?` placeholder; the named identifier flows in
+// as a raw value, which the SqlValue implicit-coerce wraps element-
+// wise when the array lands in the SqlQuery.params field.
+//
+// Brace escapes work the standard way: `\{` and `\}` survive as
+// literal text and are NOT treated as placeholders.
+//
+// (Long name on purpose: collides less with the `sql` package
+// alias and reads as "produces a SqlQuery" at the call site.)
+macro{#suffix@string #no_excl #no_parens} sql_query(s) =
+  let rewritten string = ""
+  let idents    string = ""
+  let i i64 = 0
+  let n i64 = 0
+  for let _k i64 = 0; i < len(s); _k = _k + 1:
+    if s[i..i+1] == "{":
+      let j i64 = i + 1
+      for let _m i64 = 0; s[j..j+1] != "}"; _m = _m + 1:
+        j = j + 1
+      if n > 0:
+        idents = idents ++ ", "
+      idents = idents ++ s[i+1..j]
+      rewritten = rewritten ++ "?"
+      n = n + 1
+      i = j + 1
+    else:
+      rewritten = rewritten ++ s[i..i+1]
+      i = i + 1
+  let sql_lit string = "\"" ++ rewritten ++ "\""
+  return `sqlite::SqlQuery{sql: {sql_lit}, params: [{idents}]}`
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+data SqliteError(errors::Err, print) =
+  OpenFailed(path string)
+  ExecFailed(code i32, msg string)
+
+  fn errors::Err::message(this SqliteError) string =
+    match this:
+      case OpenFailed(p):     return "sqlite: open failed for {p}"
+      case ExecFailed(c, m):  return "sqlite: exec failed (code {c}): {m}"
+
+  fn ::print(this SqliteError) string = return this.message()
+
+// ---------------------------------------------------------------------------
+// C externs
+// ---------------------------------------------------------------------------
+
+fn c_sqlite_open(path string) *void = extern("_tin_sqlite_open")
+fn c_sqlite_close(conn *void)       = extern("_tin_sqlite_close")
+
+// Generic exec (array of params)
+fn c_sqlite_exec(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [volatile *char], n_params i64) i64 = extern("_tin_sqlite_exec")
+
+// Shape-specialized fast paths
+fn c_exec_fast_0(conn *void, sql string) i64                                   = extern("_tin_sqlite_exec_fast_0")
+fn c_exec_fast_i(conn *void, sql string, a i64) i64                            = extern("_tin_sqlite_exec_fast_i")
+fn c_exec_fast_s(conn *void, sql string, a *char, a_len i64) i64               = extern("_tin_sqlite_exec_fast_s")
+fn c_exec_fast_ii(conn *void, sql string, a i64, b i64) i64                    = extern("_tin_sqlite_exec_fast_ii")
+fn c_exec_fast_is(conn *void, sql string, a i64, b *char, b_len i64) i64       = extern("_tin_sqlite_exec_fast_is")
+fn c_exec_fast_si(conn *void, sql string, a *char, a_len i64, b i64) i64       = extern("_tin_sqlite_exec_fast_si")
+
+// Query: materializes the whole result set.  Returns NULL on error
+// with *out_err set to -(sqlite_error_code).
+fn c_sqlite_query(conn *void, sql string, tags [i64], ints [i64], reals [f64], texts [volatile *char], n_params i64, out_err *i64) *void = extern("_tin_sqlite_query")
+
+// Rows accessors
+fn c_rows_free(p *void)                                = extern("_tin_sqlite_rows_free")
+fn c_rows_count(p *void)              i64              = extern("_tin_sqlite_rows_count")
+fn c_rows_cols(p *void)               i64              = extern("_tin_sqlite_rows_cols")
+fn c_rows_get_i64(p *void, r i64, c i64) i64           = extern("_tin_sqlite_rows_get_i64")
+fn c_rows_get_f64(p *void, r i64, c i64) f64           = extern("_tin_sqlite_rows_get_f64")
+fn c_rows_get_text(p *void, r i64, c i64, out *string) = extern("_tin_sqlite_rows_get_text")
+fn c_rows_is_null(p *void, r i64, c i64) i32           = extern("_tin_sqlite_rows_is_null")
+
+// Stmt (low-level)
+fn c_stmt_prepare(conn *void, sql string, out_rc *i32) *void  = extern("_tin_sqlite_stmt_prepare")
+fn c_stmt_finalize(p *void)                                   = extern("_tin_sqlite_stmt_finalize")
+fn c_stmt_bind_int(p *void, idx i32, v i64)              i32  = extern("_tin_sqlite_stmt_bind_int")
+fn c_stmt_bind_real(p *void, idx i32, v f64)             i32  = extern("_tin_sqlite_stmt_bind_real")
+fn c_stmt_bind_text(p *void, idx i32, s *char, n i64)    i32  = extern("_tin_sqlite_stmt_bind_text")
+fn c_stmt_bind_null(p *void, idx i32)                    i32  = extern("_tin_sqlite_stmt_bind_null")
+fn c_stmt_step(p *void)                                  i64  = extern("_tin_sqlite_stmt_step")
+fn c_stmt_reset(p *void)                                      = extern("_tin_sqlite_stmt_reset")
+fn c_stmt_exec_i(p *void, a i64)                              i64 = extern("_tin_sqlite_stmt_exec_i")
+fn c_stmt_exec_s(p *void, a *char, a_len i64)                 i64 = extern("_tin_sqlite_stmt_exec_s")
+fn c_stmt_exec_ii(p *void, a i64, b i64)                      i64 = extern("_tin_sqlite_stmt_exec_ii")
+fn c_stmt_exec_is(p *void, a i64, b *char, b_len i64)         i64 = extern("_tin_sqlite_stmt_exec_is")
+fn c_stmt_exec_si(p *void, a *char, a_len i64, b i64)         i64 = extern("_tin_sqlite_stmt_exec_si")
+fn c_stmt_exec_iis(p *void, a i64, b i64, c *char, c_len i64) i64 = extern("_tin_sqlite_stmt_exec_iis")
+
+fn c_str_data(s string) volatile *char = extern("_tin_string_data")
+
+// ---------------------------------------------------------------------------
+// Rows: materialized SELECT result, packed in a C-side buffer.
+// ---------------------------------------------------------------------------
+
+struct Rows (RowSet) =
+  cell *rc::Cell[*void]
+
+  fn RowSet::count(this Rows) i64 = return c_rows_count(this.cell.payload())
+  fn RowSet::cols(this Rows)  i64 = return c_rows_cols(this.cell.payload())
+
+  fn RowSet::get_i64(this Rows, row i64, col i64) i64 =
+    return c_rows_get_i64(this.cell.payload(), row, col)
+
+  fn RowSet::get_f64(this Rows, row i64, col i64) f64 =
+    return c_rows_get_f64(this.cell.payload(), row, col)
+
+  fn RowSet::get_string(this Rows, row i64, col i64) string =
+    let out string = ""
+    c_rows_get_text(this.cell.payload(), row, col, &out)
+    return out
+
+  fn RowSet::is_null(this Rows, row i64, col i64) bool =
+    return c_rows_is_null(this.cell.payload(), row, col) != 0
+
+// ---------------------------------------------------------------------------
+// Stmt: low-level prepared statement.
+// ---------------------------------------------------------------------------
+//
+// User-owned sqlite3_stmt + parent conn pointer.  Use for hot loops
+// where db.exec_<shape>'s per-call cache lookup shows up.
+//
+//   let stmt = db.prepare("INSERT INTO t VALUES (?, ?)").unwrap()
+//   for let i i64 = 0; i < n; i = i + 1:
+//     stmt.exec_is(i, "row")
+//   stmt.close()
+
+struct Stmt (io::Closeable) =
+  cell *rc::Cell[*void]   // owns the C stmt_handle_t*; dtor finalizes
+
+  fn bind_int(this Stmt, idx i64, v i64) i32 =
+    return c_stmt_bind_int(this.cell.payload(), idx as i32, v)
+
+  fn bind_real(this Stmt, idx i64, v f64) i32 =
+    return c_stmt_bind_real(this.cell.payload(), idx as i32, v)
+
+  fn bind_text(this Stmt, idx i64, v string) i32 =
+    return c_stmt_bind_text(this.cell.payload(), idx as i32, c_str_data(v), len(v))
+
+  fn bind_null(this Stmt, idx i64) i32 =
+    return c_stmt_bind_null(this.cell.payload(), idx as i32)
+
+  // step returns changes() on SQLITE_DONE, -1 on SQLITE_ROW, or
+  // -(error_code).
+  fn step(this Stmt) i64 = return c_stmt_step(this.cell.payload())
+
+  fn reset(this Stmt) = c_stmt_reset(this.cell.payload())
+
+  // exec_<shape>: bind every column + step + reset under one mutex
+  // acquire and one FFI call boundary.
+  fn exec_i(this Stmt, a i64) i64 =
+    return c_stmt_exec_i(this.cell.payload(), a)
+
+  fn exec_s(this Stmt, a string) i64 =
+    return c_stmt_exec_s(this.cell.payload(), c_str_data(a), len(a))
+
+  fn exec_ii(this Stmt, a i64, b i64) i64 =
+    return c_stmt_exec_ii(this.cell.payload(), a, b)
+
+  fn exec_is(this Stmt, a i64, b string) i64 =
+    return c_stmt_exec_is(this.cell.payload(), a, c_str_data(b), len(b))
+
+  fn exec_si(this Stmt, a string, b i64) i64 =
+    return c_stmt_exec_si(this.cell.payload(), c_str_data(a), len(a), b)
+
+  fn exec_iis(this Stmt, a i64, b i64, c string) i64 =
+    return c_stmt_exec_iis(this.cell.payload(), a, b, c_str_data(c), len(c))
+
+  fn io::Closeable::close(this Stmt) =
+    c_stmt_finalize(this.cell.payload())
+    this.cell.set(nil)
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+struct Connection (io::Closeable, Conn) =
+  cell *rc::Cell[*void]
+
+  // exec runs a statement that returns no rows.  Returns rowcount
+  // from sqlite3_changes(), or -(error_code) on failure.  Accepts
+  // any param shape; for hot loops the shape-specialized exec_<x>
+  // variants below skip the per-call array allocation.
+  fn exec(this Connection, sql string, params [SqlValue]) i64 =
+    let n i64 = len(params)
+    let conn *void = this.cell.payload()
+    if n == 0:
+      return c_exec_fast_0(conn, sql)
+
+    // Generic path: marshal into four parallel arrays for C.
+    let slots i64 = if_zero_use_one(n)
+    let tags  [i64]   = [0] * slots
+    let ints  [i64]   = [0] * slots
+    let reals [f64]   = [0.0] * slots
+    let text_keep [string] = [""] * slots
+    let text_ptrs [volatile *char] = [nil as volatile *char] * slots
+    for let i i64 = 0; i < n; i = i + 1:
+      match params[i]:
+        case Int(v):
+          tags[i] = 1
+          ints[i] = v
+        case Real(v):
+          tags[i]  = 2
+          reals[i] = v
+        case Text(s):
+          tags[i]      = 3
+          text_keep[i] = s
+          text_ptrs[i] = c_str_data(s)
+        case Null:
+          tags[i] = 5
+    return c_sqlite_exec(conn, sql, tags, ints, reals, text_ptrs, n)
+
+  // Shape-specialized exec: take raw primitives, zero SqlValue
+  // boxing, zero array allocation, one FFI call.  Use for hot
+  // INSERT loops with 1-2 columns.
+  fn exec_i(this Connection, sql string, a i64) i64 =
+    return c_exec_fast_i(this.cell.payload(), sql, a)
+
+  fn exec_s(this Connection, sql string, a string) i64 =
+    return c_exec_fast_s(this.cell.payload(), sql, c_str_data(a), len(a))
+
+  fn exec_ii(this Connection, sql string, a i64, b i64) i64 =
+    return c_exec_fast_ii(this.cell.payload(), sql, a, b)
+
+  fn exec_is(this Connection, sql string, a i64, b string) i64 =
+    return c_exec_fast_is(this.cell.payload(), sql, a, c_str_data(b), len(b))
+
+  fn exec_si(this Connection, sql string, a string, b i64) i64 =
+    return c_exec_fast_si(this.cell.payload(), sql, c_str_data(a), len(a), b)
+
+  // query runs a SELECT-shaped statement and materializes every row
+  // into a Rows handle.  Returns Err on prepare / step / bind error.
+  fn query(this Connection, sql string, params [SqlValue]) Result[Rows, errors::Err] =
+    let n i64 = len(params)
+    let conn *void = this.cell.payload()
+    let slots i64 = if_zero_use_one(n)
+    let tags  [i64]   = [0] * slots
+    let ints  [i64]   = [0] * slots
+    let reals [f64]   = [0.0] * slots
+    let text_keep [string] = [""] * slots
+    let text_ptrs [volatile *char] = [nil as volatile *char] * slots
+    for let i i64 = 0; i < n; i = i + 1:
+      match params[i]:
+        case Int(v):
+          tags[i] = 1
+          ints[i] = v
+        case Real(v):
+          tags[i]  = 2
+          reals[i] = v
+        case Text(s):
+          tags[i]      = 3
+          text_keep[i] = s
+          text_ptrs[i] = c_str_data(s)
+        case Null:
+          tags[i] = 5
+    let err i64 = 0
+    let p *void = c_sqlite_query(conn, sql, tags, ints, reals, text_ptrs, n, &err)
+    if p == nil:
+      return Err(ExecFailed(0 - (err as i32), "query failed"))
+    return Ok(Rows{cell: rc::Cell[*void].new(p, c_rows_free)})
+
+  // prepare compiles a SQL statement into a reusable Stmt.
+  fn prepare(this Connection, sql string) Result[Stmt, errors::Err] =
+    let rc i32 = 0
+    let p *void = c_stmt_prepare(this.cell.payload(), sql, &rc)
+    if p == nil:
+      return Err(ExecFailed(rc, "prepare failed"))
+    return Ok(Stmt{cell: rc::Cell[*void].new(p, c_stmt_finalize)})
+
+  // run is the SqlQuery-shaped twin of exec: takes the bundle the
+  // `_sql` macro produces and threads sql + params through.
+  fn run(this Connection, q SqlQuery) i64 =
+    return this.exec(q.sql, q.params)
+
+  // fetch is the SqlQuery-shaped twin of query.
+  fn fetch(this Connection, q SqlQuery) Result[Rows, errors::Err] =
+    return this.query(q.sql, q.params)
+
+  fn io::Closeable::close(this Connection) =
+    c_sqlite_close(this.cell.payload())
+    this.cell.set(nil)
+
+  // Conn impl: translate [Value] -> [SqlValue], forward.
+  // Value variants are IntVal/RealVal/TextVal/NullVal (prefixed so
+  // they don't collide with our local SqlValue.Int/Real/Text/Null).
+  fn Conn::exec(this Connection, sql string, params [Value]) i64 =
+    return this.exec(sql, to_sql_values(params))
+
+  fn Conn::query(this Connection, sql string, params [Value]) Result[RowSet, errors::Err] =
+    let r = try this.query(sql, to_sql_values(params))
+    return Ok(r as RowSet)
+
+  // CRUD primitives: build the SQL string from the structural pieces
+  // and dispatch through the existing exec / query paths.  KV drivers
+  // (libs/redis) implement these in their native vocabulary instead
+  // of through any SQL parser.
+
+  fn Conn::db_insert_row(this Connection, table string, pk_col string, cols [string], vals [Value]) i64 =
+    if len(cols) == 0:
+      return 0
+    let col_list = join_cols(cols)
+    let placeholders = build_placeholders(len(cols))
+    let sql = "INSERT INTO " ++ quote_ident(table) ++ " (" ++ col_list ++ ") VALUES (" ++ placeholders ++ ")"
+    return this.exec(sql, to_sql_values(vals))
+
+  fn Conn::db_find_row(this Connection, table string, pk_col string, pk_val Value, want_cols [string]) Result[RowSet, errors::Err] =
+    if len(want_cols) == 0:
+      return Err(ExecFailed(0 as i32, "db: no columns to select"))
+    let col_list = join_cols(want_cols)
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ quote_ident(table) ++ " WHERE " ++ quote_ident(pk_col) ++ " = ? LIMIT 1"
+    let r = try this.query(sql, to_sql_values([pk_val]))
+    return Ok(r as RowSet)
+
+  fn Conn::db_all_rows(this Connection, table string, pk_col string, want_cols [string]) Result[RowSet, errors::Err] =
+    if len(want_cols) == 0:
+      return Err(ExecFailed(0 as i32, "db: no columns to select"))
+    let col_list = join_cols(want_cols)
+    let sql = "SELECT " ++ col_list ++ " FROM " ++ quote_ident(table)
+    let r = try this.query(sql, to_sql_values([]))
+    return Ok(r as RowSet)
+
+  fn Conn::db_update_row(this Connection, table string, pk_col string, pk_val Value, cols [string], vals [Value]) i64 =
+    if len(cols) == 0:
+      return 0
+    let sets = ""
+    let i i64 = 0
+    for i < len(cols):
+      if i > 0:
+        sets = sets ++ ", "
+      sets = sets ++ quote_ident(cols[i]) ++ " = ?"
+      i = i + 1
+    let bind_vals [Value] = vals ++ [pk_val]
+    let sql = "UPDATE " ++ quote_ident(table) ++ " SET " ++ sets ++ " WHERE " ++ quote_ident(pk_col) ++ " = ?"
+    return this.exec(sql, to_sql_values(bind_vals))
+
+  fn Conn::db_delete_row(this Connection, table string, pk_col string, pk_val Value) i64 =
+    let sql = "DELETE FROM " ++ quote_ident(table) ++ " WHERE " ++ quote_ident(pk_col) ++ " = ?"
+    return this.exec(sql, to_sql_values([pk_val]))
+
+// open opens (or creates) the database at path.
+fn open(path string) Result[Connection, errors::Err] =
+  let p *void = c_sqlite_open(path)
+  if p == nil:
+    return Err(OpenFailed(path))
+  return Ok(Connection{cell: rc::Cell[*void].new(p, c_sqlite_close)})
+
+fn if_zero_use_one(n i64) i64 =
+  if n > 0:
+    return n
+  return 1
+
+// quote_ident wraps a SQL identifier in double quotes so reserved
+// words (order, group, select, ...) and unusual characters survive
+// SQL parsing.  SQLite uses "..." for delimited identifiers; any
+// embedded " is escaped by doubling.  Without this, a struct named
+// `order` (or a column tagged `@"db:select"`) generated SQL that
+// sqlite rejected with a generic "near keyword" error and the
+// driver silently returned -1.
+fn quote_ident(s string) string =
+  let out = "\""
+  let i i64 = 0
+  for i < len(s):
+    let c = s[i]
+    // 34 == ASCII double-quote.  Inline @' " ' confuses Tin's lexer
+    // (the closing single quote and the embedded double quote
+    // collide in the literal scanner).
+    if c == 34:
+      out = out ++ "\"\""
+    else:
+      out = out ++ c
+    i = i + 1
+  return out ++ "\""
+
+// join_cols concatenates a list of column names (each double-quoted
+// per quote_ident) with ", " separators.  Mirrors the inline build
+// that used to live inside insert_into / build_select_cols /
+// update_in in stdlib/db.tin, but with identifier quoting added so
+// reserved words round-trip cleanly.
+fn join_cols(cols [string]) string =
+  let out = ""
+  let i i64 = 0
+  for i < len(cols):
+    if i > 0:
+      out = out ++ ", "
+    out = out ++ quote_ident(cols[i])
+    i = i + 1
+  return out
+
+// build_placeholders returns "?, ?, ?" for n placeholders.
+fn build_placeholders(n i64) string =
+  let out = ""
+  let i i64 = 0
+  for i < n:
+    if i > 0:
+      out = out ++ ", "
+    out = out ++ "?"
+    i = i + 1
+  return out
+
+// to_sql_values translates a [Value] argument array into the
+// driver-local [SqlValue].  Match arms use Value's prefixed
+// variants (IntVal etc) which avoids the bare-name collision with
+// our local SqlValue.Int/Real/Text/Null.
+fn to_sql_values(params [Value]) [SqlValue] =
+  let n i64 = len(params)
+  let sv [SqlValue] = []
+  let i i64 = 0
+  for i < n:
+    match params[i]:
+      case IntVal(v):  sv ++= [Int(v) as SqlValue]
+      case RealVal(v): sv ++= [Real(v) as SqlValue]
+      case TextVal(s): sv ++= [Text(s) as SqlValue]
+      case NullVal:    sv ++= [Null as SqlValue]
+    i = i + 1
+  return sv
+
+export {
+  Connection, SqliteError,
+  SqlValue, SqlQuery, Rows, Stmt,
+  sql_query,
+  open,
+} as sqlite

@@ -120,6 +120,17 @@ type scopeEntry struct {
 	// the scope's await.
 	releaseRawPtr bool
 
+	// releaseAsStructPtr names the Tin struct whose per-struct release
+	// helper (ensureStructPtrReleaseFn) should run on scope exit instead
+	// of the raw `_tin_release` chosen by `releaseRawPtr`. Set by
+	// `coerceToTrait`'s value-source path so the heap-allocated struct
+	// snapshot drops refs on its RC-managed fields (e.g. nested *rc::Cell)
+	// before the iface block itself is freed. Empty string means "fall
+	// back to raw release" (the previous behavior, kept for cases where
+	// the source struct genuinely has no owning fields).
+	releaseAsStructPtr     string
+	releaseAsStructPtrType *irtypes.StructType
+
 	// isEarlyHeap is true when this `let` binding's storage was allocated
 	// via _tin_rc_alloc instead of stack alloca because escape analysis
 	// determined that the variable's address would outlive the function
